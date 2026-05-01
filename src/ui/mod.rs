@@ -46,6 +46,11 @@ pub enum Transition {
     CreateOnlineRoom {
         nickname: String,
     },
+    /// 大厅加入房间 → 进 OnlineRoom (远程, 走 ws).
+    JoinOnlineRoom {
+        nickname: String,
+        addr: String,
+    },
     /// 房间内 server 推送 GameStateView/InGame, 切到 OnlineGame.
     EnterOnlineGame,
 }
@@ -67,16 +72,22 @@ pub struct App {
     pub last_seed_choice: SeedChoice,
     /// 本地 UI 偏好 (主题等), 不绑房间.
     pub local_prefs: LocalPrefs,
+    /// tokio runtime handle, 用于 sync UI 线程调用 async net 操作.
+    pub runtime: tokio::runtime::Handle,
+    /// 房主 mode: 当前活跃 ws server 的端口 (用于显示给加入者).
+    pub host_port: Option<u16>,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(runtime: tokio::runtime::Handle) -> Self {
         Self {
             screen: Screen::MainMenu(MainMenuState::new()),
             running: true,
             last_config: GameConfig::default(),
             last_seed_choice: SeedChoice::Random,
             local_prefs: LocalPrefs::default(),
+            runtime,
+            host_port: None,
         }
     }
 
@@ -218,58 +229,96 @@ impl App {
             Transition::CreateOnlineRoom { nickname } => {
                 self.create_online_room(nickname);
             }
+            Transition::JoinOnlineRoom { nickname, addr } => {
+                self.join_online_room(nickname, addr);
+            }
             Transition::EnterOnlineGame => {
                 self.transition_room_to_game();
             }
         }
     }
 
-    /// 创建本地 RoomActor (房主), 自己 join 进去, 切到 OnlineRoom 屏.
+    /// 创建本地 RoomActor (房主), 同时启动 ws server 让远程玩家可加入,
+    /// 自己用 LocalSession 直连 RoomActor.
     fn create_online_room(&mut self, nickname: String) {
-        use crate::net::room::{RoomCmd, spawn_room};
-        use tokio::sync::{mpsc, oneshot};
+        use crate::net::room::spawn_room;
+        use crate::net::server::spawn_ws_server;
+        use crate::net::session::spawn_local_session;
 
         let handle = spawn_room(nickname.clone(), self.last_config.clone());
-        // 自己 join: 创建一个 mpsc channel 作为 server → us 的 inbox
-        let (s2c_tx, inbox) = mpsc::unbounded_channel();
-        let (ack_tx, _ack_rx) = oneshot::channel();
-        let _ = handle.tx.send(RoomCmd::Join {
-            nickname: nickname.clone(),
-            reconnect_token: None,
-            sender: s2c_tx,
-            ack: ack_tx,
-        });
-        // ack 在 sync 上下文不能 await — 我们简化: 假设第一个 join 的 player_id = 1
-        // (RoomActor 实际是这样分配的). 真实 token / 详细 RoomView 通过 inbox 收
-        // ServerMsg::Welcome 时更新.
-        let my_player_id: u32 = 1;
-        let room_view = crate::net::protocol::RoomView {
-            room_id: "...".into(),
-            host_id: my_player_id,
+
+        // 启动 ws server 监听 0.0.0.0:0 (OS 选端口).
+        let port_result = self
+            .runtime
+            .block_on(async { spawn_ws_server(handle.clone(), 0).await });
+        let port = match port_result {
+            Ok(addr) => Some(addr.port()),
+            Err(e) => {
+                tracing::error!("ws server 启动失败: {e}");
+                None
+            }
+        };
+        self.host_port = port;
+
+        // 房主 join (LocalSession).
+        let join_result = self
+            .runtime
+            .block_on(async { spawn_local_session(handle.clone(), nickname.clone()).await });
+        let session = match join_result {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("房主 join 失败: {e}");
+                self.screen =
+                    Screen::OnlineLobby(OnlineLobbyState::with_message(format!("创建失败: {e}")));
+                return;
+            }
+        };
+
+        let placeholder_view = crate::net::protocol::RoomView {
+            room_id: match port {
+                Some(p) => format!("LAN @ :{p}"),
+                None => "LAN".into(),
+            },
+            host_id: session.player_id,
             config: self.last_config.clone(),
             players: vec![],
             state: crate::net::protocol::RoomLifecycle::Lobby,
         };
-        self.screen = Screen::OnlineRoom(Box::new(OnlineRoomState {
-            handle,
-            inbox,
-            room_view,
-            my_player_id,
-            my_token: uuid::Uuid::nil(),
-            message: String::new(),
-        }));
+        self.screen = Screen::OnlineRoom(Box::new(OnlineRoomState::new(session, placeholder_view)));
     }
 
-    /// OnlineRoom → OnlineGame: 移交 handle + inbox.
+    /// 远程加入房间 (走 ws).
+    fn join_online_room(&mut self, nickname: String, addr: String) {
+        use crate::net::server::join_remote;
+        let r = self
+            .runtime
+            .block_on(async { join_remote(&addr, nickname).await });
+        match r {
+            Ok(session) => {
+                let placeholder_view = crate::net::protocol::RoomView {
+                    room_id: format!("远程 @ {addr}"),
+                    host_id: 0,
+                    config: GameConfig::default(),
+                    players: vec![],
+                    state: crate::net::protocol::RoomLifecycle::Lobby,
+                };
+                self.screen =
+                    Screen::OnlineRoom(Box::new(OnlineRoomState::new(session, placeholder_view)));
+            }
+            Err(e) => {
+                self.screen =
+                    Screen::OnlineLobby(OnlineLobbyState::with_message(format!("加入失败: {e}")));
+            }
+        }
+    }
+
+    /// OnlineRoom → OnlineGame: 移交 session.
     fn transition_room_to_game(&mut self) {
         let prev = std::mem::replace(&mut self.screen, Screen::MainMenu(MainMenuState::new()));
         if let Screen::OnlineRoom(state) = prev {
             let s = *state;
             self.screen = Screen::OnlineGame(Box::new(OnlineGameState::new(
-                s.handle,
-                s.inbox,
-                s.my_player_id,
-                s.my_token,
+                s.session,
                 self.local_prefs.theme,
             )));
         }
@@ -368,11 +417,5 @@ impl App {
         }
         let p = Paragraph::new(Line::from(spans));
         f.render_widget(p, area);
-    }
-}
-
-impl Default for App {
-    fn default() -> Self {
-        Self::new()
     }
 }

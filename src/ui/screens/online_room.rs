@@ -6,51 +6,47 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use tokio::sync::mpsc::UnboundedReceiver;
-use uuid::Uuid;
 
 use crate::net::protocol::{ClientMsg, RoomLifecycle, RoomView, ServerMsg};
-use crate::net::room::{RoomCmd, RoomHandle};
+use crate::net::session::NetSession;
 use crate::ui::Transition;
 
-/// 在线房间. 直接持 RoomHandle (发 cmd) + 自己的 inbox (收 ServerMsg).
+/// 在线房间. 通过 NetSession 与 server 收发 (本地房主或远程加入者皆可).
 pub struct OnlineRoomState {
-    pub handle: RoomHandle,
-    pub inbox: UnboundedReceiver<ServerMsg>,
+    pub session: NetSession,
     pub room_view: RoomView,
-    pub my_player_id: u32,
-    pub my_token: Uuid,
     pub message: String,
 }
 
 impl OnlineRoomState {
+    pub fn new(session: NetSession, room_view: RoomView) -> Self {
+        Self {
+            session,
+            room_view,
+            message: String::new(),
+        }
+    }
+
+    pub fn my_player_id(&self) -> u32 {
+        self.session.player_id
+    }
+
     /// 拉取所有可读消息, 更新 room_view. 检测 InGame 状态切换.
     pub fn advance(&mut self) -> Option<Transition> {
-        loop {
-            match self.inbox.try_recv() {
-                Ok(msg) => {
-                    if let Some(t) = self.handle_msg(msg) {
-                        return Some(t);
-                    }
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return None,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    self.message = "连接断开".into();
-                    return None;
-                }
+        while let Some(msg) = self.session.try_recv() {
+            if let Some(t) = self.handle_msg(msg) {
+                return Some(t);
             }
         }
+        if self.session.is_disconnected() && self.message.is_empty() {
+            self.message = "连接断开".into();
+        }
+        None
     }
 
     fn handle_msg(&mut self, msg: ServerMsg) -> Option<Transition> {
         match msg {
-            ServerMsg::Welcome {
-                player_id,
-                reconnect_token,
-                room,
-            } => {
-                self.my_player_id = player_id;
-                self.my_token = reconnect_token;
+            ServerMsg::Welcome { room, .. } => {
                 self.room_view = *room;
             }
             ServerMsg::RoomUpdate(view) => {
@@ -62,8 +58,8 @@ impl OnlineRoomState {
             ServerMsg::GameStateView(_) => {
                 return Some(Transition::EnterOnlineGame);
             }
-            ServerMsg::Error(e) => {
-                self.message = e;
+            ServerMsg::Error { message } => {
+                self.message = message;
             }
             _ => {}
         }
@@ -73,33 +69,23 @@ impl OnlineRoomState {
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
         match key.code {
             KeyCode::Char('r') | KeyCode::Char('R') => {
-                let me = self
-                    .room_view
-                    .players
-                    .iter()
-                    .find(|p| p.id == self.my_player_id);
+                let my_id = self.my_player_id();
+                let me = self.room_view.players.iter().find(|p| p.id == my_id);
                 let new_ready = me.map(|p| !p.ready).unwrap_or(true);
-                self.send(ClientMsg::Ready(new_ready));
+                self.session.send(ClientMsg::Ready { ready: new_ready });
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if self.is_host() {
-                    self.send(ClientMsg::StartGame);
+                    self.session.send(ClientMsg::StartGame);
                 }
             }
             KeyCode::Char('l') | KeyCode::Char('L') => {
-                self.send(ClientMsg::Leave);
+                self.session.send(ClientMsg::Leave);
                 return Some(Transition::EnterMainMenu);
             }
             _ => {}
         }
         None
-    }
-
-    fn send(&self, msg: ClientMsg) {
-        let _ = self.handle.tx.send(RoomCmd::PlayerMsg {
-            player_id: self.my_player_id,
-            msg,
-        });
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
@@ -131,7 +117,7 @@ impl OnlineRoomState {
             } else {
                 "[未准备]"
             };
-            let me_tag = if p.id == self.my_player_id {
+            let me_tag = if p.id == self.my_player_id() {
                 " (你)"
             } else {
                 ""
@@ -198,6 +184,6 @@ impl OnlineRoomState {
     }
 
     fn is_host(&self) -> bool {
-        self.room_view.host_id == self.my_player_id
+        self.room_view.host_id == self.my_player_id()
     }
 }

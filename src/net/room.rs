@@ -264,14 +264,14 @@ impl RoomActor {
 
     fn handle_client_msg(&mut self, player_id: u32, msg: ClientMsg) {
         match msg {
-            ClientMsg::Ready(b) => self.handle_ready(player_id, b),
+            ClientMsg::Ready { ready } => self.handle_ready(player_id, ready),
             ClientMsg::StartGame => self.handle_start_game(player_id),
             ClientMsg::UpdateConfig(cfg) => self.handle_update_config(player_id, cfg),
             ClientMsg::Action(action) => self.handle_action(player_id, action),
             ClientMsg::BackToRoom => self.handle_back_to_room(player_id),
             ClientMsg::ContinueGame => self.handle_continue_game(player_id),
             ClientMsg::Leave => self.handle_leave(player_id),
-            ClientMsg::Pong(_) => {}
+            ClientMsg::Pong { .. } => {}
             ClientMsg::Join { .. } => {
                 // 已经 join 过了, 忽略
             }
@@ -385,7 +385,9 @@ impl RoomActor {
         let was_host = self.slots[idx].is_host;
         if was_host {
             // 房主离开: 解散房间.
-            self.broadcast_to_all(ServerMsg::Error("房主已离开, 房间解散".into()));
+            self.broadcast_to_all(ServerMsg::Error {
+                message: "房主已离开, 房间解散".into(),
+            });
             self.slots.clear();
             self.game = None;
             self.state = RoomLifecycle::Lobby;
@@ -680,7 +682,9 @@ impl RoomActor {
         if let Some(slot) = self.slots.iter().find(|s| s.id == player_id)
             && let Some(s) = &slot.sender
         {
-            let _ = s.send(ServerMsg::Error(err.to_string()));
+            let _ = s.send(ServerMsg::Error {
+                message: err.to_string(),
+            });
         }
     }
 
@@ -808,7 +812,7 @@ mod tests {
         // 两人都应收到 Error("房主已离开...")
         let drain = |rx: &mut UnboundedReceiver<ServerMsg>| -> bool {
             while let Ok(msg) = rx.try_recv() {
-                if matches!(msg, ServerMsg::Error(_)) {
+                if matches!(msg, ServerMsg::Error { .. }) {
                     return true;
                 }
             }

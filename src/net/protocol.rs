@@ -35,7 +35,7 @@ pub enum ClientMsg {
         reconnect_token: Option<Uuid>,
     },
     /// 切换准备状态 (lobby 阶段).
-    Ready(bool),
+    Ready { ready: bool },
     /// 房主开始游戏.
     StartGame,
     /// 房主修改房间配置 (仅 lobby 阶段生效).
@@ -49,7 +49,7 @@ pub enum ClientMsg {
     /// 主动离开 (房主离开 = 解散).
     Leave,
     /// 心跳应答.
-    Pong(u64),
+    Pong { id: u64 },
 }
 
 /// 游戏内玩家动作.
@@ -101,9 +101,9 @@ pub enum ServerMsg {
     /// 回房间 (有人退出 / 玩家选择回房间).
     BackToRoom,
     /// 错误 / 拒绝原因 (e.g. "房主已离开" / "房间已满" / "无效操作").
-    Error(String),
+    Error { message: String },
     /// 心跳.
-    Ping(u64),
+    Ping { id: u64 },
 }
 
 // ============================================================================

@@ -1,4 +1,4 @@
-//! 局域网大厅: 输入 nickname → 创建房间 / 加入(发现, phase 6) / 手动 IP(phase 5).
+//! 局域网大厅: 输入 nickname → 创建房间 / 加入房间 (输入 IP, mDNS 发现待 phase 6).
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -12,13 +12,15 @@ use crate::ui::Transition;
 /// 大厅项目焦点.
 const FOCUS_NICKNAME: usize = 0;
 const FOCUS_CREATE: usize = 1;
-const FOCUS_JOIN: usize = 2;
-const FOCUS_MANUAL: usize = 3;
+const FOCUS_ADDR: usize = 2;
+const FOCUS_JOIN: usize = 3;
 const ITEM_COUNT: usize = 4;
 
 #[derive(Debug)]
 pub struct OnlineLobbyState {
     pub nickname: String,
+    /// 加入房间用的 host 地址, 形如 `192.168.1.5:34567`.
+    pub addr: String,
     pub focus: usize,
     pub message: String,
 }
@@ -27,8 +29,16 @@ impl OnlineLobbyState {
     pub fn new() -> Self {
         Self {
             nickname: String::new(),
+            addr: String::new(),
             focus: FOCUS_NICKNAME,
             message: String::new(),
+        }
+    }
+
+    pub fn with_message(message: String) -> Self {
+        Self {
+            message,
+            ..Self::new()
         }
     }
 
@@ -52,9 +62,18 @@ impl OnlineLobbyState {
                 self.nickname.pop();
                 None
             }
+            KeyCode::Char(c) if self.focus == FOCUS_ADDR => {
+                if self.addr.chars().count() < 64 {
+                    self.addr.push(c);
+                }
+                None
+            }
+            KeyCode::Backspace if self.focus == FOCUS_ADDR => {
+                self.addr.pop();
+                None
+            }
             KeyCode::Enter => match self.focus {
                 FOCUS_NICKNAME => {
-                    // Enter 在输入框 = 跳到 "创建房间" 焦点
                     self.focus = FOCUS_CREATE;
                     None
                 }
@@ -68,13 +87,25 @@ impl OnlineLobbyState {
                         nickname: self.nickname.trim().to_string(),
                     })
                 }
-                FOCUS_JOIN => {
-                    self.message = "(mDNS 发现待 phase 6 实现)".into();
+                FOCUS_ADDR => {
+                    self.focus = FOCUS_JOIN;
                     None
                 }
-                FOCUS_MANUAL => {
-                    self.message = "(手动 IP 待 phase 5 实现)".into();
-                    None
+                FOCUS_JOIN => {
+                    if self.nickname.trim().is_empty() {
+                        self.message = "请输入昵称".into();
+                        self.focus = FOCUS_NICKNAME;
+                        return None;
+                    }
+                    if self.addr.trim().is_empty() {
+                        self.message = "请输入房间地址 (形如 192.168.1.5:34567)".into();
+                        self.focus = FOCUS_ADDR;
+                        return None;
+                    }
+                    Some(Transition::JoinOnlineRoom {
+                        nickname: self.nickname.trim().to_string(),
+                        addr: self.addr.trim().to_string(),
+                    })
                 }
                 _ => None,
             },
@@ -114,25 +145,67 @@ impl OnlineLobbyState {
         ]));
         lines.push(Line::from(""));
 
-        // 选项
-        let options = [
-            (FOCUS_CREATE, "创建房间", false),
-            (FOCUS_JOIN, "加入房间 (发现, 待施工)", true),
-            (FOCUS_MANUAL, "手动输入 IP (待施工)", true),
-        ];
-        for (idx, label, disabled) in options {
-            let prefix = if self.focus == idx { "▶ " } else { "  " };
+        // 创建房间按钮
+        {
+            let prefix = if self.focus == FOCUS_CREATE {
+                "▶ "
+            } else {
+                "  "
+            };
             let mut style = Style::default();
-            if self.focus == idx {
+            if self.focus == FOCUS_CREATE {
                 style = style
                     .fg(Color::Black)
                     .bg(Color::Yellow)
                     .add_modifier(Modifier::BOLD);
-            } else if disabled {
-                style = style.fg(Color::DarkGray);
             }
             lines.push(Line::from(Span::styled(
-                format!("{}{}", prefix, label),
+                format!("{}创建房间 (本机做房主, 监听 LAN)", prefix),
+                style,
+            )));
+        }
+        lines.push(Line::from(""));
+
+        // 房间地址输入
+        let addr_label = if self.focus == FOCUS_ADDR {
+            "▶ 地址: "
+        } else {
+            "  地址: "
+        };
+        let mut addr_text = if self.addr.is_empty() {
+            "(例如 192.168.1.5:34567)".to_string()
+        } else {
+            self.addr.clone()
+        };
+        if self.focus == FOCUS_ADDR {
+            addr_text.push('_');
+        }
+        let addr_style = if self.addr.is_empty() && self.focus != FOCUS_ADDR {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        lines.push(Line::from(vec![
+            Span::raw(addr_label),
+            Span::styled(addr_text, addr_style),
+        ]));
+
+        // 加入房间按钮
+        {
+            let prefix = if self.focus == FOCUS_JOIN {
+                "▶ "
+            } else {
+                "  "
+            };
+            let mut style = Style::default();
+            if self.focus == FOCUS_JOIN {
+                style = style
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD);
+            }
+            lines.push(Line::from(Span::styled(
+                format!("{}加入房间 (输入地址后回车)", prefix),
                 style,
             )));
         }
@@ -146,11 +219,16 @@ impl OnlineLobbyState {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "↑↓/Tab 切焦点 · 回车 确认",
+            "↑↓/Tab 切焦点 · 回车 确认 (输入框时回车前进焦点)",
             Style::default().fg(Color::DarkGray),
         )));
         lines.push(Line::from(Span::styled(
             "Esc 回主菜单 · Q 退出",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "提示: mDNS 自动发现待 Phase 6 实施",
             Style::default().fg(Color::DarkGray),
         )));
 

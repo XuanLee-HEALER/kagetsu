@@ -11,8 +11,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io;
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -20,19 +19,28 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // 显式构造 tokio runtime, 把 handle 传给 App.
+    // (sync UI 主循环 + 后台异步 net 任务共存的最简方案.)
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+    let handle = runtime.handle().clone();
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
-    // best-effort: 把窗口拉到设计稿尺寸. 部分终端 (tmux/SSH) 会忽略, 不报错.
     let _ = execute!(stdout, SetSize(144, 40));
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = tui_majo::ui::App::new().run(&mut terminal);
+    let result = tui_majo::ui::App::new(handle).run(&mut terminal);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
+    // 显式 drop, 触发 graceful shutdown
+    drop(runtime);
     result
 }

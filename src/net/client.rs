@@ -106,17 +106,17 @@ mod tests {
         let (mut client, mut server) = local_pair();
 
         // client → server
-        client.send(ClientMsg::Pong(42)).unwrap();
+        client.send(ClientMsg::Pong { id: 42 }).unwrap();
         // 在 same task 内同步 try_recv 即可 (unbounded_channel 立即可见)
         match server.try_recv().unwrap() {
-            Some(ClientMsg::Pong(n)) => assert_eq!(n, 42),
+            Some(ClientMsg::Pong { id: n }) => assert_eq!(n, 42),
             other => panic!("unexpected: {:?}", other),
         }
 
         // server → client
-        server.send(ServerMsg::Ping(99)).unwrap();
+        server.send(ServerMsg::Ping { id: 99 }).unwrap();
         match client.try_recv().unwrap() {
-            Some(ServerMsg::Ping(n)) => assert_eq!(n, 99),
+            Some(ServerMsg::Ping { id: n }) => assert_eq!(n, 99),
             other => panic!("unexpected: {:?}", other),
         }
     }
@@ -142,7 +142,7 @@ mod tests {
     async fn disconnected_send_returns_err() {
         let (mut client, server) = local_pair();
         drop(server);
-        let r = client.send(ClientMsg::Pong(1));
+        let r = client.send(ClientMsg::Pong { id: 1 });
         assert!(matches!(r, Err(TransportError::Disconnected)));
     }
 

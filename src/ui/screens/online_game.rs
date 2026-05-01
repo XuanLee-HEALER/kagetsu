@@ -24,16 +24,14 @@ use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use tokio::sync::mpsc::UnboundedReceiver;
 use unicode_width::UnicodeWidthStr;
-use uuid::Uuid;
 
 use crate::game::{GameEvent, Phase};
 use crate::meld::{MeldKind, Seat};
 use crate::net::protocol::{
     ClientMsg, GameStateView, NetAction, PlayerView, RoomLifecycle, ServerMsg,
 };
-use crate::net::room::{RoomCmd, RoomHandle};
+use crate::net::session::NetSession;
 use crate::tile::{Tile, TileIndex};
 use crate::ui::Transition;
 use crate::ui::paint::{
@@ -76,10 +74,7 @@ fn player_at(view: &GameStateView, seat: Seat) -> &PlayerView {
 }
 
 pub struct OnlineGameState {
-    pub handle: RoomHandle,
-    pub inbox: UnboundedReceiver<ServerMsg>,
-    pub my_player_id: u32,
-    pub my_token: Uuid,
+    pub session: NetSession,
     pub state_view: Option<GameStateView>,
     pub message: String,
     /// 自家手牌选中索引 (与 selectable_tiles() 对应, 不指向 last_drawn).
@@ -89,18 +84,9 @@ pub struct OnlineGameState {
 }
 
 impl OnlineGameState {
-    pub fn new(
-        handle: RoomHandle,
-        inbox: UnboundedReceiver<ServerMsg>,
-        my_player_id: u32,
-        my_token: Uuid,
-        theme_kind: ThemeKind,
-    ) -> Self {
+    pub fn new(session: NetSession, theme_kind: ThemeKind) -> Self {
         Self {
-            handle,
-            inbox,
-            my_player_id,
-            my_token,
+            session,
             state_view: None,
             message: "等待 server 推送状态...".into(),
             selected: 0,
@@ -108,21 +94,20 @@ impl OnlineGameState {
         }
     }
 
+    pub fn my_player_id(&self) -> u32 {
+        self.session.player_id
+    }
+
     pub fn advance(&mut self) -> Option<Transition> {
-        loop {
-            match self.inbox.try_recv() {
-                Ok(msg) => {
-                    if let Some(t) = self.handle_msg(msg) {
-                        return Some(t);
-                    }
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return None,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    self.message = "连接断开".into();
-                    return None;
-                }
+        while let Some(msg) = self.session.try_recv() {
+            if let Some(t) = self.handle_msg(msg) {
+                return Some(t);
             }
         }
+        if self.session.is_disconnected() && !self.message.contains("断开") {
+            self.message = "连接断开".into();
+        }
+        None
     }
 
     fn handle_msg(&mut self, msg: ServerMsg) -> Option<Transition> {
@@ -151,8 +136,8 @@ impl OnlineGameState {
                     return Some(Transition::EnterMainMenu);
                 }
             }
-            ServerMsg::Error(e) => {
-                self.message = e;
+            ServerMsg::Error { message } => {
+                self.message = message;
             }
             _ => {}
         }
@@ -197,28 +182,28 @@ impl OnlineGameState {
                 self.do_riichi_selected();
             }
             KeyCode::Char('w') | KeyCode::Char('W') => {
-                self.send(ClientMsg::Action(NetAction::Tsumo));
+                self.session.send(ClientMsg::Action(NetAction::Tsumo));
             }
             KeyCode::Char('p') | KeyCode::Char('P') => {
-                self.send(ClientMsg::Action(NetAction::Pon));
+                self.session.send(ClientMsg::Action(NetAction::Pon));
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
-                self.send(ClientMsg::Action(NetAction::Chi(0)));
+                self.session.send(ClientMsg::Action(NetAction::Chi(0)));
             }
             KeyCode::Char('m') | KeyCode::Char('M') => {
-                self.send(ClientMsg::Action(NetAction::Minkan));
+                self.session.send(ClientMsg::Action(NetAction::Minkan));
             }
             KeyCode::Char('k') | KeyCode::Char('K') => {
                 self.do_ankan();
             }
             KeyCode::Char('c') | KeyCode::Char('C') => {
-                self.send(ClientMsg::Action(NetAction::Pass));
+                self.session.send(ClientMsg::Action(NetAction::Pass));
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.send(ClientMsg::Action(NetAction::NextRound));
+                self.session.send(ClientMsg::Action(NetAction::NextRound));
             }
             KeyCode::Char('L') => {
-                self.send(ClientMsg::Leave);
+                self.session.send(ClientMsg::Leave);
                 return Some(Transition::EnterMainMenu);
             }
             _ => {}
@@ -291,9 +276,10 @@ impl OnlineGameState {
         };
         let (sel_tiles, _drawn) = Self::split_hand(view);
         if let Some(t) = sel_tiles.get(self.selected) {
-            self.send(ClientMsg::Action(NetAction::Discard(TileSpec {
-                kind: t.kind,
-            })));
+            self.session
+                .send(ClientMsg::Action(NetAction::Discard(TileSpec {
+                    kind: t.kind,
+                })));
         }
     }
 
@@ -302,9 +288,10 @@ impl OnlineGameState {
             return;
         };
         if let Some(d) = view.my_last_drawn {
-            self.send(ClientMsg::Action(NetAction::Discard(TileSpec {
-                kind: d.kind,
-            })));
+            self.session
+                .send(ClientMsg::Action(NetAction::Discard(TileSpec {
+                    kind: d.kind,
+                })));
         }
     }
 
@@ -319,7 +306,8 @@ impl OnlineGameState {
             drawn.map(|d| d.kind)
         };
         if let Some(k) = kind {
-            self.send(ClientMsg::Action(NetAction::Riichi(TileSpec { kind: k })));
+            self.session
+                .send(ClientMsg::Action(NetAction::Riichi(TileSpec { kind: k })));
         }
     }
 
@@ -335,18 +323,12 @@ impl OnlineGameState {
         }
         for (i, &c) in counts.iter().enumerate() {
             if c >= 4 {
-                self.send(ClientMsg::Action(NetAction::Ankan(TileIndex(i as u8))));
+                self.session
+                    .send(ClientMsg::Action(NetAction::Ankan(TileIndex(i as u8))));
                 return;
             }
         }
         self.message = "无可暗杠".into();
-    }
-
-    fn send(&self, msg: ClientMsg) {
-        let _ = self.handle.tx.send(RoomCmd::PlayerMsg {
-            player_id: self.my_player_id,
-            msg,
-        });
     }
 
     // ============== 渲染 ==============
