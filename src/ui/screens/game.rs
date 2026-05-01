@@ -17,27 +17,36 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use std::time::{Duration, Instant};
 
 use crate::action::Action;
 use crate::config::GameConfig;
-use crate::game::{CallOptions, GameState, Phase, RoundResult, RyuukyokuKind};
+use crate::game::{CallOptions, GameEvent, GameState, Phase, RoundResult, RyuukyokuKind};
 use crate::meld::Seat;
 use crate::player::{ai_choose_discard, default_action_on_timeout};
 use crate::score::final_ranking;
+use crate::tile::{Tile, TileIndex};
 use crate::ui::Transition;
-use crate::ui::widgets::{
-    render_melds_inline, render_river_lines, seat_label, separator_span, tile_content_span,
-    tile_label,
+use crate::ui::paint::{
+    TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row,
+    paint_discard_grid_wide, paint_double_box, paint_fill, paint_hr, paint_hr_accent,
+    paint_meld_row_tight, paint_str, paint_tile_wide,
 };
+use crate::ui::theme::Theme;
+use crate::ui::widgets::seat_label;
 
 const PLAYER_SEAT: Seat = Seat::East;
 /// AI 操作的节流时间, 让玩家看清.
 const AI_STEP_DELAY_MS: u64 = 350;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
+    Normal,
+    Command,
+}
 
 pub struct GameScreenState {
     pub game: GameState,
@@ -57,6 +66,14 @@ pub struct GameScreenState {
     pub message: String,
     /// 当前等待玩家决策的截止时刻 (None = AI 回合或不限时).
     pub decision_deadline: Option<Instant>,
+    /// vim 风格输入模式.
+    pub input_mode: InputMode,
+    /// COMMAND 模式下的命令缓冲区.
+    pub command_buffer: String,
+    /// Action Modal 是否打开.
+    pub modal_open: bool,
+    /// Modal 当前选中项.
+    pub modal_selected: usize,
 }
 
 impl GameScreenState {
@@ -73,6 +90,10 @@ impl GameScreenState {
             last_step_at: Instant::now(),
             message: String::from("东 1 局开始. 你是东家(亲)."),
             decision_deadline: None,
+            input_mode: InputMode::Normal,
+            command_buffer: String::new(),
+            modal_open: false,
+            modal_selected: 0,
         }
     }
 
@@ -247,7 +268,32 @@ impl GameScreenState {
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
+        // COMMAND 模式: 字符进 buffer.
+        if self.input_mode == InputMode::Command {
+            return self.handle_command_key(key);
+        }
+        // Modal 打开: 优先处理 modal 键.
+        if self.modal_open {
+            return self.handle_modal_key(key);
+        }
+        // NORMAL 模式.
         match key.code {
+            KeyCode::Char(':') => {
+                self.input_mode = InputMode::Command;
+                self.command_buffer.clear();
+            }
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                // 注意: AwaitCalls 时 m 是明杠键, 这里改用 modal 唤起.
+                // 若有 player_calls 且包含 minkan, 仍保留旧行为.
+                if self.player_calls.is_some()
+                    && self.player_calls.as_ref().unwrap().minkan.is_some()
+                {
+                    self.try_player_minkan();
+                } else {
+                    self.modal_open = true;
+                    self.modal_selected = 0;
+                }
+            }
             KeyCode::Left | KeyCode::Char('h') => {
                 if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
                     self.selected = self.selected.saturating_sub(1);
@@ -264,6 +310,13 @@ impl GameScreenState {
             KeyCode::Enter | KeyCode::Char(' ') => {
                 self.try_player_discard();
             }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.try_player_discard();
+            }
+            KeyCode::Char('t') => {
+                // 摸切: 切刚摸的那张.
+                self.try_player_tsumogiri();
+            }
             KeyCode::Char('w') | KeyCode::Char('W') => {
                 self.try_player_win();
             }
@@ -279,9 +332,6 @@ impl GameScreenState {
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 self.try_player_chi();
             }
-            KeyCode::Char('m') | KeyCode::Char('M') => {
-                self.try_player_minkan();
-            }
             KeyCode::Char('c') | KeyCode::Char('C') => {
                 if self.player_calls.is_some() {
                     self.player_calls = None;
@@ -296,9 +346,191 @@ impl GameScreenState {
                     self.last_step_at = Instant::now();
                 }
             }
+            // 数字 1-9 选第 N 张牌.
+            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+                if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
+                    let idx = (c.to_digit(10).unwrap() - 1) as usize;
+                    let len = self.player().hand.closed.len();
+                    if idx < len {
+                        self.selected = idx;
+                    }
+                }
+            }
             _ => {}
         }
         None
+    }
+
+    fn handle_command_key(&mut self, key: KeyEvent) -> Option<Transition> {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.command_buffer.clear();
+            }
+            KeyCode::Enter => {
+                let cmd = self.command_buffer.clone();
+                self.command_buffer.clear();
+                self.input_mode = InputMode::Normal;
+                self.execute_command(&cmd);
+            }
+            KeyCode::Backspace => {
+                self.command_buffer.pop();
+            }
+            KeyCode::Char(c) => {
+                if self.command_buffer.chars().count() < 32 {
+                    self.command_buffer.push(c);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn handle_modal_key(&mut self, key: KeyEvent) -> Option<Transition> {
+        let actions = self.collect_modal_actions();
+        match key.code {
+            KeyCode::Esc => {
+                self.modal_open = false;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let mut i = self.modal_selected;
+                loop {
+                    if i == 0 {
+                        break;
+                    }
+                    i -= 1;
+                    if actions.get(i).is_some_and(|a| a.enabled) {
+                        self.modal_selected = i;
+                        break;
+                    }
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let mut i = self.modal_selected + 1;
+                while i < actions.len() {
+                    if actions[i].enabled {
+                        self.modal_selected = i;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(action) = actions.get(self.modal_selected).cloned()
+                    && action.enabled
+                {
+                    self.modal_open = false;
+                    self.execute_modal_action(action.key);
+                }
+            }
+            KeyCode::Char(c) => {
+                let upper = c.to_ascii_uppercase();
+                if let Some(action) = actions.iter().find(|a| a.key == upper).cloned()
+                    && action.enabled
+                {
+                    self.modal_open = false;
+                    self.execute_modal_action(action.key);
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn execute_modal_action(&mut self, key: char) {
+        match key {
+            'R' => self.try_player_riichi(),
+            'W' => self.try_player_win(),
+            'K' => self.try_player_kan(),
+            'D' => self.try_player_discard(),
+            'T' => self.try_player_tsumogiri(),
+            'P' => self.try_player_pon(),
+            'A' => self.try_player_chi(),
+            'M' => self.try_player_minkan(),
+            'C' => {
+                if self.player_calls.is_some() {
+                    self.player_calls = None;
+                    self.message = "已跳过.".into();
+                    self.clear_deadline();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 摸切: 切刚摸的那张.
+    fn try_player_tsumogiri(&mut self) {
+        if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
+            return;
+        }
+        let p = self.player();
+        if let Some(t) = p.last_drawn
+            && self.game.do_discard(t).is_ok()
+        {
+            self.calls_resolved = false;
+            self.player_calls = None;
+            self.last_step_at = Instant::now();
+            self.clear_deadline();
+        }
+    }
+
+    fn execute_command(&mut self, cmd: &str) {
+        let parsed = parse_command(cmd);
+        match parsed {
+            ParsedCommand::Discard(spec) => {
+                if let Some(idx) = self.find_tile_in_hand(&spec) {
+                    let p = self.player();
+                    if let Some(&t) = p.hand.closed.get(idx)
+                        && self.game.do_discard(t).is_ok()
+                    {
+                        self.calls_resolved = false;
+                        self.player_calls = None;
+                        self.last_step_at = Instant::now();
+                        self.clear_deadline();
+                    }
+                } else {
+                    self.message = format!(":discard 失败: 手中无 {}", cmd);
+                }
+            }
+            ParsedCommand::Riichi(spec) => {
+                if let Some(idx) = self.find_tile_in_hand(&spec) {
+                    let p = self.player();
+                    if let Some(&t) = p.hand.closed.get(idx) {
+                        match self.game.do_riichi(t) {
+                            Ok(()) => {
+                                self.message = "立直成立!".into();
+                                self.calls_resolved = false;
+                                self.last_step_at = Instant::now();
+                                self.clear_deadline();
+                            }
+                            Err(e) => self.message = format!("立直失败: {}", e),
+                        }
+                    }
+                } else {
+                    self.message = format!(":riichi 失败: 手中无 {}", cmd);
+                }
+            }
+            ParsedCommand::Tsumo => self.try_player_win(),
+            ParsedCommand::Pon => self.try_player_pon(),
+            ParsedCommand::Kan => self.try_player_kan(),
+            ParsedCommand::Chi => self.try_player_chi(),
+            ParsedCommand::Menu => {
+                self.modal_open = true;
+                self.modal_selected = 0;
+            }
+            ParsedCommand::Resign => {
+                // MVP: 不实际投降, 仅清息.
+                self.message = "(暂未支持 :resign)".into();
+            }
+            ParsedCommand::Unknown(s) => {
+                self.message = format!("未知命令: {}", s);
+            }
+        }
+    }
+
+    fn find_tile_in_hand(&self, spec: &TileSpec) -> Option<usize> {
+        let p = self.player();
+        p.hand.closed.iter().position(|t| spec.matches(t.kind))
     }
 
     fn update_self_message(&mut self) {
@@ -379,6 +611,16 @@ impl GameScreenState {
 
     fn clear_deadline(&mut self) {
         self.decision_deadline = None;
+    }
+
+    /// 是否在 vim COMMAND 模式 (task 10 后会真正切换状态).
+    pub fn is_command_mode(&self) -> bool {
+        self.input_mode == InputMode::Command
+    }
+
+    /// 切换主题 (供全局 T 键调用).
+    pub fn set_theme(&mut self, kind: crate::ui::theme::ThemeKind) {
+        self.game.config.theme = kind;
     }
 
     /// 剩余思考秒数(向上取整). None = 不限时或不在等候态.
@@ -553,228 +795,1035 @@ impl GameScreenState {
         }
     }
 
-    // ============== 渲染 ==============
+    // ============== 渲染 (HiFi-05 设计稿坐标) ==============
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(20),
-                Constraint::Length(4),
-            ])
-            .split(area);
+        let theme = self.game.config.theme.theme();
+        let buf = f.buffer_mut();
+        // 整屏背景填充.
+        paint_fill(
+            buf,
+            area.x,
+            area.y,
+            area.width,
+            area.height,
+            Style::default().bg(theme.bg).fg(theme.fg),
+        );
+        let ox = area.x;
+        let oy = area.y;
 
-        self.render_header(f, chunks[0]);
-        self.render_table(f, chunks[1]);
-        self.render_status(f, chunks[2]);
+        self.paint_top_status(buf, ox, oy, &theme);
+        self.paint_opponent_top(buf, ox, oy, &theme);
+        self.paint_opponent_left(buf, ox, oy, &theme);
+        self.paint_opponent_right(buf, ox, oy, &theme);
+        self.paint_center_info(buf, ox, oy, &theme);
+        self.paint_my_river(buf, ox, oy, &theme);
+        self.paint_my_status(buf, ox, oy, &theme);
+        self.paint_my_hand(buf, ox, oy, &theme);
+        self.paint_bottom(buf, ox, oy, &theme);
+
+        if self.modal_open {
+            self.paint_modal(buf, ox, oy, &theme);
+        }
     }
 
-    fn render_header(&self, f: &mut Frame, area: Rect) {
-        let dora = self
-            .game
-            .wall
-            .as_ref()
-            .map(|w| w.dora_indicators())
-            .unwrap_or_default();
-        let dora_str: Vec<String> = dora.iter().map(|t| tile_label(*t).0).collect();
-        let remaining = self.game.wall.as_ref().map(|w| w.remaining()).unwrap_or(0);
-
-        let line = Line::from(vec![
-            Span::styled(
-                format!("{} {} 局", self.game.round_wind.label(), self.game.kyoku),
+    /// row 0-1: 顶部 status bar.
+    fn paint_top_status(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
+        let g = &self.game;
+        // 局 / 本场 / 立直棒
+        let round_label = format!("{} {} 局", g.round_wind.label(), g.kyoku);
+        paint_str(
+            buf,
+            ox + 2,
+            oy,
+            &round_label,
+            Style::default()
+                .fg(theme.accent)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        );
+        paint_str(
+            buf,
+            ox + 11,
+            oy,
+            &format!("{}本", g.honba),
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+        if g.riichi_sticks > 0 {
+            paint_str(
+                buf,
+                ox + 15,
+                oy,
+                &format!("{}供", g.riichi_sticks),
+                Style::default().fg(theme.danger).bg(theme.bg),
+            );
+        }
+        paint_str(
+            buf,
+            ox + 19,
+            oy,
+            "│",
+            Style::default().fg(theme.line).bg(theme.bg),
+        );
+        // 巡 / 山
+        let junme = g.players[0].river.len() + 1;
+        let wall_left = g.wall.as_ref().map(|w| w.remaining()).unwrap_or(0);
+        paint_str(
+            buf,
+            ox + 21,
+            oy,
+            &format!("巡 {} · 山 {}", junme, wall_left),
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+        paint_str(
+            buf,
+            ox + 36,
+            oy,
+            "│",
+            Style::default().fg(theme.line).bg(theme.bg),
+        );
+        // 宝牌指示
+        paint_str(
+            buf,
+            ox + 38,
+            oy,
+            "宝 ",
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+        if let Some(wall) = g.wall.as_ref()
+            && let Some(t) = wall.dora_indicators().first()
+        {
+            paint_tile_wide(buf, ox + 41, oy, Some(t), theme, TileState::Normal);
+        }
+        paint_str(
+            buf,
+            ox + 46,
+            oy,
+            "│",
+            Style::default().fg(theme.line).bg(theme.bg),
+        );
+        // 4 家分数 (相对自家位置: 东=自家, 南=下家, 西=对家, 北=上家)
+        let scores = [
+            (Seat::East, "東", g.players[0].score, g.players[0].riichi),
+            (Seat::South, "南", g.players[1].score, g.players[1].riichi),
+            (Seat::West, "西", g.players[2].score, g.players[2].riichi),
+            (Seat::North, "北", g.players[3].score, g.players[3].riichi),
+        ];
+        let mut col = ox + 48;
+        for (i, (_seat, label, score, riichi)) in scores.iter().enumerate() {
+            let star = if *riichi { "★" } else { "" };
+            let style = if i == 0 {
                 Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("   "),
-            Span::raw(format!("本场 {}", self.game.honba)),
-            Span::raw("   "),
-            Span::raw(format!("立直棒 {}", self.game.riichi_sticks)),
-            Span::raw("   "),
-            Span::raw(format!("剩余山 {}", remaining)),
-            Span::raw("   "),
-            Span::styled(
-                format!("宝牌指示 {}", dora_str.join(" ")),
-                Style::default().fg(Color::Cyan),
-            ),
-        ]);
-        let p = Paragraph::new(line)
-            .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL).title(" tui-majo "));
-        f.render_widget(p, area);
+                    .fg(theme.accent)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD)
+            } else if *riichi {
+                Style::default().fg(theme.danger).bg(theme.bg)
+            } else {
+                Style::default().fg(theme.dim).bg(theme.bg)
+            };
+            paint_str(buf, col, oy, &format!("{} {}{}", label, score, star), style);
+            col += 11;
+        }
+        // 时钟 / 标题
+        paint_str(
+            buf,
+            ox + 120,
+            oy,
+            "tui-majo",
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+        paint_hr(buf, ox, oy + 1, 144, theme);
     }
 
-    fn render_status(&self, f: &mut Frame, area: Rect) {
-        let mut hints: Vec<Span> = Vec::new();
-        match self.game.phase {
-            Phase::AwaitDiscard if self.is_player_turn() => {
-                let opts = self.game.legal_self_options();
-                hints.push(Span::raw("←/→ 选  Enter 切"));
-                if opts.tsumo {
-                    hints.push(Span::raw("  "));
-                    hints.push(Span::styled(
-                        "W 自摸",
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
-                if !opts.riichi_discards.is_empty() {
-                    hints.push(Span::raw("  "));
-                    hints.push(Span::styled("R 立直", Style::default().fg(Color::Yellow)));
-                }
-                if !opts.ankan.is_empty() {
-                    hints.push(Span::raw("  "));
-                    hints.push(Span::styled("K 暗杠", Style::default().fg(Color::Magenta)));
-                }
-                if !opts.shouminkan.is_empty() {
-                    hints.push(Span::raw("  "));
-                    hints.push(Span::styled("K 加杠", Style::default().fg(Color::Magenta)));
-                }
-            }
-            Phase::AwaitCalls if self.player_calls.is_some() => {
-                let opts = self.player_calls.as_ref().unwrap();
-                if opts.ron {
-                    hints.push(Span::styled(
-                        "W 和",
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    hints.push(Span::raw("  "));
-                }
-                if opts.pon.is_some() {
-                    hints.push(Span::styled("P 碰", Style::default().fg(Color::Cyan)));
-                    hints.push(Span::raw("  "));
-                }
-                if !opts.chi.is_empty() {
-                    hints.push(Span::styled("A 吃", Style::default().fg(Color::Cyan)));
-                    hints.push(Span::raw("  "));
-                }
-                if opts.minkan.is_some() {
-                    hints.push(Span::styled("M 杠", Style::default().fg(Color::Magenta)));
-                    hints.push(Span::raw("  "));
-                }
-                hints.push(Span::raw("C 跳过"));
-            }
-            Phase::RoundEnd => {
-                hints.push(Span::styled(
-                    "N 下一局",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-            Phase::GameEnd => {}
-            _ => {
-                hints.push(Span::styled(
-                    "(AI 思考中)",
-                    Style::default().fg(Color::DarkGray),
-                ));
+    /// row 3-9: 对家 (West).
+    fn paint_opponent_top(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
+        let p = &self.game.players[Seat::West.index()];
+        // 标题行 row 3
+        paint_str(
+            buf,
+            ox + 66,
+            oy + 3,
+            "─── 对家",
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+        paint_str(
+            buf,
+            ox + 75,
+            oy + 3,
+            "西",
+            Style::default()
+                .fg(theme.info)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        );
+        if p.riichi {
+            paint_str(
+                buf,
+                ox + 78,
+                oy + 3,
+                "★立直",
+                Style::default().fg(theme.danger).bg(theme.bg),
+            );
+        } else {
+            paint_str(
+                buf,
+                ox + 78,
+                oy + 3,
+                &format!("{}", p.score),
+                Style::default().fg(theme.fg).bg(theme.bg),
+            );
+        }
+        paint_str(
+            buf,
+            ox + 85,
+            oy + 3,
+            "───",
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+        // 手牌行 row 4: 13 张牌背 wide
+        paint_back_row_wide(buf, ox + 42, oy + 4, p.hand.closed.len(), theme);
+        // 副露 row 5
+        if !p.hand.melds.is_empty() {
+            paint_str(
+                buf,
+                ox + 42,
+                oy + 5,
+                "副露",
+                Style::default().fg(theme.dim).bg(theme.bg),
+            );
+            let mut col = ox + 48;
+            for meld in &p.hand.melds {
+                let tiles: Vec<Tile> = meld.tiles().to_vec();
+                paint_meld_row_tight(buf, col, oy + 5, &tiles, theme);
+                col += (tiles.len() as u16) * 3 + 1;
             }
         }
-
-        let lines = vec![Line::from(self.message.clone()), Line::from(hints)];
-        let p = Paragraph::new(lines)
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL));
-        f.render_widget(p, area);
+        // 牌河 row 6-9
+        let riichi_at = riichi_index_in_river(p);
+        paint_discard_grid_wide(buf, ox + 54, oy + 6, &p.river, theme, riichi_at);
     }
 
-    fn render_table(&self, f: &mut Frame, area: Rect) {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(6),
-                Constraint::Length(6),
-                Constraint::Length(6),
-                Constraint::Min(6),
-            ])
-            .split(area);
-
-        self.render_seat(f, rows[0], Seat::North, false);
-        self.render_seat(f, rows[1], Seat::West, false);
-        self.render_seat(f, rows[2], Seat::South, false);
-        self.render_seat(f, rows[3], Seat::East, true);
-    }
-
-    fn render_seat(&self, f: &mut Frame, area: Rect, seat: Seat, is_player: bool) {
-        let p = &self.game.players[seat.index()];
-        let is_current = self.game.turn == seat;
-        let is_dealer = seat == self.game.dealer;
-        let seat_wind = self.game.seat_wind_of(seat);
-
-        let title = format!(
-            " {}{}{} 自风{}{} 点棒 {} ",
-            seat_label(seat),
-            if is_dealer { "·亲" } else { "" },
-            if seat == PLAYER_SEAT { "(你)" } else { "" },
-            seat_wind.short(),
-            if p.riichi { " R" } else { "" },
-            p.score,
+    /// row 6-19 左侧: 上家 (North).
+    fn paint_opponent_left(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
+        let p = &self.game.players[Seat::North.index()];
+        paint_str(
+            buf,
+            ox + 2,
+            oy + 6,
+            "上家",
+            Style::default().fg(theme.dim).bg(theme.bg),
         );
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .title_alignment(Alignment::Left)
-            .border_style(if is_current {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            });
-        let inner = block.inner(area);
-        f.render_widget(block, area);
-
-        let parts = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(1)])
-            .split(inner);
-
-        let melds_w: u16 = ((parts[0].width as usize) / 2).min(45) as u16;
-        let row1 = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(20), Constraint::Length(melds_w)])
-            .split(parts[0]);
-
-        let hand_spans = self.render_hand_inline(p, is_player);
-        f.render_widget(Paragraph::new(Line::from(hand_spans)), row1[0]);
-
-        let meld_spans = render_melds_inline(&p.hand.melds);
-        f.render_widget(
-            Paragraph::new(Line::from(meld_spans)).alignment(Alignment::Right),
-            row1[1],
-        );
-
-        let river_lines = render_river_lines(&p.river);
-        f.render_widget(Paragraph::new(river_lines), parts[1]);
+        let label = if p.riichi {
+            format!("北 {}★", p.score)
+        } else {
+            format!("北 {}", p.score)
+        };
+        let style = if p.riichi {
+            Style::default()
+                .fg(theme.danger)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.info)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD)
+        };
+        paint_str(buf, ox + 2, oy + 7, &label, style);
+        if !p.hand.melds.is_empty() {
+            paint_str(
+                buf,
+                ox + 2,
+                oy + 9,
+                "副露",
+                Style::default().fg(theme.dim).bg(theme.bg),
+            );
+            let mut col = ox + 2;
+            let mut row = oy + 10;
+            for meld in &p.hand.melds {
+                let tiles: Vec<Tile> = meld.tiles().to_vec();
+                paint_meld_row_tight(buf, col, row, &tiles, theme);
+                col += (tiles.len() as u16) * 3 + 1;
+                if col > ox + 14 {
+                    col = ox + 2;
+                    row += 1;
+                }
+            }
+        }
+        // 手牌竖排 col 14, row 6 起 (减去副露数 ×3)
+        let hand_count = p.hand.closed.len();
+        paint_back_column_wide(buf, ox + 14, oy + 6, hand_count.min(13), theme);
+        // 牌河 6 列 wide, col 20
+        let riichi_at = riichi_index_in_river(p);
+        paint_discard_grid_wide(buf, ox + 20, oy + 12, &p.river, theme, riichi_at);
     }
 
-    fn render_hand_inline(
-        &self,
-        p: &crate::game::PlayerState,
-        is_player: bool,
-    ) -> Vec<Span<'static>> {
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(p.hand.closed.len() * 2 + 1);
-        let last_drawn_id = p.last_drawn.map(|t| t.id);
-        let player_phase = self.is_player_turn() && self.game.phase == Phase::AwaitDiscard;
+    /// row 6-19 右侧: 下家 (South).
+    fn paint_opponent_right(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
+        let p = &self.game.players[Seat::South.index()];
+        paint_str(
+            buf,
+            ox + 132,
+            oy + 6,
+            "下家",
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+        let label = if p.riichi {
+            format!("南 {}★", p.score)
+        } else {
+            format!("南 {}", p.score)
+        };
+        let style = if p.riichi {
+            Style::default()
+                .fg(theme.danger)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.info)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD)
+        };
+        paint_str(buf, ox + 132, oy + 7, &label, style);
+        if !p.hand.melds.is_empty() {
+            paint_str(
+                buf,
+                ox + 126,
+                oy + 9,
+                "副露",
+                Style::default().fg(theme.dim).bg(theme.bg),
+            );
+            let mut col = ox + 126;
+            let mut row = oy + 10;
+            for meld in &p.hand.melds {
+                let tiles: Vec<Tile> = meld.tiles().to_vec();
+                paint_meld_row_tight(buf, col, row, &tiles, theme);
+                col += (tiles.len() as u16) * 3 + 1;
+                if col > ox + 138 {
+                    col = ox + 126;
+                    row += 1;
+                }
+            }
+        }
+        let hand_count = p.hand.closed.len();
+        paint_back_column_wide(buf, ox + 120, oy + 6, hand_count.min(13), theme);
+        let riichi_at = riichi_index_in_river(p);
+        paint_discard_grid_wide(buf, ox + 92, oy + 12, &p.river, theme, riichi_at);
+    }
 
-        if is_player {
-            for (i, t) in p.hand.closed.iter().enumerate() {
-                let sel = i == self.selected && player_phase;
-                let drawn = Some(t.id) == last_drawn_id;
-                spans.push(separator_span());
-                spans.push(tile_content_span(*t, sel, drawn));
+    /// row 17-18: 中央 dora + 山数提示.
+    fn paint_center_info(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
+        let g = &self.game;
+        paint_str(
+            buf,
+            ox + 66,
+            oy + 17,
+            "宝",
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+        if let Some(wall) = g.wall.as_ref()
+            && let Some(t) = wall.dora_indicators().first()
+        {
+            paint_tile_wide(buf, ox + 70, oy + 17, Some(t), theme, TileState::Normal);
+        }
+        let wall_left = g.wall.as_ref().map(|w| w.remaining()).unwrap_or(0);
+        paint_str(
+            buf,
+            ox + 68,
+            oy + 18,
+            &format!("山 {}", wall_left),
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+    }
+
+    /// row 23-26: 自家牌河.
+    fn paint_my_river(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
+        let p = &self.game.players[PLAYER_SEAT.index()];
+        let riichi_at = riichi_index_in_river(p);
+        paint_discard_grid_wide(buf, ox + 54, oy + 23, &p.river, theme, riichi_at);
+    }
+
+    /// row 28-29: 自家分割线 + 状态行.
+    fn paint_my_status(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
+        paint_hr_accent(buf, ox + 2, oy + 28, 140, theme);
+        let p = &self.game.players[PLAYER_SEAT.index()];
+        paint_str(
+            buf,
+            ox + 4,
+            oy + 29,
+            "自家",
+            Style::default()
+                .fg(theme.accent)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        );
+        let dealer_str = if PLAYER_SEAT == self.game.dealer {
+            "東 ◆庄"
+        } else {
+            "東"
+        };
+        paint_str(
+            buf,
+            ox + 9,
+            oy + 29,
+            dealer_str,
+            Style::default().fg(theme.accent).bg(theme.bg),
+        );
+        paint_str(
+            buf,
+            ox + 18,
+            oy + 29,
+            &format!("{}", p.score),
+            Style::default()
+                .fg(theme.fg)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        );
+        // 听牌检测
+        let waits = if p.hand.closed.len() == 13 {
+            crate::decompose::tenpai_tiles(
+                &crate::tile::count_by_kind(&p.hand.closed),
+                &p.hand.melds,
+            )
+        } else {
+            Vec::new()
+        };
+        if !waits.is_empty() {
+            paint_str(
+                buf,
+                ox + 28,
+                oy + 29,
+                "已聴",
+                Style::default()
+                    .fg(theme.ok)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+            paint_str(
+                buf,
+                ox + 45,
+                oy + 29,
+                "聴 ",
+                Style::default().fg(theme.dim).bg(theme.bg),
+            );
+            // 显示前 3 个待牌
+            let mut col = ox + 48;
+            for kind in waits.iter().take(3) {
+                paint_str(
+                    buf,
+                    col,
+                    oy + 29,
+                    &kind_label_tight(*kind),
+                    Style::default().fg(theme.tile_fg).bg(theme.tile_bg),
+                );
+                col += 4;
             }
         } else {
-            for _ in 0..p.hand.closed.len() {
-                spans.push(separator_span());
-                spans.push(Span::styled("▒▒", Style::default().fg(Color::DarkGray)));
-            }
+            paint_str(
+                buf,
+                ox + 28,
+                oy + 29,
+                "未聴",
+                Style::default().fg(theme.dim).bg(theme.bg),
+            );
         }
-        spans.push(separator_span());
-        spans
+        // 危険提示: 任意他家立直时
+        let any_riichi = (1..=3).any(|i| self.game.players[i].riichi);
+        if any_riichi {
+            paint_str(
+                buf,
+                ox + 63,
+                oy + 29,
+                "│",
+                Style::default().fg(theme.line).bg(theme.bg),
+            );
+            paint_str(
+                buf,
+                ox + 65,
+                oy + 29,
+                "! 危険",
+                Style::default()
+                    .fg(theme.danger)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
+    }
+
+    /// row 31-35: 自家手牌 BoxedRow + 编号.
+    fn paint_my_hand(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
+        let p = &self.game.players[PLAYER_SEAT.index()];
+        let last_drawn_id = p.last_drawn.map(|t| t.id);
+        // 手牌排序后, 把 last_drawn 的牌挪到末尾.
+        let mut display: Vec<Tile> = p.hand.closed.clone();
+        let drawn_idx = if let Some(id) = last_drawn_id {
+            if let Some(pos) = display.iter().position(|t| t.id == id) {
+                let t = display.remove(pos);
+                display.push(t);
+                Some(display.len() - 1)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let selected_player = self.is_player_turn() && self.game.phase == Phase::AwaitDiscard;
+        // selected 是基于排序后的索引, 转到 display 索引
+        let selected = if selected_player {
+            // 查找原 selected 对应的 tile id, 在 display 里的位置
+            p.hand
+                .closed
+                .get(self.selected)
+                .and_then(|t| display.iter().position(|d| d.id == t.id))
+        } else {
+            None
+        };
+        paint_boxed_row(buf, ox + 4, oy + 31, &display, theme, selected, drawn_idx);
+        // 编号 row 35
+        for i in 0..display.len() {
+            let cx = ox + 4 + (i as u16) * 5 + 1;
+            paint_str(
+                buf,
+                cx,
+                oy + 35,
+                &format!("{:>2}", i + 1),
+                Style::default().fg(theme.dim).bg(theme.bg),
+            );
+        }
+    }
+
+    /// row 36-39: 底部 last 日志 / 模式 status / 使い方.
+    fn paint_bottom(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
+        paint_hr(buf, ox, oy + 36, 144, theme);
+        // row 37: last 动作日志 (取最近 4-6 个事件)
+        paint_str(
+            buf,
+            ox + 2,
+            oy + 37,
+            "last",
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+        let mut col = ox + 7;
+        for ev in self
+            .game
+            .events
+            .iter()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .iter()
+            .rev()
+        {
+            let (text, style) = format_event(ev, theme);
+            if col + (text.chars().count() as u16) >= ox + 118 {
+                break;
+            }
+            paint_str(buf, col, oy + 37, &text, style);
+            col += text.chars().count() as u16 + 1;
+            paint_str(
+                buf,
+                col,
+                oy + 37,
+                "·",
+                Style::default().fg(theme.dim).bg(theme.bg),
+            );
+            col += 2;
+        }
+
+        // row 38: 模式 status + 提示 / COMMAND 输入框
+        // 整行 panel 背景
+        paint_fill(
+            buf,
+            ox,
+            oy + 38,
+            144,
+            1,
+            Style::default().bg(theme.panel).fg(theme.fg),
+        );
+        if self.input_mode == InputMode::Command {
+            paint_str(
+                buf,
+                ox + 2,
+                oy + 38,
+                ":",
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.panel)
+                    .add_modifier(Modifier::BOLD),
+            );
+            paint_str(
+                buf,
+                ox + 3,
+                oy + 38,
+                &self.command_buffer,
+                Style::default().fg(theme.fg).bg(theme.panel),
+            );
+            // 光标 (反色块)
+            let cur_x = ox + 3 + (self.command_buffer.chars().count() as u16);
+            paint_str(
+                buf,
+                cur_x,
+                oy + 38,
+                " ",
+                Style::default().fg(theme.bg).bg(theme.fg),
+            );
+        } else {
+            paint_str(
+                buf,
+                ox + 2,
+                oy + 38,
+                "提示  按",
+                Style::default().fg(theme.dim).bg(theme.panel),
+            );
+            self.paint_key_hint(buf, ox + 11, oy + 38, ":", theme.line, theme.fg);
+            paint_str(
+                buf,
+                ox + 14,
+                oy + 38,
+                "命令模式 ·",
+                Style::default().fg(theme.dim).bg(theme.panel),
+            );
+            self.paint_key_hint(buf, ox + 30, oy + 38, "m", theme.line, theme.fg);
+            paint_str(
+                buf,
+                ox + 33,
+                oy + 38,
+                "菜单 ·",
+                Style::default().fg(theme.dim).bg(theme.panel),
+            );
+            paint_str(
+                buf,
+                ox + 45,
+                oy + 38,
+                "[1-9]",
+                Style::default().fg(theme.ok).bg(theme.panel),
+            );
+            paint_str(
+                buf,
+                ox + 51,
+                oy + 38,
+                "选牌 ·",
+                Style::default().fg(theme.dim).bg(theme.panel),
+            );
+            self.paint_key_hint(buf, ox + 59, oy + 38, "d", theme.line, theme.fg);
+            paint_str(
+                buf,
+                ox + 62,
+                oy + 38,
+                "切 ·",
+                Style::default().fg(theme.dim).bg(theme.panel),
+            );
+            self.paint_key_hint(buf, ox + 68, oy + 38, "t", theme.line, theme.fg);
+            paint_str(
+                buf,
+                ox + 71,
+                oy + 38,
+                "摸切 ·",
+                Style::default().fg(theme.dim).bg(theme.panel),
+            );
+            self.paint_key_hint(buf, ox + 79, oy + 38, "R", theme.danger, theme.danger);
+            paint_str(
+                buf,
+                ox + 82,
+                oy + 38,
+                "立直",
+                Style::default().fg(theme.danger).bg(theme.panel),
+            );
+            self.paint_key_hint(buf, ox + 88, oy + 38, "W", theme.ok, theme.ok);
+            paint_str(
+                buf,
+                ox + 91,
+                oy + 38,
+                "自摸",
+                Style::default().fg(theme.ok).bg(theme.panel),
+            );
+        }
+        // 模式徽章 (col 120)
+        let badge_label = match self.input_mode {
+            InputMode::Normal => " NORMAL ",
+            InputMode::Command => " COMMAND ",
+        };
+        let badge_bg = if self.input_mode == InputMode::Command {
+            theme.accent
+        } else {
+            theme.ok
+        };
+        paint_str(
+            buf,
+            ox + 120,
+            oy + 38,
+            badge_label,
+            Style::default()
+                .fg(theme.bg)
+                .bg(badge_bg)
+                .add_modifier(Modifier::BOLD),
+        );
+        paint_str(
+            buf,
+            ox + 132,
+            oy + 38,
+            "hjkl ←→",
+            Style::default().fg(theme.dim).bg(theme.panel),
+        );
+
+        // row 39: 使い方
+        paint_str(
+            buf,
+            ox + 2,
+            oy + 39,
+            "使い方",
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+        let cmds = [
+            (":discard 5p", 11u16),
+            (":riichi 4m", 26),
+            (":tsumo", 39),
+            (":pon", 48),
+            (":kan", 55),
+            (":menu", 62),
+            (":resign", 72),
+        ];
+        for (s, col) in cmds {
+            paint_str(
+                buf,
+                ox + col,
+                oy + 39,
+                s,
+                Style::default().fg(theme.fg).bg(theme.bg),
+            );
+        }
+    }
+
+    /// 单个键位提示 (圆角框包裹).
+    fn paint_key_hint(
+        &self,
+        buf: &mut Buffer,
+        x: u16,
+        y: u16,
+        label: &str,
+        border_color: ratatui::style::Color,
+        fg: ratatui::style::Color,
+    ) {
+        // 用 [X] 简化样式
+        paint_str(
+            buf,
+            x,
+            y,
+            &format!("[{}]", label),
+            Style::default()
+                .fg(fg)
+                .bg(self.game.config.theme.theme().panel)
+                .add_modifier(Modifier::BOLD),
+        );
+        // border_color 暂未使用 (简化 [X] 风格), 留参数以备后续装饰
+        let _ = border_color;
+    }
+
+    /// Action Modal 浮窗.
+    fn paint_modal(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
+        let w: u16 = 56;
+        let h: u16 = 20;
+        let mx = ox + 44;
+        let my = oy + 10;
+        // 背景填充 (panel 色)
+        paint_fill(
+            buf,
+            mx,
+            my,
+            w,
+            h,
+            Style::default().bg(theme.panel).fg(theme.fg),
+        );
+        paint_double_box(buf, mx, my, w, h, theme, Some("Action ・ 行动"));
+
+        let actions = self.collect_modal_actions();
+        // 信息行
+        let g = &self.game;
+        let junme = g.players[0].river.len() + 1;
+        paint_str(
+            buf,
+            mx + 2,
+            my + 2,
+            &format!("巡 {}", junme),
+            Style::default().fg(theme.dim).bg(theme.panel),
+        );
+        if let Some(t) = g.players[PLAYER_SEAT.index()].last_drawn {
+            paint_str(
+                buf,
+                mx + 8,
+                my + 2,
+                "你摸到",
+                Style::default().fg(theme.fg).bg(theme.panel),
+            );
+            paint_tile_wide(buf, mx + 14, my + 2, Some(&t), theme, TileState::Normal);
+        }
+        paint_str(
+            buf,
+            mx + 2,
+            my + 4,
+            &"─".repeat((w - 4) as usize),
+            Style::default().fg(theme.line).bg(theme.panel),
+        );
+
+        // 选项列表 (从 row+5 起, 每项 2 行)
+        for (i, action) in actions.iter().enumerate() {
+            let row = my + 5 + (i as u16) * 2;
+            if row + 1 >= my + h - 2 {
+                break;
+            }
+            let highlight = i == self.modal_selected;
+            let fg = if !action.enabled {
+                theme.dim
+            } else if highlight {
+                theme.bg
+            } else {
+                theme.fg
+            };
+            let bg = if highlight && action.enabled {
+                theme.accent
+            } else {
+                theme.panel
+            };
+            // 整行 highlight 背景
+            if highlight && action.enabled {
+                paint_fill(
+                    buf,
+                    mx + 1,
+                    row,
+                    w - 2,
+                    1,
+                    Style::default().bg(theme.accent_soft).fg(theme.fg),
+                );
+            }
+            // [Key]
+            paint_str(
+                buf,
+                mx + 2,
+                row,
+                &format!(" {} ", action.key),
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            );
+            // label
+            let label_style = if !action.enabled {
+                Style::default().fg(theme.dim).bg(theme.panel)
+            } else {
+                Style::default()
+                    .fg(theme.fg)
+                    .bg(theme.panel)
+                    .add_modifier(Modifier::BOLD)
+            };
+            paint_str(buf, mx + 7, row, action.label, label_style);
+            // detail
+            paint_str(
+                buf,
+                mx + 13,
+                row,
+                &action.detail,
+                Style::default().fg(theme.dim).bg(theme.panel),
+            );
+        }
+
+        // 帮助行
+        paint_str(
+            buf,
+            mx + 2,
+            my + h - 2,
+            "↑↓ 选择 ・ Enter 确认 ・ Esc 关闭",
+            Style::default().fg(theme.dim).bg(theme.panel),
+        );
+    }
+}
+
+/// 找到玩家立直时弃出的牌在 river 里的索引. 简化: 当 player.riichi 时找最早的弃牌索引.
+fn riichi_index_in_river(p: &crate::game::PlayerState) -> Option<usize> {
+    if p.riichi && !p.river.is_empty() {
+        // MVP: 立直牌 = 立直时切的那张, 但当前 PlayerState 没存. 用 None 暂不标记.
+        // 后续 task 可加 riichi_river_idx 字段.
+        None
+    } else {
+        None
+    }
+}
+
+/// 把 TileIndex 渲染成 tight 文本 (3 cells: "1萬" / "東 ").
+fn kind_label_tight(kind: TileIndex) -> String {
+    let n = kind.0;
+    match n {
+        0..=8 => format!("{}萬", n + 1),
+        9..=17 => format!("{}筒", n - 9 + 1),
+        18..=26 => format!("{}索", n - 18 + 1),
+        27 => "東 ".into(),
+        28 => "南 ".into(),
+        29 => "西 ".into(),
+        30 => "北 ".into(),
+        31 => "白 ".into(),
+        32 => "發 ".into(),
+        33 => "中 ".into(),
+        _ => "?? ".into(),
+    }
+}
+
+fn format_event(ev: &GameEvent, theme: &Theme) -> (String, Style) {
+    let s = Style::default().bg(theme.bg);
+    match ev {
+        GameEvent::Discard { who, tile } => (
+            format!("{} 打 {}", seat_short(*who), kind_label_tight(tile.kind)),
+            s.fg(theme.dim),
+        ),
+        GameEvent::Draw { who, .. } => (format!("{} 摸", seat_short(*who)), s.fg(theme.info)),
+        GameEvent::Pon { who, tile } => (
+            format!("{} 碰 {}", seat_short(*who), kind_label_tight(tile.kind)),
+            s.fg(theme.info),
+        ),
+        GameEvent::Chi { who, tile } => (
+            format!("{} 吃 {}", seat_short(*who), kind_label_tight(tile.kind)),
+            s.fg(theme.info),
+        ),
+        GameEvent::Minkan { who, tile } => (
+            format!("{} 杠 {}", seat_short(*who), kind_label_tight(tile.kind)),
+            s.fg(theme.accent),
+        ),
+        GameEvent::Ankan { who, kind } => (
+            format!("{} 暗杠 {}", seat_short(*who), kind_label_tight(*kind)),
+            s.fg(theme.accent),
+        ),
+        GameEvent::Shouminkan { who, kind } => (
+            format!("{} 加杠 {}", seat_short(*who), kind_label_tight(*kind)),
+            s.fg(theme.accent),
+        ),
+        GameEvent::Riichi { who, .. } => (
+            format!("{} 立直", seat_short(*who)),
+            s.fg(theme.danger).add_modifier(Modifier::BOLD),
+        ),
+        GameEvent::Tsumo { who } => (
+            format!("{} 自摸", seat_short(*who)),
+            s.fg(theme.ok).add_modifier(Modifier::BOLD),
+        ),
+        GameEvent::Ron { who, .. } => (
+            format!("{} 荣和", seat_short(*who)),
+            s.fg(theme.ok).add_modifier(Modifier::BOLD),
+        ),
+    }
+}
+
+fn seat_short(s: Seat) -> &'static str {
+    match s {
+        Seat::East => "你",
+        Seat::South => "下家",
+        Seat::West => "对家",
+        Seat::North => "上家",
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModalAction {
+    pub key: char,
+    pub label: &'static str,
+    pub detail: String,
+    pub enabled: bool,
+}
+
+impl GameScreenState {
+    /// 收集 modal 中要显示的动作清单.
+    pub fn collect_modal_actions(&self) -> Vec<ModalAction> {
+        let mut out = Vec::new();
+        // AwaitDiscard 自家
+        if self.game.phase == Phase::AwaitDiscard && self.is_player_turn() {
+            let opts = self.game.legal_self_options();
+            out.push(ModalAction {
+                key: 'R',
+                label: "立直",
+                detail: if opts.riichi_discards.is_empty() {
+                    "未聴牌或无法立直".into()
+                } else {
+                    format!("{} 张可立直", opts.riichi_discards.len())
+                },
+                enabled: !opts.riichi_discards.is_empty(),
+            });
+            out.push(ModalAction {
+                key: 'W',
+                label: "自摸",
+                detail: if opts.tsumo {
+                    "已聴, 直接和牌".into()
+                } else {
+                    "未満和牌役 (无 ツモ 役)".into()
+                },
+                enabled: opts.tsumo,
+            });
+            out.push(ModalAction {
+                key: 'K',
+                label: "暗杠",
+                detail: if opts.ankan.is_empty() {
+                    "无可暗杠组".into()
+                } else {
+                    format!("{} 种可暗杠", opts.ankan.len())
+                },
+                enabled: !opts.ankan.is_empty(),
+            });
+            out.push(ModalAction {
+                key: 'D',
+                label: "切牌",
+                detail: "选择手牌中一张打出".into(),
+                enabled: true,
+            });
+            out.push(ModalAction {
+                key: 'T',
+                label: "摸切",
+                detail: "切出刚摸到的牌(不变手牌)".into(),
+                enabled: self.game.players[PLAYER_SEAT.index()].last_drawn.is_some(),
+            });
+        }
+        // AwaitCalls (玩家有响应)
+        if let Some(opts) = self.player_calls.as_ref() {
+            out.push(ModalAction {
+                key: 'W',
+                label: "荣和",
+                detail: if opts.ron {
+                    "可和牌".into()
+                } else {
+                    "无役不可和".into()
+                },
+                enabled: opts.ron,
+            });
+            out.push(ModalAction {
+                key: 'P',
+                label: "碰",
+                detail: if opts.pon.is_some() {
+                    "组成刻子".into()
+                } else {
+                    "无对子".into()
+                },
+                enabled: opts.pon.is_some(),
+            });
+            out.push(ModalAction {
+                key: 'A',
+                label: "吃",
+                detail: if !opts.chi.is_empty() {
+                    format!("共 {} 种吃法", opts.chi.len())
+                } else {
+                    "无连续".into()
+                },
+                enabled: !opts.chi.is_empty(),
+            });
+            out.push(ModalAction {
+                key: 'M',
+                label: "明杠",
+                detail: if opts.minkan.is_some() {
+                    "三同张".into()
+                } else {
+                    "无三张".into()
+                },
+                enabled: opts.minkan.is_some(),
+            });
+            out.push(ModalAction {
+                key: 'C',
+                label: "跳过",
+                detail: "放弃响应".into(),
+                enabled: true,
+            });
+        }
+        out
     }
 }
 
@@ -787,6 +1836,142 @@ fn ron_check_order(from: Seat) -> [Seat; 4] {
         s = s.next();
     }
     out
+}
+
+// ============== vim 命令解析 ==============
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedCommand {
+    Discard(TileSpec),
+    Riichi(TileSpec),
+    Tsumo,
+    Pon,
+    Kan,
+    Chi,
+    Menu,
+    Resign,
+    Unknown(String),
+}
+
+/// 牌种说明符: 接受 "5p" / "p5" / "五筒" / "東" 等.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileSpec {
+    pub kind: TileIndex,
+}
+
+impl TileSpec {
+    pub fn matches(&self, k: TileIndex) -> bool {
+        self.kind == k
+    }
+}
+
+pub fn parse_command(s: &str) -> ParsedCommand {
+    let s = s.trim();
+    if s.is_empty() {
+        return ParsedCommand::Unknown(String::new());
+    }
+    let mut parts = s.splitn(2, ' ');
+    let head = parts.next().unwrap_or("").to_lowercase();
+    let arg = parts.next().unwrap_or("").trim();
+    match head.as_str() {
+        "discard" | "d" => match parse_tile_spec(arg) {
+            Some(spec) => ParsedCommand::Discard(spec),
+            None => ParsedCommand::Unknown(s.to_string()),
+        },
+        "riichi" | "r" => match parse_tile_spec(arg) {
+            Some(spec) => ParsedCommand::Riichi(spec),
+            None => ParsedCommand::Unknown(s.to_string()),
+        },
+        "tsumo" | "t" => ParsedCommand::Tsumo,
+        "pon" | "p" => ParsedCommand::Pon,
+        "kan" | "k" => ParsedCommand::Kan,
+        "chi" | "a" => ParsedCommand::Chi,
+        "menu" | "m" => ParsedCommand::Menu,
+        "resign" => ParsedCommand::Resign,
+        _ => ParsedCommand::Unknown(s.to_string()),
+    }
+}
+
+/// 接受的牌输入:
+/// - ASCII: "5p" / "p5" / "5m" / "9s" / "1z"-"7z" (z = 字牌, 1=東 .. 7=中)
+/// - 中文数字 + 花色: "五筒" / "三索" / "九萬"
+/// - 字牌: "东南西北白发中" / "東南西北白發中"
+pub fn parse_tile_spec(s: &str) -> Option<TileSpec> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // 单字符字牌
+    let kind = match s {
+        "東" | "东" | "1z" | "z1" => Some(TileIndex::EAST),
+        "南" | "2z" | "z2" => Some(TileIndex::SOUTH),
+        "西" | "3z" | "z3" => Some(TileIndex::WEST),
+        "北" | "4z" | "z4" => Some(TileIndex::NORTH),
+        "白" | "5z" | "z5" => Some(TileIndex::HAKU),
+        "發" | "发" | "6z" | "z6" => Some(TileIndex::HATSU),
+        "中" | "7z" | "z7" => Some(TileIndex::CHUN),
+        _ => None,
+    };
+    if let Some(k) = kind {
+        return Some(TileSpec { kind: k });
+    }
+    // ASCII 数字 + 花色 (5p / p5)
+    let ascii_lo = s.to_lowercase();
+    let (n, suit) = parse_num_suit_ascii(&ascii_lo)?;
+    if !(1..=9).contains(&n) {
+        return None;
+    }
+    let base = match suit {
+        'm' => 0u8,
+        'p' => 9,
+        's' => 18,
+        _ => return None,
+    };
+    Some(TileSpec {
+        kind: TileIndex(base + (n - 1) as u8),
+    })
+}
+
+fn parse_num_suit_ascii(s: &str) -> Option<(u32, char)> {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() != 2 {
+        // 试中文数字 + 花色 (e.g. "五筒")
+        return parse_cn_num_suit(s);
+    }
+    let (a, b) = (chars[0], chars[1]);
+    if a.is_ascii_digit() {
+        Some((a.to_digit(10)?, b))
+    } else if b.is_ascii_digit() {
+        Some((b.to_digit(10)?, a))
+    } else {
+        parse_cn_num_suit(s)
+    }
+}
+
+fn parse_cn_num_suit(s: &str) -> Option<(u32, char)> {
+    const CN_NUM: &[(&str, u32)] = &[
+        ("一", 1),
+        ("二", 2),
+        ("三", 3),
+        ("四", 4),
+        ("五", 5),
+        ("六", 6),
+        ("七", 7),
+        ("八", 8),
+        ("九", 9),
+    ];
+    for (cn, n) in CN_NUM {
+        if let Some(rest) = s.strip_prefix(cn) {
+            let suit = match rest {
+                "萬" | "万" => 'm',
+                "筒" | "饼" => 'p',
+                "索" | "条" => 's',
+                _ => return None,
+            };
+            return Some((*n, suit));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -804,7 +1989,7 @@ mod tests {
     #[test]
     fn app_can_complete_a_round_without_panic() {
         let mut app = GameScreenState::new(GameConfig::default(), 0xC0FFEE);
-        let backend = TestBackend::new(120, 40);
+        let backend = TestBackend::new(144, 40);
         let mut term = Terminal::new(backend).unwrap();
 
         for _ in 0..5000 {
@@ -832,7 +2017,7 @@ mod tests {
     #[test]
     fn app_can_advance_through_multiple_rounds() {
         let mut app = GameScreenState::new(GameConfig::default(), 0xC0FFEE);
-        let backend = TestBackend::new(120, 40);
+        let backend = TestBackend::new(144, 40);
         let mut term = Terminal::new(backend).unwrap();
 
         let mut rounds = 0;
@@ -863,5 +2048,70 @@ mod tests {
             }
         }
         assert!(rounds >= 3 || app.game.phase == Phase::GameEnd);
+    }
+
+    #[test]
+    fn parse_command_basic() {
+        assert!(matches!(parse_command("tsumo"), ParsedCommand::Tsumo));
+        assert!(matches!(parse_command("t"), ParsedCommand::Tsumo));
+        assert!(matches!(parse_command("pon"), ParsedCommand::Pon));
+        assert!(matches!(parse_command("kan"), ParsedCommand::Kan));
+        assert!(matches!(parse_command("menu"), ParsedCommand::Menu));
+        assert!(matches!(parse_command("resign"), ParsedCommand::Resign));
+        assert!(matches!(parse_command("nope"), ParsedCommand::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_command_discard_riichi() {
+        // 5p
+        let p5 = TileIndex(13);
+        match parse_command("discard 5p") {
+            ParsedCommand::Discard(spec) => assert_eq!(spec.kind, p5),
+            other => panic!("期望 Discard, 得到 {:?}", other),
+        }
+        match parse_command("d p5") {
+            ParsedCommand::Discard(spec) => assert_eq!(spec.kind, p5),
+            other => panic!("期望 Discard, 得到 {:?}", other),
+        }
+        // 中文
+        match parse_command("discard 五筒") {
+            ParsedCommand::Discard(spec) => assert_eq!(spec.kind, p5),
+            other => panic!("期望 Discard, 得到 {:?}", other),
+        }
+        // 字牌
+        match parse_command("riichi 東") {
+            ParsedCommand::Riichi(spec) => assert_eq!(spec.kind, TileIndex::EAST),
+            other => panic!("期望 Riichi, 得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_tile_spec_variants() {
+        assert_eq!(parse_tile_spec("5p").unwrap().kind, TileIndex(13));
+        assert_eq!(parse_tile_spec("p5").unwrap().kind, TileIndex(13));
+        assert_eq!(parse_tile_spec("9m").unwrap().kind, TileIndex(8));
+        assert_eq!(parse_tile_spec("1s").unwrap().kind, TileIndex(18));
+        assert_eq!(parse_tile_spec("中").unwrap().kind, TileIndex::CHUN);
+        assert_eq!(parse_tile_spec("发").unwrap().kind, TileIndex::HATSU);
+        assert!(parse_tile_spec("0p").is_none());
+        assert!(parse_tile_spec("xx").is_none());
+    }
+
+    #[test]
+    fn modal_actions_in_await_discard() {
+        let mut app = GameScreenState::new(GameConfig::default(), 0xC0FFEE);
+        // 模拟玩家摸牌阶段
+        let _ = app.advance(); // Deal -> Draw
+        let _ = app.advance(); // Draw 自家
+        // 此时 phase 应是 AwaitDiscard, 是自家 (East)
+        if app.is_player_turn() && app.game.phase == Phase::AwaitDiscard {
+            let actions = app.collect_modal_actions();
+            // 至少含 R/W/K/D/T 五项
+            assert!(actions.iter().any(|a| a.key == 'R'));
+            assert!(actions.iter().any(|a| a.key == 'W'));
+            assert!(actions.iter().any(|a| a.key == 'K'));
+            assert!(actions.iter().any(|a| a.key == 'D'));
+            assert!(actions.iter().any(|a| a.key == 'T'));
+        }
     }
 }

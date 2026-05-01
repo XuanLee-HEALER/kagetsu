@@ -3,7 +3,9 @@
 //! 屏间通过 [`Transition`] 切换. App 持有 [`last_config`] / [`last_seed_choice`]
 //! 用于"新游戏"复用上次配置.
 
+pub mod paint;
 pub mod screens;
+pub mod theme;
 pub mod widgets;
 
 use anyhow::Result;
@@ -105,12 +107,19 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<Transition> {
-        // 全局快捷键: Q 总是退出.
-        if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
+        // 大写 T: 全局切换主题 (避免与 InGame 的小写 t 冲突).
+        // COMMAND 模式下放行让命令缓冲区接受字符.
+        if key.code == KeyCode::Char('T') && !self.is_in_command_mode() {
+            self.cycle_theme();
+            return None;
+        }
+        // 全局快捷键: Q 总是退出 (但 COMMAND 模式下当字符).
+        if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) && !self.is_in_command_mode()
+        {
             return Some(Transition::Quit);
         }
-        // Esc: 主菜单上不响应; 其它屏回主菜单.
-        if key.code == KeyCode::Esc {
+        // Esc: 主菜单上不响应; 其它屏回主菜单 (但 COMMAND 模式下交给屏处理 → 取消命令).
+        if key.code == KeyCode::Esc && !self.is_in_command_mode() {
             return match self.screen {
                 Screen::MainMenu(_) => None,
                 _ => Some(Transition::EnterMainMenu),
@@ -122,6 +131,25 @@ impl App {
             Screen::Config(s) => s.handle_event(key),
             Screen::InGame(s) => s.handle_event(key),
             Screen::GameOver(s) => s.handle_event(key),
+        }
+    }
+
+    fn is_in_command_mode(&self) -> bool {
+        if let Screen::InGame(s) = &self.screen {
+            s.is_command_mode()
+        } else {
+            false
+        }
+    }
+
+    fn cycle_theme(&mut self) {
+        let next = self.last_config.theme.next();
+        self.last_config.theme = next;
+        // 同步到当前屏幕.
+        match &mut self.screen {
+            Screen::Config(c) => c.config.theme = next,
+            Screen::InGame(s) => s.set_theme(next),
+            _ => {}
         }
     }
 
@@ -156,12 +184,52 @@ impl App {
 
     fn render(&self, f: &mut ratatui::Frame) {
         let area = f.area();
+        const MIN_W: u16 = 144;
+        const MIN_H: u16 = 40;
+        if area.width < MIN_W || area.height < MIN_H {
+            self.render_size_warning(f, area, MIN_W, MIN_H);
+            return;
+        }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(10), Constraint::Length(1)])
             .split(area);
         self.render_main(f, chunks[0]);
         self.render_global_footer(f, chunks[1]);
+    }
+
+    fn render_size_warning(&self, f: &mut ratatui::Frame, area: Rect, min_w: u16, min_h: u16) {
+        let theme = self.last_config.theme.theme();
+        // 整屏背景色.
+        let buf = f.buffer_mut();
+        for y in area.y..(area.y + area.height) {
+            for x in area.x..(area.x + area.width) {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_char(' ').set_bg(theme.bg).set_fg(theme.fg);
+                }
+            }
+        }
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "终端窗口太小",
+                Style::default()
+                    .fg(theme.danger)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(format!("当前尺寸: {} × {}", area.width, area.height)),
+            Line::from(format!("需要尺寸: {} × {}", min_w, min_h)),
+            Line::from(""),
+            Line::from(Span::styled(
+                "请放大窗口 (或按 F11 全屏)",
+                Style::default().fg(theme.fg),
+            )),
+            Line::from(""),
+            Line::from(Span::styled("Q 退出", Style::default().fg(theme.dim))),
+        ];
+        let p = Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(p, area);
     }
 
     fn render_main(&self, f: &mut ratatui::Frame, area: Rect) {

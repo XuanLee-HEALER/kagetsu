@@ -3,6 +3,8 @@
 //! 默认采用 WRC 2022 主基, 古役默认关闭(用户可开启).
 //! 详见 docs/spec/README.md
 
+use crate::ui::theme::ThemeKind;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MultiRonRule {
     /// 头跳: 仅最近一家可和.
@@ -61,6 +63,8 @@ pub struct GameConfig {
     pub uma: [i32; 4],
     /// 玩家单步思考时长(秒). None = 不限时.
     pub thinking_time_secs: Option<u32>,
+    /// UI 主题.
+    pub theme: ThemeKind,
 }
 
 impl Default for GameConfig {
@@ -88,6 +92,7 @@ impl Default for GameConfig {
             target_score: 30_000,
             uma: [15, 5, -5, -15],
             thinking_time_secs: Some(30),
+            theme: ThemeKind::Dark,
         }
     }
 }

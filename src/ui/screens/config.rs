@@ -321,7 +321,15 @@ const ROWS: &[Row] = &[
             s.config.uma = UMA_PRESETS[cycle_idx(cur, UMA_PRESETS.len(), d)];
         },
     },
-    // 21
+    // 21 (新增)
+    Row {
+        label: "主题",
+        format: |s| s.config.theme.label().to_string(),
+        adjust: |s, _| {
+            s.config.theme = s.config.theme.next();
+        },
+    },
+    // 22
     Row {
         label: "思考时长",
         format: |s| match s.config.thinking_time_secs {
@@ -337,7 +345,7 @@ const ROWS: &[Row] = &[
                 THINKING_PRESETS[cycle_idx(cur, THINKING_PRESETS.len(), d)];
         },
     },
-    // 22
+    // 23
     Row {
         label: "种子",
         format: |s| match s.seed_choice {

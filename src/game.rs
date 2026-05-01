@@ -4,6 +4,8 @@
 //! 简化: 振听不强制(能和就和), 多家荣和按头跳, AI 不主动鸣牌(只荣和).
 //! 详见 docs/spec/game-flow.md
 
+use std::collections::VecDeque;
+
 use crate::config::GameConfig;
 use crate::decompose::decompose;
 use crate::hand::Hand;
@@ -12,6 +14,23 @@ use crate::score::{PaymentDistribution, ScoreResult, distribute, evaluate};
 use crate::tile::{Tile, TileIndex, count_by_kind};
 use crate::wall::Wall;
 use crate::yaku::WinContext;
+
+/// 局内动作事件, 给 UI 渲染最近动作日志使用.
+#[derive(Debug, Clone)]
+pub enum GameEvent {
+    Draw { who: Seat, tile: Tile },
+    Discard { who: Seat, tile: Tile },
+    Pon { who: Seat, tile: Tile },
+    Chi { who: Seat, tile: Tile },
+    Minkan { who: Seat, tile: Tile },
+    Ankan { who: Seat, kind: TileIndex },
+    Shouminkan { who: Seat, kind: TileIndex },
+    Riichi { who: Seat, tile: Tile },
+    Tsumo { who: Seat },
+    Ron { who: Seat, from: Seat },
+}
+
+const MAX_EVENTS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -160,6 +179,8 @@ pub struct GameState {
     pub round_seed: u64,
     /// 第一巡是否仍未被打断(用于天和/地和等).
     pub first_go_around: bool,
+    /// 最近动作事件 (UI 用), 最多 MAX_EVENTS 条 (新事件 push_back).
+    pub events: VecDeque<GameEvent>,
 }
 
 impl GameState {
@@ -185,13 +206,22 @@ impl GameState {
             last_result: None,
             round_seed: 0,
             first_go_around: true,
+            events: VecDeque::new(),
         }
+    }
+
+    fn push_event(&mut self, ev: GameEvent) {
+        if self.events.len() >= MAX_EVENTS {
+            self.events.pop_front();
+        }
+        self.events.push_back(ev);
     }
 
     pub fn start_round(&mut self, seed: u64) {
         self.round_seed = seed;
         self.last_discard = None;
         self.last_result = None;
+        self.events.clear();
         self.first_go_around = true;
 
         for p in self.players.iter_mut() {
@@ -228,6 +258,7 @@ impl GameState {
         sort_hand(&mut self.players[seat.index()].hand.closed);
         self.players[seat.index()].last_drawn = Some(t);
         self.phase = Phase::AwaitDiscard;
+        self.push_event(GameEvent::Draw { who: seat, tile: t });
         Some(t)
     }
 
@@ -334,6 +365,10 @@ impl GameState {
         p.ippatsu_active = false;
         sort_hand(&mut p.hand.closed);
         self.phase = Phase::AwaitCalls;
+        self.push_event(GameEvent::Discard {
+            who: seat,
+            tile: removed,
+        });
         Ok(())
     }
 
@@ -378,6 +413,7 @@ impl GameState {
         });
         self.riichi_sticks = 0;
         self.phase = Phase::RoundEnd;
+        self.push_event(GameEvent::Tsumo { who: winner });
     }
 
     /// 宣告某家荣和.
@@ -402,6 +438,9 @@ impl GameState {
         });
         self.riichi_sticks = 0;
         self.phase = Phase::RoundEnd;
+        if let Some(from) = loser {
+            self.push_event(GameEvent::Ron { who, from });
+        }
     }
 
     fn apply_payments(&mut self, payments: &[PaymentDistribution]) {
@@ -662,6 +701,7 @@ impl GameState {
         self.turn = who;
         self.phase = Phase::AwaitDiscard;
         sort_hand(&mut self.players[who.index()].hand.closed);
+        self.push_event(GameEvent::Pon { who, tile });
         Ok(())
     }
 
@@ -694,6 +734,7 @@ impl GameState {
         self.turn = who;
         self.phase = Phase::AwaitDiscard;
         sort_hand(&mut self.players[who.index()].hand.closed);
+        self.push_event(GameEvent::Chi { who, tile });
         Ok(())
     }
 
@@ -719,6 +760,7 @@ impl GameState {
         self.turn = who;
         self.kan_draw_and_reveal(who);
         self.phase = Phase::AwaitDiscard;
+        self.push_event(GameEvent::Minkan { who, tile });
         Ok(())
     }
 
@@ -750,6 +792,7 @@ impl GameState {
         });
         self.break_first_round_and_ippatsu();
         self.kan_draw_and_reveal(seat);
+        self.push_event(GameEvent::Ankan { who: seat, kind });
         Ok(())
     }
 
@@ -785,6 +828,7 @@ impl GameState {
         };
         self.break_first_round_and_ippatsu();
         self.kan_draw_and_reveal(seat);
+        self.push_event(GameEvent::Shouminkan { who: seat, kind });
         Ok(())
     }
 
@@ -824,6 +868,7 @@ impl GameState {
         p.ippatsu_active = true;
         p.score -= 1000;
         self.riichi_sticks += 1;
+        self.push_event(GameEvent::Riichi { who: seat, tile });
         Ok(())
     }
 
