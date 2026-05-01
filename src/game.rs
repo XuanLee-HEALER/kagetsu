@@ -463,9 +463,15 @@ impl GameState {
         if dealer_won {
             self.honba += 1;
         } else if is_ryuukyoku {
+            // 流局: 本场总 +1; 亲家听牌则连庄, 不听牌则下庄.
             self.honba += 1;
-            // 简化: 不判定亲家是否听牌, 不连庄, 直接推庄.
-            self.advance_kyoku();
+            let dealer_p = &self.players[self.dealer.index()];
+            let counts = count_by_kind(&dealer_p.hand.closed);
+            let dealer_tenpai =
+                !crate::decompose::tenpai_tiles(&counts, &dealer_p.hand.melds).is_empty();
+            if !dealer_tenpai {
+                self.advance_kyoku();
+            }
         } else {
             self.honba = 0;
             self.advance_kyoku();

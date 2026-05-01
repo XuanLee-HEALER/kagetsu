@@ -224,14 +224,12 @@ impl GameScreenState {
                 self.clear_deadline();
             }
             Phase::RoundEnd => {
-                // 首次进入 RoundEnd: 设置 message + 计时起点.
+                // 首次进入 RoundEnd: 设置 message.
                 if self.round_end_at.is_none() {
                     self.round_end_at = Some(Instant::now());
                     if let Some(result) = self.game.last_result.clone() {
                         self.message = match &result {
-                            RoundResult::Ryuukyoku { .. } => {
-                                "流局. 2 秒后自动进下一局 (或按 N).".to_string()
-                            }
+                            RoundResult::Ryuukyoku { .. } => "流局. 按 N 进下一局.".to_string(),
                             RoundResult::Win {
                                 winner,
                                 score,
@@ -260,19 +258,7 @@ impl GameScreenState {
                         };
                     }
                 }
-                // 流局自动推进 (2 秒后); 和牌等用户按 N.
-                let is_ryuukyoku =
-                    matches!(self.game.last_result, Some(RoundResult::Ryuukyoku { .. }));
-                if is_ryuukyoku
-                    && self
-                        .round_end_at
-                        .is_some_and(|t| t.elapsed().as_secs() >= 2)
-                {
-                    self.game.next_round();
-                    self.round_end_at = None;
-                    self.message.clear();
-                    self.last_step_at = Instant::now();
-                }
+                // 流局/和牌都等用户按 N 主动推进 (next_round).
             }
             Phase::GameEnd => {
                 let rankings = final_ranking(&self.game.players, &self.game.config);
@@ -1249,16 +1235,18 @@ impl GameScreenState {
                 .bg(theme.bg)
                 .add_modifier(Modifier::BOLD),
         );
+        // 玩家固定坐东侧 (PLAYER_SEAT = East), 但自风随庄家轮转: 东1=東, 东2=北, …
+        let player_wind = self.game.seat_wind_of(PLAYER_SEAT);
         let dealer_str = if PLAYER_SEAT == self.game.dealer {
-            "東 ◆庄"
+            format!("{} ◆庄", player_wind.short())
         } else {
-            "東"
+            player_wind.short().to_string()
         };
         paint_str(
             buf,
             ox + 9,
             oy + 29,
-            dealer_str,
+            &dealer_str,
             Style::default().fg(theme.accent).bg(theme.bg),
         );
         paint_str(
