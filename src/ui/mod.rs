@@ -253,34 +253,29 @@ impl App {
         use crate::net::server::spawn_ws_server;
         use crate::net::session::spawn_local_session;
 
-        let handle = spawn_room(nickname.clone(), self.last_config.clone());
-
-        // 启动 ws server 监听 0.0.0.0:0 (OS 选端口).
-        let port_result = self
-            .runtime
-            .block_on(async { spawn_ws_server(handle.clone(), 0).await });
-        let port = match port_result {
-            Ok(addr) => Some(addr.port()),
+        // spawn_room 内部用 tokio::spawn, 必须在 runtime context 中调用.
+        // 整个 setup (spawn_room + spawn_ws_server + spawn_local_session)
+        // 包在一次 block_on 内确保都在 runtime 内.
+        let setup_result = self.runtime.block_on(async {
+            let handle = spawn_room(nickname.clone(), self.last_config.clone());
+            let port_addr = spawn_ws_server(handle.clone(), 0)
+                .await
+                .map_err(|e| format!("ws server 启动失败: {e}"))?;
+            let session = spawn_local_session(handle.clone(), nickname.clone())
+                .await
+                .map_err(|e| format!("房主 join 失败: {e}"))?;
+            Ok::<_, String>((port_addr.port(), session))
+        });
+        let (port, session) = match setup_result {
+            Ok(v) => (Some(v.0), v.1),
             Err(e) => {
-                tracing::error!("ws server 启动失败: {e}");
-                None
-            }
-        };
-        self.host_port = port;
-
-        // 房主 join (LocalSession).
-        let join_result = self
-            .runtime
-            .block_on(async { spawn_local_session(handle.clone(), nickname.clone()).await });
-        let session = match join_result {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("房主 join 失败: {e}");
+                tracing::error!("创建房间失败: {e}");
                 self.screen =
                     Screen::OnlineLobby(OnlineLobbyState::with_message(format!("创建失败: {e}")));
                 return;
             }
         };
+        self.host_port = port;
 
         // 启动 mDNS 广告 (port 必须存在才有意义).
         let room_id = format!("{}", uuid::Uuid::new_v4());
