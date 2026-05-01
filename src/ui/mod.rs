@@ -118,8 +118,9 @@ impl App {
         {
             return Some(Transition::Quit);
         }
-        // Esc: 主菜单上不响应; 其它屏回主菜单 (但 COMMAND 模式下交给屏处理 → 取消命令).
-        if key.code == KeyCode::Esc && !self.is_in_command_mode() {
+        // Esc: 主菜单上不响应; 其它屏回主菜单.
+        // 例外: COMMAND 模式 / Modal 打开时交给屏处理 (取消命令 / 关闭 modal).
+        if key.code == KeyCode::Esc && !self.is_in_command_mode() && !self.is_in_modal() {
             return match self.screen {
                 Screen::MainMenu(_) => None,
                 _ => Some(Transition::EnterMainMenu),
@@ -137,6 +138,14 @@ impl App {
     fn is_in_command_mode(&self) -> bool {
         if let Screen::InGame(s) = &self.screen {
             s.is_command_mode()
+        } else {
+            false
+        }
+    }
+
+    fn is_in_modal(&self) -> bool {
+        if let Screen::InGame(s) = &self.screen {
+            s.modal_open
         } else {
             false
         }
