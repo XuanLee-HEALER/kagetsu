@@ -4,7 +4,18 @@ version = "0.1.0"
 edition = "2024"
 description = "Riichi Mahjong (日本麻将) in your terminal, written in Rust + ratatui"
 license = "GPL-3.0-or-later"
+repository = "https://github.com/XuanLee-HEALER/tui-majo"
+homepage = "https://github.com/XuanLee-HEALER/tui-majo"
+readme = "README.md"
+keywords = ["mahjong", "riichi", "tui", "ratatui", "japanese"]
+categories = ["games", "command-line-utilities"]
 default-run = "tui-majo"
+exclude = [
+    ".design-package/",
+    "docs/scratch.md",
+    "docs/img/",
+    "*.png",
+]
 
 [dependencies]
 ratatui = "0.30"

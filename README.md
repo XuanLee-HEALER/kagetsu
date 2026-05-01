@@ -6,7 +6,7 @@
 
 ## 截图
 
-![tui-majo 截图](docs/img/screenshot.png)
+![tui-majo 截图](https://raw.githubusercontent.com/XuanLee-HEALER/tui-majo/master/docs/img/screenshot.png)
 
 ## 特性
 
