@@ -50,6 +50,11 @@ test:
 test-mod MOD:
     cargo test --lib {{MOD}}
 
+# 严格 fuzz: 1000 个随机 seed 跑分数守恒 (release, ~17 分钟)
+# 平时 just ci 只跑 16 cases, 发布前 / 重构后跑这个加深保护
+fuzz:
+    $env:PROPTEST_CASES = "1000"; cargo test --release --test proptest_invariants
+
 # 类型检查 (比 build 快)
 check:
     cargo check --all-targets

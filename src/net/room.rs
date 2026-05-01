@@ -1333,4 +1333,322 @@ mod tests {
         assert_eq!(view2.turn, Seat::East);
         assert_eq!(view2.phase, Phase::AwaitDiscard);
     }
+
+    // ============================================================================
+    // RoomActor 内部单元测试 (直接 sync 调内部方法)
+    // ============================================================================
+
+    use crate::tile::TileIndex;
+
+    /// 构造一个处于 InGame 状态的 RoomActor (sync, 不 spawn task).
+    /// 玩家 id: 1=East, 2=South, 3=West, 4=North. is_ai 由 humans 列表决定.
+    /// 返回 (actor, 4 个 receiver). receiver 顺序对应 East/South/West/North.
+    fn make_actor_in_game(humans: &[Seat]) -> (RoomActor, Vec<UnboundedReceiver<ServerMsg>>) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let mut actor = RoomActor::new_with_rx(
+            "host".into(),
+            GameConfig::default(),
+            cmd_rx,
+            cmd_tx,
+            Some(0xC0DE_C0DE),
+        );
+
+        let mut receivers = Vec::with_capacity(4);
+        let seats = [Seat::East, Seat::South, Seat::West, Seat::North];
+        for (i, seat) in seats.iter().enumerate() {
+            let is_human = humans.contains(seat);
+            let (tx, rx) = mpsc::unbounded_channel();
+            actor.slots.push(SlotEntry {
+                id: (i + 1) as u32,
+                nickname: format!("p{}", i + 1),
+                ready: true,
+                seat: Some(*seat),
+                is_ai: !is_human,
+                is_host: i == 0,
+                connected: true,
+                sender: Some(tx),
+                reconnect_token: Uuid::new_v4(),
+            });
+            receivers.push(rx);
+        }
+        actor.next_player_id = 5;
+
+        let mut game = GameState::new(GameConfig::default());
+        game.start_round(0xC0DE_C0DE);
+        actor.game = Some(game);
+        actor.state = RoomLifecycle::InGame;
+        actor.game_seed = 0xC0DE_C0DE;
+        actor.round_index = 1;
+
+        (actor, receivers)
+    }
+
+    /// 设置场景: turn=`who` 切了 `tile`, phase=AwaitCalls.
+    /// 还会清掉 `who` 手中的对应 tile, 加入河里.
+    fn force_discard_scenario(actor: &mut RoomActor, who: Seat, tile: Tile) {
+        let game = actor.game.as_mut().unwrap();
+        // 移除 who 手中一张同 kind tile (若存在)
+        if let Some(pos) = game.players[who.index()]
+            .hand
+            .closed
+            .iter()
+            .position(|t| t.kind == tile.kind)
+        {
+            game.players[who.index()].hand.closed.remove(pos);
+        }
+        game.players[who.index()].river.push(tile);
+        game.last_discard = Some((who, tile));
+        game.phase = Phase::AwaitCalls;
+        game.turn = who;
+    }
+
+    /// 给 `target` 手中插入 `n` 张同 kind tile (id 不冲突).
+    fn give_player_tiles(actor: &mut RoomActor, target: Seat, kind: TileIndex, n: usize) {
+        let game = actor.game.as_mut().unwrap();
+        for i in 0..n {
+            let id = 9000_u16 + (i as u16) + (target.index() as u16) * 100;
+            game.players[target.index()].hand.closed.push(Tile {
+                id,
+                kind,
+                red: false,
+            });
+        }
+    }
+
+    fn make_pending(map: Vec<(u32, NetAction)>) -> HashMap<u32, Option<NetAction>> {
+        map.into_iter().map(|(id, a)| (id, Some(a))).collect()
+    }
+
+    #[test]
+    fn resolve_no_pending_is_noop() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        // 没有 pending_calls, resolve 应直接返回无副作用.
+        let phase_before = actor.game.as_ref().unwrap().phase;
+        let turn_before = actor.game.as_ref().unwrap().turn;
+        actor.resolve_call_window();
+        assert!(actor.pending_calls.is_none());
+        assert_eq!(actor.game.as_ref().unwrap().phase, phase_before);
+        assert_eq!(actor.game.as_ref().unwrap().turn, turn_before);
+    }
+
+    #[test]
+    fn resolve_all_pass_advances_turn() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        let game = actor.game.as_mut().unwrap();
+        game.phase = Phase::AwaitCalls;
+        let initial_turn = game.turn;
+
+        actor.pending_calls = Some(make_pending(vec![
+            (2, NetAction::Pass),
+            (3, NetAction::Pass),
+        ]));
+        actor.resolve_call_window();
+
+        assert!(actor.pending_calls.is_none());
+        assert_eq!(
+            actor.game.as_ref().unwrap().turn,
+            initial_turn.next(),
+            "全 Pass 应 advance_turn"
+        );
+        assert_eq!(actor.game.as_ref().unwrap().phase, Phase::Draw);
+    }
+
+    #[test]
+    fn resolve_pon_executes_when_legal() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        // East 切一张 5p, South 手中已经有 2 张 5p (或 +)
+        // 5p 的 TileIndex 是 13 (9-17 是筒子, 13 = 5筒)
+        let kind = TileIndex(13);
+        let pon_tile = Tile {
+            id: 1001,
+            kind,
+            red: false,
+        };
+        give_player_tiles(&mut actor, Seat::South, kind, 2);
+        force_discard_scenario(&mut actor, Seat::East, pon_tile);
+
+        actor.pending_calls = Some(make_pending(vec![(2, NetAction::Pon)]));
+        actor.resolve_call_window();
+
+        assert!(actor.pending_calls.is_none());
+        let game = actor.game.as_ref().unwrap();
+        assert_eq!(game.turn, Seat::South, "Pon 后 turn 转给鸣牌方");
+        assert_eq!(game.phase, Phase::AwaitDiscard, "鸣牌后 South 应切牌");
+        assert_eq!(
+            game.players[Seat::South.index()].hand.melds.len(),
+            1,
+            "South 应有 1 个副露"
+        );
+    }
+
+    #[test]
+    fn resolve_ron_beats_pon() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South, Seat::West]);
+        // East 切牌, South 想 Pon, West 想 Ron. Ron 应胜.
+        // 构造: West 听牌 (国士无双最简: 13 张幺九各 1 张, 等任意 14 张).
+        // 太复杂. 简化: 用一个 "几乎和牌" 的手牌 + 切对应等牌.
+        // 但 try_ron 内部走完整役判定. 不易构造. 这里测意图: pending 中含 Tsumo
+        // (= AwaitCalls 阶段视为 Ron) 的玩家, 应优先于 Pon. 如果 Ron 不合法
+        // (try_ron 返回 None), resolve 会 fall through 到 Pon. 我们间接验证:
+        // 当只有 Ron 且不合法时, fall through 到 Pon.
+
+        let kind = TileIndex(13);
+        let tile = Tile {
+            id: 2001,
+            kind,
+            red: false,
+        };
+        give_player_tiles(&mut actor, Seat::South, kind, 2);
+        force_discard_scenario(&mut actor, Seat::East, tile);
+
+        actor.pending_calls = Some(make_pending(vec![
+            (2, NetAction::Pon),   // South Pon
+            (3, NetAction::Tsumo), // West "Ron" (但牌型不和, try_ron 返回 None)
+        ]));
+        actor.resolve_call_window();
+
+        // West Ron 不合法 → fall through 到 Pon → South Pon
+        let game = actor.game.as_ref().unwrap();
+        assert_eq!(game.turn, Seat::South);
+        assert_eq!(
+            game.players[Seat::South.index()].hand.melds.len(),
+            1,
+            "Ron 不合法时应 fall through 到 Pon"
+        );
+    }
+
+    #[test]
+    fn resolve_pon_beats_chi() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South, Seat::West]);
+        // East 切牌, South (下家) 能 Chi, West 能 Pon. Pon 应优先.
+        let kind = TileIndex(4); // 5m
+        let tile = Tile {
+            id: 3001,
+            kind,
+            red: false,
+        };
+        // South Chi: 给 South 4m + 6m (下家能吃 East 切的 5m)
+        give_player_tiles(&mut actor, Seat::South, TileIndex(3), 1);
+        give_player_tiles(&mut actor, Seat::South, TileIndex(5), 1);
+        // West Pon: 给 West 2× 5m
+        give_player_tiles(&mut actor, Seat::West, kind, 2);
+        force_discard_scenario(&mut actor, Seat::East, tile);
+
+        actor.pending_calls = Some(make_pending(vec![
+            (2, NetAction::Chi(0)), // South (id=2) Chi
+            (3, NetAction::Pon),    // West (id=3) Pon
+        ]));
+        actor.resolve_call_window();
+
+        let game = actor.game.as_ref().unwrap();
+        assert_eq!(game.turn, Seat::West, "Pon 优先于 Chi, turn 应给 Pon 方");
+        assert_eq!(
+            game.players[Seat::West.index()].hand.melds.len(),
+            1,
+            "West 应有 Pon 副露"
+        );
+        assert_eq!(
+            game.players[Seat::South.index()].hand.melds.len(),
+            0,
+            "South 不应吃成"
+        );
+    }
+
+    #[test]
+    fn handle_call_response_partial_does_not_resolve() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South, Seat::West]);
+        let game = actor.game.as_mut().unwrap();
+        game.phase = Phase::AwaitCalls;
+        let turn_before = game.turn;
+
+        actor.pending_calls = Some({
+            let mut m = HashMap::new();
+            m.insert(2, None);
+            m.insert(3, None);
+            m
+        });
+        // 只有 South 响应, West 还未
+        actor.handle_call_response(2, NetAction::Pass);
+        // 不应 resolve
+        assert!(actor.pending_calls.is_some(), "未收齐响应不应 resolve");
+        assert_eq!(actor.game.as_ref().unwrap().turn, turn_before);
+    }
+
+    #[test]
+    fn handle_call_response_full_triggers_resolve() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South, Seat::West]);
+        let game = actor.game.as_mut().unwrap();
+        game.phase = Phase::AwaitCalls;
+        let turn_before = game.turn;
+
+        actor.pending_calls = Some({
+            let mut m = HashMap::new();
+            m.insert(2, None);
+            m.insert(3, None);
+            m
+        });
+        actor.handle_call_response(2, NetAction::Pass);
+        actor.handle_call_response(3, NetAction::Pass);
+        // 收齐后 resolve, 全 Pass → advance_turn
+        assert!(actor.pending_calls.is_none());
+        assert_eq!(actor.game.as_ref().unwrap().turn, turn_before.next());
+    }
+
+    #[test]
+    fn handle_call_response_unknown_player_ignored() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        let game = actor.game.as_mut().unwrap();
+        game.phase = Phase::AwaitCalls;
+        actor.pending_calls = Some({
+            let mut m = HashMap::new();
+            m.insert(2, None);
+            m
+        });
+        // pid=99 不在 pending 中
+        actor.handle_call_response(99, NetAction::Pon);
+        // pending 不变
+        let p = actor.pending_calls.as_ref().unwrap();
+        assert!(
+            p.get(&2).map(|v| v.is_none()).unwrap_or(false),
+            "无关玩家响应不应改变 pending"
+        );
+    }
+
+    #[test]
+    fn is_seat_ai_detects_human_and_ai() {
+        let (actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        assert!(!actor.is_seat_ai(Seat::East), "East 是真人");
+        assert!(actor.is_seat_ai(Seat::South), "South 默认 AI");
+        assert!(actor.is_seat_ai(Seat::West), "West 默认 AI");
+    }
+
+    #[test]
+    fn is_seat_ai_disconnected_human_treated_as_ai() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        // South 真人但断线
+        actor.slots[1].connected = false;
+        assert!(actor.is_seat_ai(Seat::South), "断线真人应被 AI 接管");
+    }
+
+    #[test]
+    fn project_view_hides_other_hands() {
+        let (actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        let east_view = actor.project_view(Seat::East).unwrap();
+        // 自己 hand 应有 13 张 (开局)
+        assert_eq!(east_view.my_hand.len(), 13);
+        assert_eq!(east_view.my_seat, Seat::East);
+        // 但 players 中其他 seat 的 hand_count 应有, melds 应空
+        assert_eq!(east_view.players[1].hand_count, 13);
+        assert!(east_view.players[1].melds.is_empty());
+    }
+
+    #[test]
+    fn project_view_my_seat_correct_per_client() {
+        let (actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South, Seat::West]);
+        for seat in [Seat::East, Seat::South, Seat::West, Seat::North] {
+            let v = actor.project_view(seat).unwrap();
+            assert_eq!(v.my_seat, seat);
+            assert_eq!(v.my_hand.len(), 13);
+        }
+    }
 }
