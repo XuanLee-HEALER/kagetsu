@@ -249,6 +249,53 @@ impl GameState {
         }
     }
 
+    /// 测试 / replay 用: 用预设手牌 + 牌山顺序起一局, 跳过随机洗牌.
+    ///
+    /// `initial_hands[i]` 是 [`Seat::ALL`][i] 的开局 13 张手牌.
+    /// `live_wall` 顺序按摸牌顺序 (第一张摸的在 `live_wall[0]`).
+    /// `dead_wall` 必须 14 张, 索引约定见 [`Wall::from_components`].
+    /// `dora_revealed` ∈ \[1, 5\], 默认 1.
+    ///
+    /// 调用前应已设置 `dealer / round_wind / kyoku / honba / riichi_sticks /
+    /// players[].score`.
+    pub fn start_round_with_state(
+        &mut self,
+        initial_hands: [Vec<Tile>; 4],
+        live_wall: Vec<Tile>,
+        dead_wall: Vec<Tile>,
+        dora_revealed: usize,
+    ) {
+        self.round_seed = 0;
+        self.last_discard = None;
+        self.last_result = None;
+        self.events.clear();
+        self.first_go_around = true;
+
+        for p in self.players.iter_mut() {
+            p.reset_round();
+        }
+
+        // 注入手牌
+        for (i, hand) in initial_hands.into_iter().enumerate() {
+            assert_eq!(hand.len(), 13, "seat {i} initial_hands 必须 13 张");
+            self.players[i].hand.closed = hand;
+        }
+
+        // Wall::from_components 的 live 顺序与摸牌顺序相反 (pop 从尾部),
+        // 所以这里把 live_wall reverse 进 Wall.
+        let mut live_reversed = live_wall;
+        live_reversed.reverse();
+        let wall = Wall::from_components(live_reversed, dead_wall, dora_revealed);
+        self.wall = Some(wall);
+
+        self.turn = self.dealer;
+        self.phase = Phase::Draw;
+
+        for p in self.players.iter_mut() {
+            sort_hand(&mut p.hand.closed);
+        }
+    }
+
     /// 当前家摸牌,转入 AwaitDiscard.
     /// 返回摸到的牌(如山牌已尽返回 None,触发流局).
     pub fn do_draw(&mut self) -> Option<Tile> {

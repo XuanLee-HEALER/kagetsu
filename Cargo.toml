@@ -40,6 +40,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [dev-dependencies]
 pretty_assertions = "1"
 proptest = "1"
+# 仅 tests/replay tenhou mjlog parser 用
+quick-xml = "0.36"
 
 [[bin]]
 name = "tui-majo"

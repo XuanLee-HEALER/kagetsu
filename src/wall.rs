@@ -93,6 +93,28 @@ impl Wall {
     pub fn remaining(&self) -> usize {
         self.live.len()
     }
+
+    /// 测试 / replay 用: 用预定的活牌山 + 王牌区构造, 跳过随机洗牌.
+    ///
+    /// `live` 顺序 = 摸牌反向 (pop 从尾部, 所以 live\[len-1\] 是下一张被摸的牌).
+    /// `dead` 必须 14 张, 索引约定:
+    /// - \[0..4\] 岭上
+    /// - \[4..14\] dora 区, 偶数表 dora / 奇数里 dora.
+    ///
+    /// `dora_revealed` ∈ \[1, 5\], 默认 1.
+    pub fn from_components(live: Vec<Tile>, dead: Vec<Tile>, dora_revealed: usize) -> Self {
+        assert_eq!(dead.len(), DEAD_WALL_LEN, "dead wall 必须 14 张");
+        assert!(
+            (1..=DORA_INDICATORS_MAX).contains(&dora_revealed),
+            "dora_revealed 必须 ∈ [1, 5]"
+        );
+        Self {
+            live,
+            dead,
+            rinshan_used: 0,
+            dora_revealed,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -115,5 +137,25 @@ mod tests {
             assert!(w.rinshan_draw().is_some());
         }
         assert!(w.rinshan_draw().is_none());
+    }
+
+    #[test]
+    fn from_components_preserves_state() {
+        use crate::tile::TileIndex;
+        let mk = |k: u8, id: u16| Tile {
+            id,
+            kind: TileIndex(k),
+            red: false,
+        };
+        let live: Vec<Tile> = (0..70).map(|i| mk((i % 34) as u8, i as u16)).collect();
+        let dead: Vec<Tile> = (70..84).map(|i| mk((i % 34) as u8, i as u16)).collect();
+        let mut w = Wall::from_components(live, dead, 2);
+        assert_eq!(w.remaining(), 70);
+        assert_eq!(w.dora_indicators().len(), 2);
+        // 摸 1 张应是 live 末尾 (id=69)
+        assert_eq!(w.draw().unwrap().id, 69);
+        assert_eq!(w.remaining(), 69);
+        // rinshan 第 1 张
+        assert_eq!(w.rinshan_draw().unwrap().id, 70);
     }
 }
