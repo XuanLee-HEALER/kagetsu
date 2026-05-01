@@ -512,41 +512,106 @@ impl RoomActor {
     }
 
     /// 在每个 cmd 处理完后自动推进游戏 (Draw 阶段摸牌, AwaitCalls 简化推进).
+    /// 推进游戏状态: Draw 自动摸牌, AwaitDiscard 时若当前家是 AI 则自动出牌.
+    /// 循环到 phase / turn 稳定 (即等真人玩家行动) 或到达终态.
     fn advance_game(&mut self) {
-        let Some(game) = self.game.as_mut() else {
-            return;
-        };
-        match game.phase {
-            Phase::Draw => {
-                if game.do_draw().is_none() {
-                    // 流局
-                    game.phase = Phase::RoundEnd;
-                    game.last_result = Some(RoundResult::Ryuukyoku {
-                        kind: RyuukyokuKind::Howaipai,
-                    });
+        // 安全上限: 一局至多 ~70 步, 200 远远够
+        for _ in 0..200 {
+            // 取当前 phase / turn (短借用立即释放)
+            let (phase, turn) = match self.game.as_ref() {
+                Some(g) => (g.phase, g.turn),
+                None => return,
+            };
+            match phase {
+                Phase::Draw => {
+                    let game = self.game.as_mut().unwrap();
+                    if game.do_draw().is_none() {
+                        game.phase = Phase::RoundEnd;
+                        game.last_result = Some(RoundResult::Ryuukyoku {
+                            kind: RyuukyokuKind::Howaipai,
+                        });
+                        self.broadcast_round_result();
+                        return;
+                    }
+                    self.broadcast_state_view();
+                }
+                Phase::AwaitDiscard => {
+                    if !self.is_seat_ai(turn) {
+                        return; // 等真人
+                    }
+                    let action = {
+                        let game = self.game.as_ref().unwrap();
+                        crate::player::ai_choose_discard(game)
+                    };
+                    self.apply_ai_action(action);
+                }
+                Phase::AwaitCalls => {
+                    // Phase 9 加鸣牌窗口. 现在直接推进 (相当于全员 Pass).
+                    let game = self.game.as_mut().unwrap();
+                    game.advance_turn();
+                    self.broadcast_state_view();
+                }
+                Phase::RoundEnd => {
                     self.broadcast_round_result();
                     return;
                 }
-                self.broadcast_state_view();
-            }
-            Phase::AwaitDiscard => {
-                // 等玩家或 AI 动作 (Phase 8 加 AI driver)
-            }
-            Phase::AwaitCalls => {
-                // Phase 9 加鸣牌窗口. 现在直接推进.
-                game.advance_turn();
-                self.broadcast_state_view();
-            }
-            Phase::RoundEnd => {
-                self.broadcast_round_result();
-            }
-            Phase::GameEnd => {
-                self.finalize_game();
-            }
-            Phase::Deal => {
-                // Deal 已在 start_round 完成, 不应停在此 phase
+                Phase::GameEnd => {
+                    self.finalize_game();
+                    return;
+                }
+                Phase::Deal => {
+                    return;
+                }
             }
         }
+        tracing::warn!("advance_game 达到 200 步上限, 中止防死循环");
+    }
+
+    /// 当前 seat 是否 AI 控制 (slot 标记 AI 或对应 slot 已断线).
+    fn is_seat_ai(&self, seat: Seat) -> bool {
+        self.slots
+            .iter()
+            .find(|s| s.seat == Some(seat))
+            .map(|s| s.is_ai || !s.connected)
+            .unwrap_or(true)
+    }
+
+    /// 把 AI 的 [`Action`] 转化成 GameState 调用. 失败时退化为摸切.
+    fn apply_ai_action(&mut self, action: crate::action::Action) {
+        let Some(game) = self.game.as_mut() else {
+            return;
+        };
+        use crate::action::Action;
+        match action {
+            Action::Discard(t) => {
+                let _ = game.do_discard(t);
+            }
+            Action::Riichi(t) => {
+                let _ = game.do_riichi(t);
+            }
+            Action::Tsumo => {
+                if let Some(score) = game.try_tsumo() {
+                    game.declare_tsumo(score);
+                }
+            }
+            Action::Ankan(t) => {
+                let _ = game.do_ankan(t.kind);
+            }
+            Action::Shouminkan(t) => {
+                let _ = game.do_shouminkan(t.kind);
+            }
+            Action::Pon { .. } | Action::Chi { .. } | Action::Minkan | Action::Ron(_) => {
+                // 鸣牌响应, AwaitDiscard 阶段不会有 AI 走这些. 留 Phase 9.
+            }
+            Action::Pass | Action::KyuushuKyuuhai => {
+                // fallback: 摸切 last_drawn
+                let me = game.turn;
+                if let Some(t) = game.players[me.index()].last_drawn {
+                    let _ = game.do_discard(t);
+                }
+            }
+        }
+        self.broadcast_state_view();
     }
 
     fn finalize_game(&mut self) {
@@ -852,5 +917,69 @@ mod tests {
             })
             .unwrap();
         yield_actor().await;
+    }
+
+    /// AI 驱动: 1 真人 host + 3 AI, 一直推进直到 host 应该出牌 (turn=East AwaitDiscard).
+    /// 然后 host 切牌, AI 应继续接管直到下一次 host turn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ai_drives_when_seat_is_ai() {
+        let handle = spawn_room("h".into(), GameConfig::default());
+        let (host_id, _, mut host_rx) = join_player(&handle, "host").await;
+        handle
+            .tx
+            .send(RoomCmd::PlayerMsg {
+                player_id: host_id,
+                msg: ClientMsg::StartGame,
+            })
+            .unwrap();
+        yield_actor().await;
+
+        // 收最后一条 GameStateView, 看 phase / turn
+        let mut latest_view: Option<GameStateView> = None;
+        while let Ok(msg) = host_rx.try_recv() {
+            if let ServerMsg::GameStateView(v) = msg {
+                latest_view = Some(*v);
+            }
+        }
+        let view = latest_view.expect("收到至少一个 GameStateView");
+        // 开局 host=East 是亲家, 应该 turn=East 在 AwaitDiscard (摸了 14 张)
+        assert_eq!(view.turn, Seat::East);
+        assert_eq!(view.phase, Phase::AwaitDiscard);
+
+        // host 切自家手牌第一张
+        let first_tile = view.my_hand[0];
+        handle
+            .tx
+            .send(RoomCmd::PlayerMsg {
+                player_id: host_id,
+                msg: ClientMsg::Action(crate::net::protocol::NetAction::Discard(
+                    crate::ui::screens::game::TileSpec {
+                        kind: first_tile.kind,
+                    },
+                )),
+            })
+            .unwrap();
+        yield_actor().await;
+
+        // AI 接管 South/West/North 自动出, 然后回到 host (East) AwaitDiscard
+        let mut latest_view2: Option<GameStateView> = None;
+        while let Ok(msg) = host_rx.try_recv() {
+            if let ServerMsg::GameStateView(v) = msg {
+                latest_view2 = Some(*v);
+            }
+        }
+        let view2 = latest_view2.expect("AI 推进后应有新 GameStateView");
+        // 应该回到 East AwaitDiscard, 且事件中至少有 3 个 Discard (3 个 AI 各一)
+        assert_eq!(view2.turn, Seat::East);
+        assert_eq!(view2.phase, Phase::AwaitDiscard);
+        let discard_count = view2
+            .events
+            .iter()
+            .filter(|e| matches!(e, crate::game::GameEvent::Discard { .. }))
+            .count();
+        assert!(
+            discard_count >= 4,
+            "应该至少 4 个 Discard 事件 (host + 3 AI). 实际 {discard_count}"
+        );
     }
 }
