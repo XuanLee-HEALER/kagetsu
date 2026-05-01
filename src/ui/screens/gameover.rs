@@ -28,11 +28,11 @@ impl GameOverState {
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
         match key.code {
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Tab => {
+            KeyCode::Left | KeyCode::Tab => {
                 self.selected = if self.selected == 0 { 1 } else { 0 };
                 None
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Right => {
                 self.selected = if self.selected == 1 { 0 } else { 1 };
                 None
             }

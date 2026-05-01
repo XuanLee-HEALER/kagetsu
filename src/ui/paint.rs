@@ -172,8 +172,8 @@ pub fn paint_boxed_row(
         .add_modifier(Modifier::BOLD);
 
     let n = tiles.len();
-    // 计算每张牌的左 x 坐标 (用于 selected/drawn 间留隙).
-    let drawn_gap = 1u16;
+    // 计算每张牌的左 x 坐标 (用于摸到的牌前留隙, 视觉上跟手牌分离).
+    let drawn_gap = 3u16;
     let positions: Vec<u16> = {
         let mut out = Vec::with_capacity(n);
         let mut cx = x;
@@ -293,8 +293,9 @@ pub fn paint_boxed_row(
     }
 }
 
-/// 6 列弃牌网格 (wide 模式 4 cells).
-/// 占 24 cells × 4 行 (最多 24 张).
+/// 6 列弃牌网格 (wide 模式 4 cells), 每张牌共边竖线分隔.
+/// 占 31 cells × 4 行 (= 1 + 6×5 cells, 最多 24 张).
+/// 布局: `│一萬│二筒│三索│ ... │`
 pub fn paint_discard_grid_wide(
     buf: &mut Buffer,
     x: u16,
@@ -304,18 +305,29 @@ pub fn paint_discard_grid_wide(
     riichi_at: Option<usize>,
 ) {
     const COLS: usize = 6;
-    const MAX: usize = COLS * 4;
-    for (i, t) in river.iter().take(MAX).enumerate() {
-        let r = (i / COLS) as u16;
-        let c = (i % COLS) as u16;
-        let cx = x + c * 4;
-        let cy = y + r;
-        let state = if Some(i) == riichi_at {
-            TileState::Riichi
-        } else {
-            TileState::Normal
-        };
-        paint_tile_wide(buf, cx, cy, Some(t), theme, state);
+    const ROWS: usize = 4;
+    let border = Style::default().fg(theme.tile_border).bg(theme.bg);
+    let empty = Style::default().bg(theme.bg).fg(theme.fg);
+
+    for r in 0..ROWS {
+        let cy = y + r as u16;
+        // 左首 │
+        paint_str(buf, x, cy, "│", border);
+        for c in 0..COLS {
+            let i = r * COLS + c;
+            let cx = x + 1 + (c as u16) * 5;
+            if i < river.len() {
+                let state = if Some(i) == riichi_at {
+                    TileState::Riichi
+                } else {
+                    TileState::Normal
+                };
+                paint_tile_wide(buf, cx, cy, Some(&river[i]), theme, state);
+            } else {
+                paint_str(buf, cx, cy, "    ", empty);
+            }
+            paint_str(buf, cx + 4, cy, "│", border);
+        }
     }
 }
 

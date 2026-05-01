@@ -47,23 +47,23 @@ impl ConfigState {
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
         let row_count = ROWS.len();
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 if self.selected > 0 {
                     self.selected -= 1;
                 }
                 None
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 if self.selected + 1 < row_count {
                     self.selected += 1;
                 }
                 None
             }
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Left => {
                 self.adjust(self.selected, -1);
                 None
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Right => {
                 self.adjust(self.selected, 1);
                 None
             }

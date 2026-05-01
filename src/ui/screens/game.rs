@@ -37,6 +37,7 @@ use crate::ui::paint::{
 };
 use crate::ui::theme::Theme;
 use crate::ui::widgets::seat_label;
+use unicode_width::UnicodeWidthStr;
 
 const PLAYER_SEAT: Seat = Seat::East;
 /// AI 操作的节流时间, 让玩家看清.
@@ -141,14 +142,8 @@ impl GameScreenState {
                 }
                 if self.is_player_turn() {
                     self.update_self_message();
-                    if let Some(drawn) = self.game.players[PLAYER_SEAT.index()].last_drawn {
-                        self.selected = self.game.players[PLAYER_SEAT.index()]
-                            .hand
-                            .closed
-                            .iter()
-                            .position(|t| t.id == drawn.id)
-                            .unwrap_or(0);
-                    }
+                    // 摸到的牌单独显示, 不参与 selected. selected 保留上巡位置, 钳到合法范围.
+                    self.clamp_selected();
                 }
                 self.last_step_at = Instant::now();
             }
@@ -294,14 +289,14 @@ impl GameScreenState {
                     self.modal_selected = 0;
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Left => {
                 if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
                     self.selected = self.selected.saturating_sub(1);
                 }
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Right => {
                 if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
-                    let len = self.player().hand.closed.len();
+                    let len = self.selectable_count();
                     if self.selected + 1 < len {
                         self.selected += 1;
                     }
@@ -346,11 +341,11 @@ impl GameScreenState {
                     self.last_step_at = Instant::now();
                 }
             }
-            // 数字 1-9 选第 N 张牌.
+            // 数字 1-9 选第 N 张牌 (索引 selectable_tiles, 不含摸到的).
             KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
                 if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
                     let idx = (c.to_digit(10).unwrap() - 1) as usize;
-                    let len = self.player().hand.closed.len();
+                    let len = self.selectable_count();
                     if idx < len {
                         self.selected = idx;
                     }
@@ -376,6 +371,9 @@ impl GameScreenState {
             KeyCode::Backspace => {
                 self.command_buffer.pop();
             }
+            KeyCode::Tab => {
+                self.try_complete_command();
+            }
             KeyCode::Char(c) => {
                 if self.command_buffer.chars().count() < 32 {
                     self.command_buffer.push(c);
@@ -386,13 +384,39 @@ impl GameScreenState {
         None
     }
 
+    /// Tab 补全: 取 buffer 第一个 token 的候选命令, 补到最长公共前缀.
+    /// 唯一匹配则补全到完整名 + 1 空格 (方便接参数).
+    fn try_complete_command(&mut self) {
+        // 只补头一个 token (空格前). 已有空格则不补.
+        if self.command_buffer.contains(' ') {
+            return;
+        }
+        let cands = command_candidates(&self.command_buffer);
+        match cands.len() {
+            0 => {}
+            1 => {
+                self.command_buffer = cands[0].to_string();
+                // 接受参数的命令补完后加空格
+                if matches!(cands[0], "discard" | "riichi") {
+                    self.command_buffer.push(' ');
+                }
+            }
+            _ => {
+                let prefix = longest_common_prefix(&cands);
+                if prefix.len() > self.command_buffer.len() {
+                    self.command_buffer = prefix;
+                }
+            }
+        }
+    }
+
     fn handle_modal_key(&mut self, key: KeyEvent) -> Option<Transition> {
         let actions = self.collect_modal_actions();
         match key.code {
             KeyCode::Esc => {
                 self.modal_open = false;
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 let mut i = self.modal_selected;
                 loop {
                     if i == 0 {
@@ -405,7 +429,7 @@ impl GameScreenState {
                     }
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 let mut i = self.modal_selected + 1;
                 while i < actions.len() {
                     if actions[i].enabled {
@@ -514,6 +538,16 @@ impl GameScreenState {
             ParsedCommand::Pon => self.try_player_pon(),
             ParsedCommand::Kan => self.try_player_kan(),
             ParsedCommand::Chi => self.try_player_chi(),
+            ParsedCommand::Pass => {
+                if self.player_calls.is_some() {
+                    self.player_calls = None;
+                    self.message = "已跳过.".into();
+                    self.last_step_at = Instant::now();
+                    self.clear_deadline();
+                } else {
+                    self.message = "无可跳过的响应.".into();
+                }
+            }
             ParsedCommand::Menu => {
                 self.modal_open = true;
                 self.modal_selected = 0;
@@ -642,12 +676,46 @@ impl GameScreenState {
         &self.game.players[PLAYER_SEAT.index()]
     }
 
+    /// 可选牌列表 = 自家手牌中除去 last_drawn (摸到的牌). 排序保留 closed 顺序.
+    /// 选牌索引 (`self.selected`) 永远指这个列表, 不会落在摸到的牌上.
+    /// 摸到的牌通过 T 键摸切, 不参与 hjkl 移动.
+    fn selectable_tiles(&self) -> Vec<Tile> {
+        let p = self.player();
+        let drawn_id = p.last_drawn.map(|t| t.id);
+        p.hand
+            .closed
+            .iter()
+            .filter(|t| Some(t.id) != drawn_id)
+            .copied()
+            .collect()
+    }
+
+    fn selectable_count(&self) -> usize {
+        let p = self.player();
+        let drawn_id = p.last_drawn.map(|t| t.id);
+        p.hand
+            .closed
+            .iter()
+            .filter(|t| Some(t.id) != drawn_id)
+            .count()
+    }
+
+    /// 切牌等导致 selectable 长度变化后, 钳 selected 到合法范围.
+    fn clamp_selected(&mut self) {
+        let len = self.selectable_count();
+        if len == 0 {
+            self.selected = 0;
+        } else if self.selected >= len {
+            self.selected = len - 1;
+        }
+    }
+
     fn try_player_discard(&mut self) {
         if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
             return;
         }
-        let p = self.player();
-        let Some(&t) = p.hand.closed.get(self.selected) else {
+        let tiles = self.selectable_tiles();
+        let Some(&t) = tiles.get(self.selected) else {
             return;
         };
         if self.game.do_discard(t).is_ok() {
@@ -689,8 +757,8 @@ impl GameScreenState {
             self.message = "不能立直.".into();
             return;
         }
-        let p = self.player();
-        let Some(&t) = p.hand.closed.get(self.selected) else {
+        let tiles = self.selectable_tiles();
+        let Some(&t) = tiles.get(self.selected) else {
             return;
         };
         if !opts.riichi_discards.iter().any(|x| x.kind == t.kind) {
@@ -1194,7 +1262,7 @@ impl GameScreenState {
                 buf,
                 ox + 28,
                 oy + 29,
-                "已聴",
+                "聴牌 (已听)",
                 Style::default()
                     .fg(theme.ok)
                     .bg(theme.bg)
@@ -1224,7 +1292,7 @@ impl GameScreenState {
                 buf,
                 ox + 28,
                 oy + 29,
-                "未聴",
+                "未聴 (未听)",
                 Style::default().fg(theme.dim).bg(theme.bg),
             );
         }
@@ -1252,37 +1320,30 @@ impl GameScreenState {
     }
 
     /// row 31-35: 自家手牌 BoxedRow + 编号.
+    /// display = selectable_tiles (sorted, 不含摸到的) + 末尾追加 last_drawn (如有).
+    /// selected 直接对应 selectable_tiles 索引, 永不指向摸到的牌.
     fn paint_my_hand(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
         let p = &self.game.players[PLAYER_SEAT.index()];
-        let last_drawn_id = p.last_drawn.map(|t| t.id);
-        // 手牌排序后, 把 last_drawn 的牌挪到末尾.
-        let mut display: Vec<Tile> = p.hand.closed.clone();
-        let drawn_idx = if let Some(id) = last_drawn_id {
-            if let Some(pos) = display.iter().position(|t| t.id == id) {
-                let t = display.remove(pos);
-                display.push(t);
-                Some(display.len() - 1)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let mut display: Vec<Tile> = self.selectable_tiles();
+        let drawn_idx = p.last_drawn.map(|t| {
+            display.push(t);
+            display.len() - 1
+        });
         let selected_player = self.is_player_turn() && self.game.phase == Phase::AwaitDiscard;
-        // selected 是基于排序后的索引, 转到 display 索引
-        let selected = if selected_player {
-            // 查找原 selected 对应的 tile id, 在 display 里的位置
-            p.hand
-                .closed
-                .get(self.selected)
-                .and_then(|t| display.iter().position(|d| d.id == t.id))
+        let selectable_len = drawn_idx.unwrap_or(display.len());
+        let selected = if selected_player && self.selected < selectable_len {
+            Some(self.selected)
         } else {
             None
         };
         paint_boxed_row(buf, ox + 4, oy + 31, &display, theme, selected, drawn_idx);
-        // 编号 row 35
+        // 编号 row 35 (与 paint_boxed_row 同样的间隙规则: drawn 前留 3 cells)
+        let drawn_gap = 3u16;
+        let mut cx = ox + 4 + 1;
         for i in 0..display.len() {
-            let cx = ox + 4 + (i as u16) * 5 + 1;
+            if Some(i) == drawn_idx && i > 0 {
+                cx += drawn_gap;
+            }
             paint_str(
                 buf,
                 cx,
@@ -1290,10 +1351,11 @@ impl GameScreenState {
                 &format!("{:>2}", i + 1),
                 Style::default().fg(theme.dim).bg(theme.bg),
             );
+            cx += 5;
         }
     }
 
-    /// row 36-39: 底部 last 日志 / 模式 status / 使い方.
+    /// row 36-39: 底部 last 日志 / 模式 status / 使い方 (用法) 速查.
     fn paint_bottom(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
         paint_hr(buf, ox, oy + 36, 144, theme);
         // row 37: last 动作日志 (取最近 4-6 个事件)
@@ -1316,11 +1378,12 @@ impl GameScreenState {
             .rev()
         {
             let (text, style) = format_event(ev, theme);
-            if col + (text.chars().count() as u16) >= ox + 118 {
+            let w = UnicodeWidthStr::width(text.as_str()) as u16;
+            if col + w + 2 >= ox + 118 {
                 break;
             }
             paint_str(buf, col, oy + 37, &text, style);
-            col += text.chars().count() as u16 + 1;
+            col += w + 1;
             paint_str(
                 buf,
                 col,
@@ -1359,15 +1422,37 @@ impl GameScreenState {
                 &self.command_buffer,
                 Style::default().fg(theme.fg).bg(theme.panel),
             );
-            // 光标 (反色块)
-            let cur_x = ox + 3 + (self.command_buffer.chars().count() as u16);
-            paint_str(
-                buf,
-                cur_x,
-                oy + 38,
-                " ",
-                Style::default().fg(theme.bg).bg(theme.fg),
-            );
+            // ghost text (唯一前缀时灰显补全建议)
+            let buf_w = self.command_buffer.chars().count() as u16;
+            let cur_x = ox + 3 + buf_w;
+            let mut painted_ghost = false;
+            if !self.command_buffer.contains(' ') && !self.command_buffer.is_empty() {
+                let cands = command_candidates(&self.command_buffer);
+                if cands.len() == 1 && cands[0] != self.command_buffer {
+                    let suggestion = &cands[0][self.command_buffer.len()..];
+                    paint_str(
+                        buf,
+                        cur_x,
+                        oy + 38,
+                        suggestion,
+                        Style::default().fg(theme.dim).bg(theme.panel),
+                    );
+                    painted_ghost = true;
+                }
+            }
+            // 光标: 没 ghost 时画 "_" 提示位置
+            if !painted_ghost {
+                paint_str(
+                    buf,
+                    cur_x,
+                    oy + 38,
+                    "_",
+                    Style::default()
+                        .fg(theme.accent)
+                        .bg(theme.panel)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
         } else {
             paint_str(
                 buf,
@@ -1463,35 +1548,89 @@ impl GameScreenState {
             buf,
             ox + 132,
             oy + 38,
-            "hjkl ←→",
+            "←→ 选牌",
             Style::default().fg(theme.dim).bg(theme.panel),
         );
 
-        // row 39: 使い方
-        paint_str(
-            buf,
-            ox + 2,
-            oy + 39,
-            "使い方",
-            Style::default().fg(theme.dim).bg(theme.bg),
-        );
-        let cmds = [
-            (":discard 5p", 11u16),
-            (":riichi 4m", 26),
-            (":tsumo", 39),
-            (":pon", 48),
-            (":kan", 55),
-            (":menu", 62),
-            (":resign", 72),
-        ];
-        for (s, col) in cmds {
+        // row 39:
+        // - COMMAND 模式 → 显示候选命令 (Tab 补全)
+        // - NORMAL  模式 → 命令速查
+        if self.input_mode == InputMode::Command {
             paint_str(
                 buf,
-                ox + col,
+                ox + 2,
                 oy + 39,
-                s,
-                Style::default().fg(theme.fg).bg(theme.bg),
+                "候选",
+                Style::default().fg(theme.dim).bg(theme.bg),
             );
+            let cands = command_candidates(&self.command_buffer);
+            let mut col = ox + 7;
+            if cands.is_empty() {
+                paint_str(
+                    buf,
+                    col,
+                    oy + 39,
+                    "(无匹配)",
+                    Style::default().fg(theme.danger).bg(theme.bg),
+                );
+            } else {
+                for (i, name) in cands.iter().enumerate() {
+                    if col + (name.len() as u16) + 2 >= ox + 130 {
+                        break;
+                    }
+                    let style = if i == 0 {
+                        Style::default()
+                            .fg(theme.accent)
+                            .bg(theme.bg)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.fg).bg(theme.bg)
+                    };
+                    paint_str(buf, col, oy + 39, name, style);
+                    col += (name.chars().count() as u16) + 2;
+                }
+            }
+            paint_str(
+                buf,
+                ox + 130,
+                oy + 39,
+                "Tab 补全",
+                Style::default().fg(theme.dim).bg(theme.bg),
+            );
+        } else {
+            paint_str(
+                buf,
+                ox + 2,
+                oy + 39,
+                "使い方",
+                Style::default().fg(theme.dim).bg(theme.bg),
+            );
+            // 命令 + 中文注释 (动态计算 col, 避免 wide-char 错位)
+            let cmds: &[(&str, &str)] = &[
+                (":discard", "切"),
+                (":riichi", "立直"),
+                (":tsumo", "自摸"),
+                (":pon", "碰"),
+                (":kan", "杠"),
+                (":chi", "吃"),
+                (":pass", "跳过"),
+                (":menu", "菜单"),
+                (":resign", "退出"),
+            ];
+            let cmd_style = Style::default().fg(theme.fg).bg(theme.bg);
+            let hint_style = Style::default().fg(theme.dim).bg(theme.bg);
+            let mut col = ox + 11;
+            for (cmd, hint) in cmds {
+                let cmd_w = UnicodeWidthStr::width(*cmd) as u16;
+                let hint_text = format!(" ({})", hint);
+                let hint_w = UnicodeWidthStr::width(hint_text.as_str()) as u16;
+                if col + cmd_w + hint_w + 1 >= ox + 144 {
+                    break;
+                }
+                paint_str(buf, col, oy + 39, cmd, cmd_style);
+                paint_str(buf, col + cmd_w, oy + 39, &hint_text, hint_style);
+                col += cmd_w + hint_w + 1;
+            }
         }
     }
 
@@ -1735,7 +1874,7 @@ impl GameScreenState {
                 key: 'R',
                 label: "立直",
                 detail: if opts.riichi_discards.is_empty() {
-                    "未聴牌或无法立直".into()
+                    "未聴牌 (未听), 或无法立直".into()
                 } else {
                     format!("{} 张可立直", opts.riichi_discards.len())
                 },
@@ -1745,9 +1884,9 @@ impl GameScreenState {
                 key: 'W',
                 label: "自摸",
                 detail: if opts.tsumo {
-                    "已聴, 直接和牌".into()
+                    "已聴牌 (已听), 直接和牌".into()
                 } else {
-                    "未満和牌役 (无 ツモ 役)".into()
+                    "未満和牌役 (役不满, 无 ツモ/自摸 役)".into()
                 },
                 enabled: opts.tsumo,
             });
@@ -1848,10 +1987,17 @@ pub enum ParsedCommand {
     Pon,
     Kan,
     Chi,
+    /// 跳过响应他家弃牌(碰/吃/杠/和).
+    Pass,
     Menu,
     Resign,
     Unknown(String),
 }
+
+/// 全部主命令名 (顺序固定, 用于 Tab 补全和速查).
+pub const COMMAND_NAMES: &[&str] = &[
+    "discard", "riichi", "tsumo", "pon", "kan", "chi", "pass", "menu", "resign",
+];
 
 /// 牌种说明符: 接受 "5p" / "p5" / "五筒" / "東" 等.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1886,10 +2032,40 @@ pub fn parse_command(s: &str) -> ParsedCommand {
         "pon" | "p" => ParsedCommand::Pon,
         "kan" | "k" => ParsedCommand::Kan,
         "chi" | "a" => ParsedCommand::Chi,
+        "pass" | "skip" | "c" => ParsedCommand::Pass,
         "menu" | "m" => ParsedCommand::Menu,
         "resign" => ParsedCommand::Resign,
         _ => ParsedCommand::Unknown(s.to_string()),
     }
+}
+
+/// 找出所有以 prefix 开头的命令名 (按 [`COMMAND_NAMES`] 顺序).
+pub fn command_candidates(prefix: &str) -> Vec<&'static str> {
+    let p = prefix.to_lowercase();
+    COMMAND_NAMES
+        .iter()
+        .filter(|n| n.starts_with(&p))
+        .copied()
+        .collect()
+}
+
+/// 多个候选的最长公共前缀.
+pub fn longest_common_prefix(strs: &[&str]) -> String {
+    if strs.is_empty() {
+        return String::new();
+    }
+    let first = strs[0];
+    let mut end = first.len();
+    for s in &strs[1..] {
+        let common = first
+            .chars()
+            .zip(s.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        // count 是 char 数, 但我们要 byte 长度. 因为这里全是 ASCII, char count == byte count.
+        end = end.min(common);
+    }
+    first[..end].to_string()
 }
 
 /// 接受的牌输入:
@@ -2058,7 +2234,26 @@ mod tests {
         assert!(matches!(parse_command("kan"), ParsedCommand::Kan));
         assert!(matches!(parse_command("menu"), ParsedCommand::Menu));
         assert!(matches!(parse_command("resign"), ParsedCommand::Resign));
+        assert!(matches!(parse_command("pass"), ParsedCommand::Pass));
+        assert!(matches!(parse_command("skip"), ParsedCommand::Pass));
+        assert!(matches!(parse_command("c"), ParsedCommand::Pass));
         assert!(matches!(parse_command("nope"), ParsedCommand::Unknown(_)));
+    }
+
+    #[test]
+    fn command_completion() {
+        // 唯一前缀
+        assert_eq!(command_candidates("ts"), vec!["tsumo"]);
+        assert_eq!(command_candidates("res"), vec!["resign"]);
+        // 多候选 + 共同前缀
+        let p_cands = command_candidates("p");
+        assert!(p_cands.contains(&"pon"));
+        assert!(p_cands.contains(&"pass"));
+        assert_eq!(longest_common_prefix(&p_cands), "p");
+        // 无匹配
+        assert!(command_candidates("xyz").is_empty());
+        // 空 → 全部
+        assert_eq!(command_candidates("").len(), COMMAND_NAMES.len());
     }
 
     #[test]

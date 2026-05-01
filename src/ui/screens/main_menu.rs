@@ -24,13 +24,13 @@ impl MainMenuState {
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 if self.selected > 0 {
                     self.selected -= 1;
                 }
                 None
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 if self.selected + 1 < ITEMS.len() {
                     self.selected += 1;
                 }
