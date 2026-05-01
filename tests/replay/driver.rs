@@ -364,24 +364,22 @@ fn verify_hora(state: &ReplayState, log: &KyokuLog, config: &GameConfig) -> Vec<
         });
     }
 
-    // points 对比 (winner 的 delta)
+    // points 对比 (winner 的 delta).
+    // 注意: 天凤 deltas 含立直棒收回 (winner +1000×sticks 而无对应输家 -1000),
+    // 所以总和 ≠ 0 是正常. 我们只对比 winner 的 delta 是否 ≈ 期望 hora_points + 本场.
+    // 由于本场 (× 300) 算法各家分配不同, 此 phase 只做最简对比: winner delta > 0.
     let expected_winner_delta = match &log.result {
         Some(KyokuResult::Hora { deltas, .. }) => deltas[widx],
         _ => 0,
     };
-    // 我们的 distribute 给出 PaymentDistribution, 但简化: ScoreResult.basic_points
-    // 不直接是玩家收入. mjai 的 deltas 已含本场 / 立直棒. 简化对比: 验证 deltas
-    // 总和 = 0.
-    let total_delta: i32 = match &log.result {
-        Some(KyokuResult::Hora { deltas, .. }) => deltas.iter().sum(),
-        _ => 0,
-    };
-    if total_delta != 0 {
+    if expected_winner_delta <= 0 {
         diffs.push(ReplayDiff::ResultMismatch {
-            reason: format!("Hora deltas 总和 {total_delta} 应 == 0"),
+            reason: format!(
+                "winner {:?} 的 delta {} 应 > 0",
+                winner, expected_winner_delta
+            ),
         });
     }
-    let _ = expected_winner_delta; // 后续 phase 加严格 winner delta 对比
 
     diffs
 }

@@ -15,6 +15,12 @@
 #![allow(dead_code)]
 
 pub mod driver;
+pub mod fixture_runner;
 pub mod mjai_pai;
 pub mod mjai_parser;
 pub mod replay_log;
+pub mod tenhou_meld;
+pub mod tenhou_pai;
+pub mod tenhou_parser;
+pub mod tenhou_to_mjai;
+pub mod tenhou_yaku;

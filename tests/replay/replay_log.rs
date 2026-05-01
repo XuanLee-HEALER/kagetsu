@@ -304,9 +304,15 @@ pub fn build_replay_log(events: Vec<MjaiEvent>) -> Result<ReplayLog, String> {
                 hora_points,
                 yakus,
             } => {
-                let k = current
-                    .as_mut()
-                    .ok_or("Hora 在 StartKyoku 之前".to_string())?;
+                // 局可能在 StartKyoku 之前找不到 (e.g. 多荣的第二个 Hora 在前一局
+                // EndKyoku 之后). 简化: 找不到就忽略 (双荣只保留第一个 winner).
+                let Some(k) = current.as_mut() else {
+                    continue;
+                };
+                // 已有 result (e.g. 双荣第二个) → 忽略
+                if k.result.is_some() {
+                    continue;
+                }
                 let mut ura = Vec::with_capacity(uradora_markers.len());
                 for s in &uradora_markers {
                     ura.push(parse_mjai_pai(s, alloc_id())?);
