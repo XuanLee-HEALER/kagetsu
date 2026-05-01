@@ -23,11 +23,11 @@ pub enum Mentsu {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitKind {
-    Tanki,    // 单骑
-    Kanchan,  // 嵌张
-    Penchan,  // 边张
-    Ryanmen,  // 两面
-    Shanpon,  // 双碰
+    Tanki,   // 单骑
+    Kanchan, // 嵌张
+    Penchan, // 边张
+    Ryanmen, // 两面
+    Shanpon, // 双碰
 }
 
 #[derive(Debug, Clone)]
@@ -55,11 +55,7 @@ const YAOCHUU_KINDS: [u8; 13] = [0, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33
 /// `closed`: 包含和牌张的暗手计数(34 维); 副露牌不在内.
 /// `melds`: 已副露的鸣牌.
 /// `winning_tile`: 此次和牌的牌种.
-pub fn decompose(
-    closed: &[u8; 34],
-    melds: &[Meld],
-    winning_tile: TileIndex,
-) -> Vec<Decomposition> {
+pub fn decompose(closed: &[u8; 34], melds: &[Meld], winning_tile: TileIndex) -> Vec<Decomposition> {
     let mut results = Vec::new();
 
     if closed[winning_tile.0 as usize] == 0 {
@@ -180,9 +176,8 @@ fn shuntsu_wait(start: usize, winning: usize) -> WaitKind {
     let winning_rank = (winning % 9) + 1;
     if winning_rank == start_rank + 1 {
         WaitKind::Kanchan
-    } else if start_rank == 1 && winning_rank == 3 {
-        WaitKind::Penchan
-    } else if start_rank == 7 && winning_rank == 7 {
+    } else if (start_rank == 1 && winning_rank == 3) || (start_rank == 7 && winning_rank == 7) {
+        // 12_ 等 3 / _89 等 7 都是边张.
         WaitKind::Penchan
     } else {
         WaitKind::Ryanmen
@@ -234,8 +229,8 @@ fn try_chiitoitsu(closed: &[u8; 34], winning: TileIndex) -> Option<Decomposition
         return None;
     }
     let mut pairs = Vec::with_capacity(7);
-    for k in 0..34 {
-        match closed[k] {
+    for (k, &cnt) in closed.iter().enumerate() {
+        match cnt {
             0 => continue,
             2 => pairs.push(TileIndex(k as u8)),
             _ => return None,
@@ -346,7 +341,10 @@ mod tests {
         // 7 组对子: 1m1m 3m3m 5m5m 7m7m 1p1p 中中 西西
         let hand = h(&[(0, 2), (2, 2), (4, 2), (6, 2), (9, 2), (33, 2), (29, 2)]);
         let r = decompose(&hand, &[], TileIndex(0));
-        assert!(r.iter().any(|d| matches!(d, Decomposition::Chiitoitsu { .. })));
+        assert!(
+            r.iter()
+                .any(|d| matches!(d, Decomposition::Chiitoitsu { .. }))
+        );
     }
 
     #[test]

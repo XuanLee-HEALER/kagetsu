@@ -59,6 +59,8 @@ pub struct GameConfig {
     pub target_score: i32,
     /// uma (顺位奖罚).
     pub uma: [i32; 4],
+    /// 玩家单步思考时长(秒). None = 不限时.
+    pub thinking_time_secs: Option<u32>,
 }
 
 impl Default for GameConfig {
@@ -85,6 +87,7 @@ impl Default for GameConfig {
             starting_score: 25_000,
             target_score: 30_000,
             uma: [15, 5, -5, -15],
+            thinking_time_secs: Some(30),
         }
     }
 }

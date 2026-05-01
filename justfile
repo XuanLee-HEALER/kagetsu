@@ -7,6 +7,9 @@
 #   just test       跑全部单元测试
 #   just ci         本地预提交检查 (fmt + clippy + test)
 
+# Windows 上用 PowerShell 7 跑 recipe (其它平台仍用默认 sh).
+set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
+
 # 默认: 列出 recipes
 default:
     @just --list

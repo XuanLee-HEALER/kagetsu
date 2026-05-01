@@ -1,4 +1,4 @@
-//! ratatui TUI 渲染与输入.
+//! 游戏屏幕(InGame): 摸牌 / 切牌 / 鸣牌 / 立直 / 自摸 / 荣和 / 流局 / 下一局.
 //!
 //! 玩家固定为东家(亲), 三家 AI.
 //! 河按弃牌顺序 6 列分行展示, 副露独立显示.
@@ -12,99 +12,102 @@
 //! - P: 碰  A: 吃  M: 明杠
 //! - C: 跳过(他家弃牌或自家鸣牌机会)
 //! - N: 下一局
-//! - Q / Esc: 退出
+//!
+//! 全局快捷键 (Q 退出 / Esc 回主菜单) 由 [`crate::ui::App`] 统一处理.
 
-use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::Terminal;
-use ratatui::backend::Backend;
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::time::{Duration, Instant};
 
+use crate::action::Action;
 use crate::config::GameConfig;
 use crate::game::{CallOptions, GameState, Phase, RoundResult, RyuukyokuKind};
-use crate::meld::{Meld, MeldKind, Seat};
-use crate::player::ai_choose_discard;
-use crate::action::Action;
-use crate::tile::Tile;
+use crate::meld::Seat;
+use crate::player::{ai_choose_discard, default_action_on_timeout};
+use crate::score::final_ranking;
+use crate::ui::Transition;
+use crate::ui::widgets::{
+    render_melds_inline, render_river_lines, seat_label, separator_span, tile_content_span,
+    tile_label,
+};
 
 const PLAYER_SEAT: Seat = Seat::East;
 /// AI 操作的节流时间, 让玩家看清.
 const AI_STEP_DELAY_MS: u64 = 350;
-/// 河的列宽(每行最多几张).
-const RIVER_COLS: usize = 6;
 
-pub struct App {
+pub struct GameScreenState {
     pub game: GameState,
-    pub running: bool,
     /// 玩家选中的手牌索引.
     pub selected: usize,
     /// 当玩家有可执行的鸣牌/荣和时缓存.
     pub player_calls: Option<CallOptions>,
     /// 已扫描过 AwaitCalls 阶段(避免重复检查).
     pub calls_resolved: bool,
-    /// 用于种子: 每局递增.
+    /// 庄 seed (整场游戏的根种子).
+    pub game_seed: u64,
+    /// 局序号, 局 seed = game_seed ^ round_index.
     pub round_index: u64,
     /// 上次 AI 操作的时间, 用于节流.
-    pub(crate) last_step_at: Instant,
+    pub last_step_at: Instant,
     /// 状态栏临时消息.
     pub message: String,
+    /// 当前等待玩家决策的截止时刻 (None = AI 回合或不限时).
+    pub decision_deadline: Option<Instant>,
 }
 
-impl App {
-    pub fn new() -> Self {
-        let mut g = GameState::new(GameConfig::default());
-        g.start_round(0xC0FFEE);
+impl GameScreenState {
+    pub fn new(config: GameConfig, game_seed: u64) -> Self {
+        let mut g = GameState::new(config);
+        g.start_round(game_seed ^ 1);
         Self {
             game: g,
-            running: true,
             selected: 0,
             player_calls: None,
             calls_resolved: false,
+            game_seed,
             round_index: 1,
             last_step_at: Instant::now(),
             message: String::from("东 1 局开始. 你是东家(亲)."),
+            decision_deadline: None,
         }
     }
 
-    pub fn run<B>(&mut self, terminal: &mut Terminal<B>) -> Result<()>
-    where
-        B: Backend,
-        B::Error: Send + Sync + 'static,
-    {
-        while self.running {
-            terminal.draw(|f| self.render(f))?;
-            self.handle_events()?;
-            self.advance_state();
+    /// 推进自动状态. 返回 Some(Transition) 表示要切屏(整场结束).
+    pub fn advance(&mut self) -> Option<Transition> {
+        // 1) 超时检查 (玩家在 AwaitDiscard / AwaitCalls 等输入时).
+        if let Some(d) = self.decision_deadline
+            && Instant::now() >= d
+        {
+            self.apply_timeout_default();
+            return None;
         }
-        Ok(())
-    }
 
-    pub(crate) fn advance_state(&mut self) {
-        // 玩家有未决定的鸣牌/和牌选项时, 等输入.
+        // 2) 玩家有未决定的鸣牌/和牌选项时, 等输入.
         if self.player_calls.is_some() {
-            return;
+            return None;
         }
 
-        // AI 节流.
+        // 3) AI 节流.
         if !self.is_player_turn()
             && self.last_step_at.elapsed().as_millis() < AI_STEP_DELAY_MS as u128
         {
-            return;
+            return None;
         }
 
         match self.game.phase {
             Phase::Deal => {
                 self.round_index += 1;
-                let seed = 0xC0FFEE_u64 ^ self.round_index;
+                let seed = self.game_seed ^ self.round_index;
                 self.game.start_round(seed);
                 self.selected = 0;
                 self.player_calls = None;
                 self.calls_resolved = false;
                 self.last_step_at = Instant::now();
+                self.clear_deadline();
             }
             Phase::Draw => {
                 if self.game.do_draw().is_none() {
@@ -113,15 +116,12 @@ impl App {
                         kind: RyuukyokuKind::Howaipai,
                     });
                     self.message = String::from("流局.");
-                    return;
+                    return None;
                 }
                 if self.is_player_turn() {
                     self.update_self_message();
-                    // 选中刚摸的那张
                     if let Some(drawn) = self.game.players[PLAYER_SEAT.index()].last_drawn {
-                        self.selected = self
-                            .game
-                            .players[PLAYER_SEAT.index()]
+                        self.selected = self.game.players[PLAYER_SEAT.index()]
                             .hand
                             .closed
                             .iter()
@@ -136,23 +136,25 @@ impl App {
                     let action = ai_choose_discard(&self.game);
                     self.apply_ai_action(action);
                     self.last_step_at = Instant::now();
+                    self.clear_deadline();
                 } else {
                     self.update_self_message();
+                    self.set_deadline_if_unset();
                 }
             }
             Phase::AwaitCalls => {
                 if self.calls_resolved {
-                    // 玩家已 pass 或没人响应 → 推进
                     self.game.advance_turn();
                     self.calls_resolved = false;
                     self.last_step_at = Instant::now();
-                    return;
+                    self.clear_deadline();
+                    return None;
                 }
                 self.calls_resolved = true;
                 let from = self.game.last_discard.map(|(s, _)| s);
                 let Some(from) = from else {
                     self.game.advance_turn();
-                    return;
+                    return None;
                 };
 
                 // 1) 先看 AI 谁能荣和(头跳).
@@ -163,11 +165,11 @@ impl App {
                     if let Some(score) = self.game.try_ron(s) {
                         self.game.declare_ron(s, score);
                         self.message = format!("{} 荣和!", seat_label(s));
-                        return;
+                        return None;
                     }
                 }
 
-                // 2) 玩家是否有响应选项(碰/吃/杠/和)?
+                // 2) 玩家是否有响应选项?
                 if from != PLAYER_SEAT {
                     let opts = self.game.legal_calls(PLAYER_SEAT);
                     if opts.any() {
@@ -191,48 +193,112 @@ impl App {
                         hints.push("C 跳过".into());
                         self.message = format!("可响应: {}", hints.join("  "));
                         self.player_calls = Some(opts);
-                        return;
+                        self.set_deadline_if_unset();
+                        return None;
                     }
                 }
 
-                // 3) AI 不主动鸣牌, 直接 advance.
+                // 3) 无人响应, 推进.
                 self.game.advance_turn();
                 self.calls_resolved = false;
                 self.last_step_at = Instant::now();
+                self.clear_deadline();
             }
             Phase::RoundEnd => {
-                if !self.message.contains("下一局") {
-                    if let Some(result) = self.game.last_result.clone() {
-                        self.message = match &result {
-                            RoundResult::Ryuukyoku { .. } => "流局. 按 N 进下一局.".to_string(),
-                            RoundResult::Win { winner, score, is_tsumo, .. } => {
-                                let mut s = format!(
-                                    "{} {}: {} 番 {} 符",
-                                    seat_label(*winner),
-                                    if *is_tsumo { "自摸" } else { "荣和" },
-                                    score.han,
-                                    score.fu,
-                                );
-                                let yaku_str: Vec<String> = score
-                                    .yaku
-                                    .iter()
-                                    .map(|(y, h)| format!("{}({})", y.name_zh(), h))
-                                    .collect();
-                                if !yaku_str.is_empty() {
-                                    s.push_str(" | ");
-                                    s.push_str(&yaku_str.join(" "));
-                                }
-                                s.push_str(". 按 N 进下一局.");
-                                s
+                if !self.message.contains("下一局")
+                    && let Some(result) = self.game.last_result.clone()
+                {
+                    self.message = match &result {
+                        RoundResult::Ryuukyoku { .. } => "流局. 按 N 进下一局.".to_string(),
+                        RoundResult::Win {
+                            winner,
+                            score,
+                            is_tsumo,
+                            ..
+                        } => {
+                            let mut s = format!(
+                                "{} {}: {} 番 {} 符",
+                                seat_label(*winner),
+                                if *is_tsumo { "自摸" } else { "荣和" },
+                                score.han,
+                                score.fu,
+                            );
+                            let yaku_str: Vec<String> = score
+                                .yaku
+                                .iter()
+                                .map(|(y, h)| format!("{}({})", y.name_zh(), h))
+                                .collect();
+                            if !yaku_str.is_empty() {
+                                s.push_str(" | ");
+                                s.push_str(&yaku_str.join(" "));
                             }
-                        };
-                    }
+                            s.push_str(". 按 N 进下一局.");
+                            s
+                        }
+                    };
                 }
             }
             Phase::GameEnd => {
-                self.message = String::from("半庄结束. 按 Q 退出.");
+                let rankings = final_ranking(&self.game.players, &self.game.config);
+                return Some(Transition::EnterGameOver { rankings });
             }
         }
+        None
+    }
+
+    pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') => {
+                if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
+                    self.selected = self.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
+                    let len = self.player().hand.closed.len();
+                    if self.selected + 1 < len {
+                        self.selected += 1;
+                    }
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.try_player_discard();
+            }
+            KeyCode::Char('w') | KeyCode::Char('W') => {
+                self.try_player_win();
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.try_player_riichi();
+            }
+            KeyCode::Char('k') | KeyCode::Char('K') => {
+                self.try_player_kan();
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                self.try_player_pon();
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                self.try_player_chi();
+            }
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                self.try_player_minkan();
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                if self.player_calls.is_some() {
+                    self.player_calls = None;
+                    self.message = "已跳过.".into();
+                    self.last_step_at = Instant::now();
+                    self.clear_deadline();
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                if self.game.phase == Phase::RoundEnd {
+                    self.game.next_round();
+                    self.last_step_at = Instant::now();
+                }
+            }
+            _ => {}
+        }
+        None
     }
 
     fn update_self_message(&mut self) {
@@ -280,6 +346,52 @@ impl App {
         }
     }
 
+    fn apply_timeout_default(&mut self) {
+        let action = default_action_on_timeout(&self.game);
+        match action {
+            Action::Discard(t) => {
+                if self.game.do_discard(t).is_ok() {
+                    self.message = "(超时) 自动切刚摸的牌.".into();
+                    self.calls_resolved = false;
+                    self.player_calls = None;
+                }
+            }
+            Action::Pass => {
+                if self.player_calls.is_some() {
+                    self.player_calls = None;
+                    self.message = "(超时) 自动跳过.".into();
+                }
+            }
+            _ => {}
+        }
+        self.last_step_at = Instant::now();
+        self.clear_deadline();
+    }
+
+    fn set_deadline_if_unset(&mut self) {
+        if self.decision_deadline.is_some() {
+            return;
+        }
+        if let Some(secs) = self.game.config.thinking_time_secs {
+            self.decision_deadline = Some(Instant::now() + Duration::from_secs(secs as u64));
+        }
+    }
+
+    fn clear_deadline(&mut self) {
+        self.decision_deadline = None;
+    }
+
+    /// 剩余思考秒数(向上取整). None = 不限时或不在等候态.
+    pub fn remaining_seconds(&self) -> Option<u64> {
+        let d = self.decision_deadline?;
+        let now = Instant::now();
+        if now >= d {
+            return Some(0);
+        }
+        let dur = d.saturating_duration_since(now);
+        Some(dur.as_secs() + if dur.subsec_millis() > 0 { 1 } else { 0 })
+    }
+
     fn is_player_turn(&self) -> bool {
         self.game.turn == PLAYER_SEAT
     }
@@ -288,105 +400,41 @@ impl App {
         &self.game.players[PLAYER_SEAT.index()]
     }
 
-    fn handle_events(&mut self) -> Result<()> {
-        let timeout = Duration::from_millis(80);
-        if !event::poll(timeout)? {
-            return Ok(());
-        }
-        let ev = event::read()?;
-        let Event::Key(key) = ev else { return Ok(()) };
-        if key.kind != KeyEventKind::Press {
-            return Ok(());
-        }
-
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
-                self.running = false;
-            }
-            KeyCode::Left | KeyCode::Char('h') => {
-                if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
-                    self.selected = self.selected.saturating_sub(1);
-                }
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
-                if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
-                    let len = self.player().hand.closed.len();
-                    if self.selected + 1 < len {
-                        self.selected += 1;
-                    }
-                }
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                self.try_player_discard();
-            }
-            KeyCode::Char('w') | KeyCode::Char('W') => {
-                self.try_player_win();
-            }
-            KeyCode::Char('r') | KeyCode::Char('R') => {
-                self.try_player_riichi();
-            }
-            KeyCode::Char('k') | KeyCode::Char('K') => {
-                self.try_player_kan();
-            }
-            KeyCode::Char('p') | KeyCode::Char('P') => {
-                self.try_player_pon();
-            }
-            KeyCode::Char('a') | KeyCode::Char('A') => {
-                self.try_player_chi();
-            }
-            KeyCode::Char('m') | KeyCode::Char('M') => {
-                self.try_player_minkan();
-            }
-            KeyCode::Char('c') | KeyCode::Char('C') => {
-                if self.player_calls.is_some() {
-                    self.player_calls = None;
-                    self.message = "已跳过.".into();
-                    self.last_step_at = Instant::now();
-                }
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                if self.game.phase == Phase::RoundEnd {
-                    self.game.next_round();
-                    self.last_step_at = Instant::now();
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
     fn try_player_discard(&mut self) {
         if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
             return;
         }
         let p = self.player();
-        let Some(&t) = p.hand.closed.get(self.selected) else { return };
+        let Some(&t) = p.hand.closed.get(self.selected) else {
+            return;
+        };
         if self.game.do_discard(t).is_ok() {
             self.calls_resolved = false;
             self.player_calls = None;
             self.last_step_at = Instant::now();
+            self.clear_deadline();
         }
     }
 
     fn try_player_win(&mut self) {
-        // 自摸优先.
-        if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
-            if let Some(score) = self.game.try_tsumo() {
-                self.game.declare_tsumo(score);
-                self.message = format!("{} 自摸!", seat_label(PLAYER_SEAT));
-                self.player_calls = None;
-                return;
-            }
+        if self.is_player_turn()
+            && self.game.phase == Phase::AwaitDiscard
+            && let Some(score) = self.game.try_tsumo()
+        {
+            self.game.declare_tsumo(score);
+            self.message = format!("{} 自摸!", seat_label(PLAYER_SEAT));
+            self.player_calls = None;
+            self.clear_deadline();
+            return;
         }
-        // 荣和.
-        if let Some(opts) = &self.player_calls {
-            if opts.ron {
-                if let Some(score) = self.game.try_ron(PLAYER_SEAT) {
-                    self.game.declare_ron(PLAYER_SEAT, score);
-                    self.message = format!("{} 荣和!", seat_label(PLAYER_SEAT));
-                    self.player_calls = None;
-                }
-            }
+        if let Some(opts) = &self.player_calls
+            && opts.ron
+            && let Some(score) = self.game.try_ron(PLAYER_SEAT)
+        {
+            self.game.declare_ron(PLAYER_SEAT, score);
+            self.message = format!("{} 荣和!", seat_label(PLAYER_SEAT));
+            self.player_calls = None;
+            self.clear_deadline();
         }
     }
 
@@ -400,8 +448,9 @@ impl App {
             return;
         }
         let p = self.player();
-        let Some(&t) = p.hand.closed.get(self.selected) else { return };
-        // 检查选中牌是否在 riichi_discards 里(按 kind).
+        let Some(&t) = p.hand.closed.get(self.selected) else {
+            return;
+        };
         if !opts.riichi_discards.iter().any(|x| x.kind == t.kind) {
             self.message = format!("切 {} 后未听牌, 不可立直.", t.kind.short());
             return;
@@ -411,6 +460,7 @@ impl App {
                 self.message = "立直成立!".into();
                 self.calls_resolved = false;
                 self.last_step_at = Instant::now();
+                self.clear_deadline();
             }
             Err(e) => {
                 self.message = format!("立直失败: {}", e);
@@ -429,6 +479,7 @@ impl App {
             } else {
                 self.message = format!("暗杠 {}!", kind.short());
                 self.last_step_at = Instant::now();
+                self.clear_deadline();
             }
             return;
         }
@@ -438,6 +489,7 @@ impl App {
             } else {
                 self.message = format!("加杠 {}!", kind.short());
                 self.last_step_at = Instant::now();
+                self.clear_deadline();
             }
             return;
         }
@@ -445,7 +497,9 @@ impl App {
     }
 
     fn try_player_pon(&mut self) {
-        let Some(opts) = self.player_calls.clone() else { return };
+        let Some(opts) = self.player_calls.clone() else {
+            return;
+        };
         let Some(two) = opts.pon else {
             self.message = "不能碰.".into();
             return;
@@ -457,11 +511,14 @@ impl App {
             self.player_calls = None;
             self.calls_resolved = false;
             self.last_step_at = Instant::now();
+            self.clear_deadline();
         }
     }
 
     fn try_player_chi(&mut self) {
-        let Some(opts) = self.player_calls.clone() else { return };
+        let Some(opts) = self.player_calls.clone() else {
+            return;
+        };
         let Some(&two) = opts.chi.first() else {
             self.message = "不能吃.".into();
             return;
@@ -473,11 +530,14 @@ impl App {
             self.player_calls = None;
             self.calls_resolved = false;
             self.last_step_at = Instant::now();
+            self.clear_deadline();
         }
     }
 
     fn try_player_minkan(&mut self) {
-        let Some(opts) = self.player_calls.clone() else { return };
+        let Some(opts) = self.player_calls.clone() else {
+            return;
+        };
         let Some(three) = opts.minkan else {
             self.message = "不能明杠.".into();
             return;
@@ -489,13 +549,13 @@ impl App {
             self.player_calls = None;
             self.calls_resolved = false;
             self.last_step_at = Instant::now();
+            self.clear_deadline();
         }
     }
 
     // ============== 渲染 ==============
 
-    fn render(&self, f: &mut ratatui::Frame) {
-        let area = f.area();
+    pub fn render(&self, f: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -507,10 +567,10 @@ impl App {
 
         self.render_header(f, chunks[0]);
         self.render_table(f, chunks[1]);
-        self.render_footer(f, chunks[2]);
+        self.render_status(f, chunks[2]);
     }
 
-    fn render_header(&self, f: &mut ratatui::Frame, area: Rect) {
+    fn render_header(&self, f: &mut Frame, area: Rect) {
         let dora = self
             .game
             .wall
@@ -518,17 +578,14 @@ impl App {
             .map(|w| w.dora_indicators())
             .unwrap_or_default();
         let dora_str: Vec<String> = dora.iter().map(|t| tile_label(*t).0).collect();
-        let remaining = self
-            .game
-            .wall
-            .as_ref()
-            .map(|w| w.remaining())
-            .unwrap_or(0);
+        let remaining = self.game.wall.as_ref().map(|w| w.remaining()).unwrap_or(0);
 
         let line = Line::from(vec![
             Span::styled(
                 format!("{} {} 局", self.game.round_wind.label(), self.game.kyoku),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
             Span::raw(format!("本场 {}", self.game.honba)),
@@ -548,7 +605,7 @@ impl App {
         f.render_widget(p, area);
     }
 
-    fn render_footer(&self, f: &mut ratatui::Frame, area: Rect) {
+    fn render_status(&self, f: &mut Frame, area: Rect) {
         let mut hints: Vec<Span> = Vec::new();
         match self.game.phase {
             Phase::AwaitDiscard if self.is_player_turn() => {
@@ -558,7 +615,9 @@ impl App {
                     hints.push(Span::raw("  "));
                     hints.push(Span::styled(
                         "W 自摸",
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
                     ));
                 }
                 if !opts.riichi_discards.is_empty() {
@@ -579,7 +638,9 @@ impl App {
                 if opts.ron {
                     hints.push(Span::styled(
                         "W 和",
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
                     ));
                     hints.push(Span::raw("  "));
                 }
@@ -600,15 +661,19 @@ impl App {
             Phase::RoundEnd => {
                 hints.push(Span::styled(
                     "N 下一局",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
             Phase::GameEnd => {}
             _ => {
-                hints.push(Span::styled("(AI 思考中)", Style::default().fg(Color::DarkGray)));
+                hints.push(Span::styled(
+                    "(AI 思考中)",
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
         }
-        hints.push(Span::raw("    Q 退出"));
 
         let lines = vec![Line::from(self.message.clone()), Line::from(hints)];
         let p = Paragraph::new(lines)
@@ -618,15 +683,14 @@ impl App {
         f.render_widget(p, area);
     }
 
-    fn render_table(&self, f: &mut ratatui::Frame, area: Rect) {
-        // 4 家垂直堆叠. 每家手牌 1 行 + 河 3 行 + 边框 2 = 6 行.
+    fn render_table(&self, f: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(6),  // 北
-                Constraint::Length(6),  // 西
-                Constraint::Length(6),  // 南
-                Constraint::Min(6),     // 东(自家, 占据剩余空间)
+                Constraint::Length(6),
+                Constraint::Length(6),
+                Constraint::Length(6),
+                Constraint::Min(6),
             ])
             .split(area);
 
@@ -636,7 +700,7 @@ impl App {
         self.render_seat(f, rows[3], Seat::East, true);
     }
 
-    fn render_seat(&self, f: &mut ratatui::Frame, area: Rect, seat: Seat, is_player: bool) {
+    fn render_seat(&self, f: &mut Frame, area: Rect, seat: Seat, is_player: bool) {
         let p = &self.game.players[seat.index()];
         let is_current = self.game.turn == seat;
         let is_dealer = seat == self.game.dealer;
@@ -663,31 +727,26 @@ impl App {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // 内部布局: 上 = 手牌+副露(1 行), 下 = 河(剩余).
         let parts = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(1)])
             .split(inner);
 
-        // 第一行: 左 = 手牌, 右 = 副露.
         let melds_w: u16 = ((parts[0].width as usize) / 2).min(45) as u16;
         let row1 = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(20), Constraint::Length(melds_w)])
             .split(parts[0]);
 
-        // 手牌 (单行 outline).
         let hand_spans = self.render_hand_inline(p, is_player);
         f.render_widget(Paragraph::new(Line::from(hand_spans)), row1[0]);
 
-        // 副露.
         let meld_spans = render_melds_inline(&p.hand.melds);
         f.render_widget(
             Paragraph::new(Line::from(meld_spans)).alignment(Alignment::Right),
             row1[1],
         );
 
-        // 河 (多行 outline).
         let river_lines = render_river_lines(&p.river);
         f.render_widget(Paragraph::new(river_lines), parts[1]);
     }
@@ -711,153 +770,11 @@ impl App {
         } else {
             for _ in 0..p.hand.closed.len() {
                 spans.push(separator_span());
-                spans.push(Span::styled(
-                    "▒▒",
-                    Style::default().fg(Color::DarkGray),
-                ));
+                spans.push(Span::styled("▒▒", Style::default().fg(Color::DarkGray)));
             }
         }
         spans.push(separator_span());
         spans
-    }
-}
-
-impl Default for App {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// 返回(显示文本, 默认颜色). 文本永远 2 列宽: 数牌 "5p", 字牌单字符宽中文(占 2 列).
-fn tile_label(t: Tile) -> (String, Color) {
-    let suit_color = match t.kind.0 {
-        0..=8 => Color::Yellow,
-        9..=17 => Color::Cyan,
-        18..=26 => Color::Green,
-        27..=30 => Color::White, // 风牌
-        31 => Color::White,      // 白
-        32 => Color::Green,      // 發
-        33 => Color::Red,        // 中
-        _ => Color::DarkGray,
-    };
-    let text = match t.kind.0 {
-        0..=8 => {
-            let n = if t.red && t.kind.0 == 4 { 0 } else { t.kind.0 + 1 };
-            format!("{}m", n)
-        }
-        9..=17 => {
-            let n = if t.red && t.kind.0 == 13 { 0 } else { t.kind.0 - 9 + 1 };
-            format!("{}p", n)
-        }
-        18..=26 => {
-            let n = if t.red && t.kind.0 == 22 { 0 } else { t.kind.0 - 18 + 1 };
-            format!("{}s", n)
-        }
-        27 => "東".into(),
-        28 => "南".into(),
-        29 => "西".into(),
-        30 => "北".into(),
-        31 => "白".into(),
-        32 => "發".into(),
-        33 => "中".into(),
-        _ => "??".into(),
-    };
-    (text, suit_color)
-}
-
-fn separator_span() -> Span<'static> {
-    Span::styled("│", Style::default().fg(Color::DarkGray))
-}
-
-fn tile_content_span(t: Tile, selected: bool, drawn: bool) -> Span<'static> {
-    let (text, color) = tile_label(t);
-    let mut style = Style::default().fg(color);
-    if t.red {
-        style = style.fg(Color::Red).add_modifier(Modifier::BOLD);
-    }
-    if drawn {
-        style = style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
-    }
-    if selected {
-        style = Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
-    }
-    Span::styled(text, style)
-}
-
-/// 副露区(单行 inline). 每组用 `[标签 牌 牌 牌]` 的样式, 暗杠中间两张盖牌.
-fn render_melds_inline(melds: &[Meld]) -> Vec<Span<'static>> {
-    let mut out: Vec<Span<'static>> = Vec::new();
-    for meld in melds {
-        let (label, label_color) = match &meld.kind {
-            MeldKind::Chi { .. } => ("吃", Color::Cyan),
-            MeldKind::Pon { .. } => ("碰", Color::Cyan),
-            MeldKind::Minkan { .. } => ("明杠", Color::Magenta),
-            MeldKind::Shouminkan { .. } => ("加杠", Color::Magenta),
-            MeldKind::Ankan { .. } => ("暗杠", Color::DarkGray),
-        };
-        out.push(Span::styled(
-            format!("[{}", label),
-            Style::default().fg(label_color),
-        ));
-        let mut sorted: Vec<Tile> = meld.tiles().to_vec();
-        sorted.sort_by_key(|t| t.kind.0);
-        for (i, t) in sorted.iter().enumerate() {
-            let show_back = matches!(meld.kind, MeldKind::Ankan { .. }) && (i == 0 || i == 3);
-            out.push(Span::raw(" "));
-            if show_back {
-                out.push(Span::styled("▒▒", Style::default().fg(Color::DarkGray)));
-            } else {
-                let (text, color) = tile_label(*t);
-                let style = if t.red {
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(color)
-                };
-                out.push(Span::styled(text, style));
-            }
-        }
-        out.push(Span::styled("] ", Style::default().fg(label_color)));
-    }
-    out
-}
-
-/// 河(多行 outline). 按弃牌顺序 6 列分行, 每张牌 `│xx` 紧贴.
-fn render_river_lines(river: &[Tile]) -> Vec<Line<'static>> {
-    if river.is_empty() {
-        return vec![Line::from(Span::styled(
-            "(空)",
-            Style::default().fg(Color::DarkGray),
-        ))];
-    }
-    river
-        .chunks(RIVER_COLS)
-        .map(|chunk| {
-            let mut spans: Vec<Span<'static>> = Vec::with_capacity(chunk.len() * 2 + 1);
-            for t in chunk {
-                spans.push(separator_span());
-                let (text, color) = tile_label(*t);
-                let style = if t.red {
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(color)
-                };
-                spans.push(Span::styled(text, style));
-            }
-            spans.push(separator_span());
-            Line::from(spans)
-        })
-        .collect()
-}
-
-fn seat_label(s: Seat) -> &'static str {
-    match s {
-        Seat::East => "东",
-        Seat::South => "南",
-        Seat::West => "西",
-        Seat::North => "北",
     }
 }
 
@@ -878,8 +795,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn drain_pending(app: &mut App) {
-        // 消耗玩家未决定的鸣牌选项, 选择 pass.
+    fn drain_pending(app: &mut GameScreenState) {
         if app.player_calls.is_some() {
             app.player_calls = None;
         }
@@ -887,12 +803,12 @@ mod tests {
 
     #[test]
     fn app_can_complete_a_round_without_panic() {
-        let mut app = App::new();
+        let mut app = GameScreenState::new(GameConfig::default(), 0xC0FFEE);
         let backend = TestBackend::new(120, 40);
         let mut term = Terminal::new(backend).unwrap();
 
         for _ in 0..5000 {
-            term.draw(|f| app.render(f)).unwrap();
+            term.draw(|f| app.render(f, f.area())).unwrap();
             app.last_step_at = Instant::now() - Duration::from_secs(1);
             drain_pending(&mut app);
 
@@ -903,28 +819,25 @@ mod tests {
                     app.calls_resolved = false;
                 }
             } else {
-                app.advance_state();
+                let _ = app.advance();
             }
             if app.game.phase == Phase::RoundEnd || app.game.phase == Phase::GameEnd {
                 break;
             }
         }
-        term.draw(|f| app.render(f)).unwrap();
-        assert!(matches!(
-            app.game.phase,
-            Phase::RoundEnd | Phase::GameEnd
-        ));
+        term.draw(|f| app.render(f, f.area())).unwrap();
+        assert!(matches!(app.game.phase, Phase::RoundEnd | Phase::GameEnd));
     }
 
     #[test]
     fn app_can_advance_through_multiple_rounds() {
-        let mut app = App::new();
+        let mut app = GameScreenState::new(GameConfig::default(), 0xC0FFEE);
         let backend = TestBackend::new(120, 40);
         let mut term = Terminal::new(backend).unwrap();
 
         let mut rounds = 0;
         for _ in 0..30000 {
-            term.draw(|f| app.render(f)).unwrap();
+            term.draw(|f| app.render(f, f.area())).unwrap();
             app.last_step_at = Instant::now() - Duration::from_secs(1);
             drain_pending(&mut app);
 
@@ -944,7 +857,9 @@ mod tests {
                     }
                 }
                 Phase::GameEnd => break,
-                _ => app.advance_state(),
+                _ => {
+                    let _ = app.advance();
+                }
             }
         }
         assert!(rounds >= 3 || app.game.phase == Phase::GameEnd);

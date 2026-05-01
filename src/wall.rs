@@ -33,10 +33,7 @@ impl Wall {
             // 把每花色的某张 5 标记为赤: 5m id 第一张, 5p, 5s.
             // 5m kind = 4, 5p kind = 13, 5s kind = 22.
             for &kind_idx in &[4u8, 13, 22] {
-                if let Some(t) = tiles
-                    .iter_mut()
-                    .find(|t| t.kind.0 == kind_idx && !t.red)
-                {
+                if let Some(t) = tiles.iter_mut().find(|t| t.kind.0 == kind_idx && !t.red) {
                     t.red = true;
                 }
             }

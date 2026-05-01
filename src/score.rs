@@ -2,7 +2,9 @@
 //!
 //! 详见 docs/spec/scoring.md
 
+use crate::config::GameConfig;
 use crate::decompose::{Decomposition, Mentsu, WaitKind};
+use crate::game::PlayerState;
 use crate::meld::{Meld, MeldKind, Seat};
 use crate::yaku::{WinContext, Yaku, detect_yaku};
 
@@ -39,7 +41,12 @@ pub fn calculate_fu(d: &Decomposition, ctx: &WinContext, melds: &[Meld]) -> u32 
     match d {
         Decomposition::Chiitoitsu { .. } => 25,
         Decomposition::Kokushi { .. } => 30, // 国士役满, 符没意义但给个值
-        Decomposition::Standard { mentsu, pair, wait, winning_tile } => {
+        Decomposition::Standard {
+            mentsu,
+            pair,
+            wait,
+            winning_tile,
+        } => {
             // 检测 pinfu (会绑定特殊符规则)
             let is_pinfu = ctx.menzen
                 && mentsu.iter().all(|m| matches!(m, Mentsu::Shuntsu(_)))
@@ -94,7 +101,7 @@ pub fn calculate_fu(d: &Decomposition, ctx: &WinContext, melds: &[Meld]) -> u32 
             }
 
             // 向上取整到 10. 但若没有任何加成(只有副露+无符), 至少给 30 (副露荣和无符的最小).
-            
+
             // 完全开门(全部副露,雀头无符,基础 20+无加成) 时按 30 兜底
             // 实际 fu 起步至少 20 + 自摸 2 / 门清 10 = 22 / 30, 取整后通常 30+.
             // 此处遵守"向上取整 10",不再额外兜底.
@@ -188,12 +195,9 @@ pub fn evaluate(ctx: &WinContext, melds: &[Meld]) -> Option<ScoreResult> {
         return None;
     }
     // 必须至少有一个非 dora 役.
-    let has_real_yaku = yaku.iter().any(|(y, _)| {
-        !matches!(
-            y,
-            Yaku::Dora(_) | Yaku::AkaDora(_) | Yaku::UraDora(_)
-        )
-    });
+    let has_real_yaku = yaku
+        .iter()
+        .any(|(y, _)| !matches!(y, Yaku::Dora(_) | Yaku::AkaDora(_) | Yaku::UraDora(_)));
     if !has_real_yaku {
         return None;
     }
@@ -209,7 +213,10 @@ pub fn evaluate(ctx: &WinContext, melds: &[Meld]) -> Option<ScoreResult> {
     let fu = calculate_fu(ctx.decomposition, ctx, melds);
 
     let (base, level) = if yakuman_count > 0 {
-        (8000 * yakuman_count as u32, ScoreLevel::Yakuman(yakuman_count))
+        (
+            8000 * yakuman_count as u32,
+            ScoreLevel::Yakuman(yakuman_count),
+        )
     } else if han >= 13 && ctx.config.kazoe_yakuman {
         (8000, ScoreLevel::KazoeYakuman)
     } else if han >= 11 {
@@ -303,6 +310,71 @@ pub fn distribute(
     out
 }
 
+/// 终局后某家的最终成绩(返点 + uma + oka, 单位 K = 千点).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ranking {
+    pub seat: Seat,
+    /// 1..=4
+    pub place: u8,
+    pub raw_score: i32,
+    /// 返点差 = (raw_score - target_score), 单位千点(已除 1000).
+    pub return_diff_k: i32,
+    /// uma (单位 K, 来自 config.uma).
+    pub uma: i32,
+    /// oka (单位 K, 仅 1 位非 0).
+    pub oka: i32,
+    /// final = return_diff_k + uma + oka.
+    pub final_score: i32,
+}
+
+/// 计算终局四家排名 + uma + oka.
+///
+/// 规则:
+/// - 按 raw_score 降序; 同分按起家顺(East > South > West > North).
+/// - uma 按位次发放 config.uma[i].
+/// - oka 给 1 位: (target_score - starting_score) * 4 / 1000 (K).
+/// - 单位统一为 K(千点), 现实社团报点常用单位.
+pub fn final_ranking(players: &[PlayerState; 4], config: &GameConfig) -> [Ranking; 4] {
+    let mut indices = [0usize, 1, 2, 3];
+    // 降序排; 同分按 Seat 顺序(index 小的在前).
+    indices.sort_by(|&a, &b| {
+        players[b]
+            .score
+            .cmp(&players[a].score)
+            .then_with(|| a.cmp(&b))
+    });
+
+    let target_k = config.target_score / 1000;
+    let oka_top_k = (config.target_score - config.starting_score) * 4 / 1000;
+
+    let mut out = [Ranking {
+        seat: Seat::East,
+        place: 0,
+        raw_score: 0,
+        return_diff_k: 0,
+        uma: 0,
+        oka: 0,
+        final_score: 0,
+    }; 4];
+
+    for (rank_idx, &player_idx) in indices.iter().enumerate() {
+        let p = &players[player_idx];
+        let return_diff_k = p.score / 1000 - target_k;
+        let uma = config.uma[rank_idx];
+        let oka = if rank_idx == 0 { oka_top_k } else { 0 };
+        out[rank_idx] = Ranking {
+            seat: p.seat,
+            place: (rank_idx + 1) as u8,
+            raw_score: p.score,
+            return_diff_k,
+            uma,
+            oka,
+            final_score: return_diff_k + uma + oka,
+        };
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,7 +407,15 @@ mod tests {
             base_points: 2000,
             level: ScoreLevel::Mangan,
         };
-        let d = distribute(&result, Seat::East, Seat::East, false, Some(Seat::South), 0, 0);
+        let d = distribute(
+            &result,
+            Seat::East,
+            Seat::East,
+            false,
+            Some(Seat::South),
+            0,
+            0,
+        );
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].amount, 12000); // 亲家荣和 mangan = 12000
     }
@@ -359,5 +439,73 @@ mod tests {
             .map(|p| p.amount)
             .sum();
         assert_eq!(from_dealer, 4000);
+    }
+
+    fn ps(seat: Seat, score: i32) -> PlayerState {
+        let mut p = PlayerState::new(seat, score);
+        p.score = score;
+        p
+    }
+
+    #[test]
+    fn final_ranking_orders_by_score_then_seat() {
+        let players = [
+            ps(Seat::East, 30000),
+            ps(Seat::South, 40000),
+            ps(Seat::West, 20000),
+            ps(Seat::North, 10000),
+        ];
+        let cfg = GameConfig::default();
+        let r = final_ranking(&players, &cfg);
+        assert_eq!(r[0].seat, Seat::South);
+        assert_eq!(r[1].seat, Seat::East);
+        assert_eq!(r[2].seat, Seat::West);
+        assert_eq!(r[3].seat, Seat::North);
+        assert_eq!(r[0].place, 1);
+        assert_eq!(r[3].place, 4);
+    }
+
+    #[test]
+    fn final_ranking_uma_oka_default() {
+        // 默认: uma=[15,5,-5,-15], starting=25000, target=30000.
+        // oka_top = (30000-25000)*4/1000 = 20.
+        // 终局总点棒守恒: 100000.
+        let players = [
+            ps(Seat::East, 50000),  // 1位
+            ps(Seat::South, 30000), // 2位
+            ps(Seat::West, 15000),  // 3位
+            ps(Seat::North, 5000),  // 4位
+        ];
+        let cfg = GameConfig::default();
+        let r = final_ranking(&players, &cfg);
+
+        // 1 位: (50000-30000)/1000 + 15 + 20 = 20 + 15 + 20 = 55
+        assert_eq!(r[0].final_score, 55);
+        // 2 位: 0 + 5 + 0 = 5
+        assert_eq!(r[1].final_score, 5);
+        // 3 位: -15 + (-5) = -20
+        assert_eq!(r[2].final_score, -20);
+        // 4 位: -25 + (-15) = -40
+        assert_eq!(r[3].final_score, -40);
+        // 总和守恒(uma 和 oka 都来自玩家间转移): 55 + 5 + (-20) + (-40) = 0.
+        let total: i32 = r.iter().map(|x| x.final_score).sum();
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn final_ranking_tie_uses_seat_order() {
+        // 两家同分 → 按 East > South > West > North.
+        let players = [
+            ps(Seat::East, 25000),
+            ps(Seat::South, 25000),
+            ps(Seat::West, 25000),
+            ps(Seat::North, 25000),
+        ];
+        let cfg = GameConfig::default();
+        let r = final_ranking(&players, &cfg);
+        assert_eq!(r[0].seat, Seat::East);
+        assert_eq!(r[1].seat, Seat::South);
+        assert_eq!(r[2].seat, Seat::West);
+        assert_eq!(r[3].seat, Seat::North);
     }
 }

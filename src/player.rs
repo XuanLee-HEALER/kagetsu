@@ -7,7 +7,7 @@
 //! 后续可替换为更复杂的策略(牌效率/防守/听牌选择等).
 
 use crate::action::Action;
-use crate::game::GameState;
+use crate::game::{GameState, Phase};
 use crate::meld::Seat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,4 +40,50 @@ pub fn ai_react_to_discard(state: &GameState, who: Seat) -> Action {
         return Action::Ron(who);
     }
     Action::Pass
+}
+
+/// 玩家单步思考超时时执行的默认动作.
+///
+/// 与 [`ai_choose_discard`] 区别: **不自动和**(超时不替玩家判断是否要和牌).
+/// - AwaitDiscard: 切刚摸到的那张; 兜底切最后一张
+/// - 其他阶段: Pass
+pub fn default_action_on_timeout(state: &GameState) -> Action {
+    match state.phase {
+        Phase::AwaitDiscard => {
+            let me = state.turn;
+            if let Some(t) = state.players[me.index()].last_drawn {
+                return Action::Discard(t);
+            }
+            if let Some(&t) = state.players[me.index()].hand.closed.last() {
+                return Action::Discard(t);
+            }
+            Action::Pass
+        }
+        _ => Action::Pass,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::GameConfig;
+
+    #[test]
+    fn timeout_default_discards_last_drawn() {
+        let mut g = GameState::new(GameConfig::default());
+        g.start_round(42);
+        let drawn = g.do_draw().unwrap();
+        let action = default_action_on_timeout(&g);
+        match action {
+            Action::Discard(t) => assert_eq!(t.id, drawn.id, "应切刚摸到的那张"),
+            other => panic!("期望 Discard, 得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn timeout_default_pass_outside_discard_phase() {
+        let g = GameState::new(GameConfig::default());
+        // Phase::Deal
+        assert!(matches!(default_action_on_timeout(&g), Action::Pass));
+    }
 }

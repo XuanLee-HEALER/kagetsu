@@ -223,17 +223,33 @@ pub fn detect_yaku(ctx: &WinContext) -> Vec<(Yaku, u32)> {
 
     // 国士
     if let Decomposition::Kokushi { thirteen_wait, .. } = ctx.decomposition {
-        let mult = if *thirteen_wait && ctx.config.double_yakuman { 2 } else { 1 };
-        yakuman.push((Yaku::Kokushi { thirteen_wait: *thirteen_wait }, 13 * mult));
+        let mult = if *thirteen_wait && ctx.config.double_yakuman {
+            2
+        } else {
+            1
+        };
+        yakuman.push((
+            Yaku::Kokushi {
+                thirteen_wait: *thirteen_wait,
+            },
+            13 * mult,
+        ));
     }
 
     if let Decomposition::Standard { .. } = ctx.decomposition {
         if is_suuankou(ctx) {
             let tanki = matches!(
                 ctx.decomposition,
-                Decomposition::Standard { wait: WaitKind::Tanki, .. }
+                Decomposition::Standard {
+                    wait: WaitKind::Tanki,
+                    ..
+                }
             );
-            let mult = if tanki && ctx.config.double_yakuman { 2 } else { 1 };
+            let mult = if tanki && ctx.config.double_yakuman {
+                2
+            } else {
+                1
+            };
             yakuman.push((Yaku::Suuankou { tanki }, 13 * mult));
         }
         if is_daisangen(ctx) {
@@ -259,7 +275,11 @@ pub fn detect_yaku(ctx: &WinContext) -> Vec<(Yaku, u32)> {
             yakuman.push((Yaku::Suukantsu, 13));
         }
         if let Some(nine_wait) = chuurenpoutou_check(ctx) {
-            let mult = if nine_wait && ctx.config.double_yakuman { 2 } else { 1 };
+            let mult = if nine_wait && ctx.config.double_yakuman {
+                2
+            } else {
+                1
+            };
             yakuman.push((Yaku::Chuurenpoutou { nine_wait }, 13 * mult));
         }
     }
@@ -370,10 +390,9 @@ pub fn detect_yaku(ctx: &WinContext) -> Vec<(Yaku, u32)> {
     }
 
     // 断幺九
-    if is_tanyao(ctx.decomposition)
-        && (ctx.menzen || ctx.config.kuitan) {
-            out.push((Yaku::Tanyao, 1));
-        }
+    if is_tanyao(ctx.decomposition) && (ctx.menzen || ctx.config.kuitan) {
+        out.push((Yaku::Tanyao, 1));
+    }
 
     // 清一/混一(适用于标准型和七对子)
     if let Some(suit) = single_suit(ctx.decomposition) {
@@ -438,7 +457,13 @@ fn yakuhai_kind(t: TileIndex, ctx: &WinContext) -> YakuhaiKind {
 }
 
 fn count_concealed_koutsu(ctx: &WinContext) -> u32 {
-    let Decomposition::Standard { mentsu, wait, winning_tile, .. } = ctx.decomposition else {
+    let Decomposition::Standard {
+        mentsu,
+        wait,
+        winning_tile,
+        ..
+    } = ctx.decomposition
+    else {
         return 0;
     };
     let mut count = 0u32;
@@ -566,7 +591,13 @@ fn chuurenpoutou_check(ctx: &WinContext) -> Option<bool> {
     if !ctx.menzen {
         return None;
     }
-    let Decomposition::Standard { mentsu, pair, winning_tile, .. } = ctx.decomposition else {
+    let Decomposition::Standard {
+        mentsu,
+        pair,
+        winning_tile,
+        ..
+    } = ctx.decomposition
+    else {
         return None;
     };
     if !pair.is_suupai() {
@@ -624,7 +655,10 @@ fn is_pinfu(ctx: &WinContext) -> bool {
     if !ctx.menzen {
         return false;
     }
-    let Decomposition::Standard { mentsu, pair, wait, .. } = ctx.decomposition else {
+    let Decomposition::Standard {
+        mentsu, pair, wait, ..
+    } = ctx.decomposition
+    else {
         return false;
     };
     if *wait != WaitKind::Ryanmen {
@@ -773,9 +807,10 @@ fn is_shousangen(mentsu: &[Mentsu], pair: TileIndex) -> bool {
     }
     for m in mentsu {
         if let Mentsu::Koutsu(t, _) | Mentsu::Kantsu(t, _) = m
-            && dragons.contains(t) {
-                k_count += 1;
-            }
+            && dragons.contains(t)
+        {
+            k_count += 1;
+        }
     }
     k_count == 2 && pair_dragon.is_some()
 }
@@ -928,7 +963,15 @@ mod tests {
         let r = decompose(&hand, &[], TileIndex(4)); // winning 5m
         let d = r
             .iter()
-            .find(|d| matches!(d, Decomposition::Standard { wait: WaitKind::Ryanmen, .. }))
+            .find(|d| {
+                matches!(
+                    d,
+                    Decomposition::Standard {
+                        wait: WaitKind::Ryanmen,
+                        ..
+                    }
+                )
+            })
             .unwrap();
         let ctx = ctx_for(d, true);
         let yakus = detect_yaku(&ctx);
@@ -943,13 +986,22 @@ mod tests {
     fn detect_tanyao() {
         // 234m 567p 234s 666m 55s, 等 ... 全是 2-8.
         let mut hand = [0u8; 34];
-        hand[1] = 1; hand[2] = 1; hand[3] = 1; // 234m
-        hand[13] = 1; hand[14] = 1; hand[15] = 1; // 567p
-        hand[19] = 1; hand[20] = 1; hand[21] = 1; // 234s
+        hand[1] = 1;
+        hand[2] = 1;
+        hand[3] = 1; // 234m
+        hand[13] = 1;
+        hand[14] = 1;
+        hand[15] = 1; // 567p
+        hand[19] = 1;
+        hand[20] = 1;
+        hand[21] = 1; // 234s
         hand[5] = 3; // 666m
         hand[22] = 2; // 55s
         let r = decompose(&hand, &[], TileIndex(1));
-        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let d = r
+            .iter()
+            .find(|d| matches!(d, Decomposition::Standard { .. }))
+            .unwrap();
         let ctx = ctx_for(d, true);
         let yakus = detect_yaku(&ctx);
         assert!(yakus.iter().any(|(y, _)| matches!(y, Yaku::Tanyao)));
@@ -963,7 +1015,10 @@ mod tests {
         }
         hand[0] = 2;
         let r = decompose(&hand, &[], TileIndex(0));
-        let d = r.iter().find(|d| matches!(d, Decomposition::Kokushi { .. })).unwrap();
+        let d = r
+            .iter()
+            .find(|d| matches!(d, Decomposition::Kokushi { .. }))
+            .unwrap();
         let ctx = ctx_for(d, true);
         let yakus = detect_yaku(&ctx);
         assert!(yakus.iter().any(|(y, _)| matches!(y, Yaku::Kokushi { .. })));

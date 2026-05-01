@@ -651,7 +651,9 @@ impl GameState {
         }
         self.remove_from_hand(who, &[two[0].id, two[1].id])?;
         self.players[who.index()].hand.melds.push(Meld {
-            kind: MeldKind::Pon { tiles: [two[0], two[1], tile] },
+            kind: MeldKind::Pon {
+                tiles: [two[0], two[1], tile],
+            },
             from: Some(from),
         });
         self.consume_discard(from, tile);
@@ -681,7 +683,9 @@ impl GameState {
         }
         self.remove_from_hand(who, &[two[0].id, two[1].id])?;
         self.players[who.index()].hand.melds.push(Meld {
-            kind: MeldKind::Chi { tiles: [two[0], two[1], tile] },
+            kind: MeldKind::Chi {
+                tiles: [two[0], two[1], tile],
+            },
             from: Some(from),
         });
         self.consume_discard(from, tile);
@@ -704,7 +708,9 @@ impl GameState {
         }
         self.remove_from_hand(who, &[three[0].id, three[1].id, three[2].id])?;
         self.players[who.index()].hand.melds.push(Meld {
-            kind: MeldKind::Minkan { tiles: [three[0], three[1], three[2], tile] },
+            kind: MeldKind::Minkan {
+                tiles: [three[0], three[1], three[2], tile],
+            },
             from: Some(from),
         });
         self.consume_discard(from, tile);
@@ -737,7 +743,9 @@ impl GameState {
             .closed
             .retain(|t| t.kind != kind);
         self.players[seat.index()].hand.melds.push(Meld {
-            kind: MeldKind::Ankan { tiles: [four[0], four[1], four[2], four[3]] },
+            kind: MeldKind::Ankan {
+                tiles: [four[0], four[1], four[2], four[3]],
+            },
             from: None,
         });
         self.break_first_round_and_ippatsu();
@@ -770,7 +778,9 @@ impl GameState {
             _ => return Err("internal: not pon"),
         };
         self.players[seat.index()].hand.melds[meld_pos] = Meld {
-            kind: MeldKind::Shouminkan { tiles: [tiles[0], tiles[1], tiles[2], fourth] },
+            kind: MeldKind::Shouminkan {
+                tiles: [tiles[0], tiles[1], tiles[2], fourth],
+            },
             from,
         };
         self.break_first_round_and_ippatsu();
