@@ -133,6 +133,10 @@ struct RoomActor {
     round_index: u64,
     /// 房主创建时占位的 nickname; 房主真正加入后替换.
     pending_host_nickname: Option<String>,
+    /// AwaitCalls 阶段, 等待真人玩家响应 (Pon/Chi/Minkan/Ron/Pass).
+    /// HashMap<player_id, response>, None = 待响应.
+    /// 收齐后或裁决后清空.
+    pending_calls: Option<HashMap<u32, Option<NetAction>>>,
 }
 
 impl RoomActor {
@@ -154,6 +158,7 @@ impl RoomActor {
             game_seed: 0,
             round_index: 0,
             pending_host_nickname: Some(host_nickname),
+            pending_calls: None,
         }
     }
 
@@ -442,6 +447,17 @@ impl RoomActor {
         let Some(seat) = self.player_seat(player_id) else {
             return;
         };
+
+        // AwaitCalls 阶段的鸣牌响应走单独路径
+        let phase = match self.game.as_ref() {
+            Some(g) => g.phase,
+            None => return,
+        };
+        if phase == Phase::AwaitCalls {
+            self.handle_call_response(player_id, action);
+            return;
+        }
+
         let Some(game) = self.game.as_mut() else {
             return;
         };
@@ -495,7 +511,7 @@ impl RoomActor {
                 }
                 let _ = game.do_shouminkan(kind);
             }
-            // 鸣牌响应留 Phase 9 的窗口逻辑
+            // AwaitDiscard 阶段忽略鸣牌响应
             NetAction::Pon | NetAction::Chi(_) | NetAction::Minkan | NetAction::Pass => {}
             NetAction::NextRound => {
                 if game.phase == Phase::RoundEnd {
@@ -508,6 +524,101 @@ impl RoomActor {
                 }
             }
         }
+        self.broadcast_state_view();
+    }
+
+    /// AwaitCalls 阶段的玩家响应: 收 Pon/Chi/Minkan/Tsumo(=Ron)/Pass.
+    /// 收齐后裁决: Ron > Pon=Kan > Chi.
+    fn handle_call_response(&mut self, player_id: u32, action: NetAction) {
+        let Some(pending) = self.pending_calls.as_mut() else {
+            return;
+        };
+        if !pending.contains_key(&player_id) {
+            return; // 不是被等的玩家, 忽略
+        }
+        // 记录响应
+        pending.insert(player_id, Some(action));
+        // 是否所有 pending 都响应了
+        let all_responded = pending.values().all(|v| v.is_some());
+        if !all_responded {
+            return;
+        }
+        // 裁决
+        self.resolve_call_window();
+    }
+
+    /// 收齐响应后裁决并应用. 优先级: Ron > Pon=Kan > Chi.
+    fn resolve_call_window(&mut self) {
+        let Some(pending) = self.pending_calls.take() else {
+            return;
+        };
+
+        // 先找 Ron (Tsumo 在 AwaitCalls 阶段视为 Ron).
+        for (pid, resp) in &pending {
+            if matches!(resp, Some(NetAction::Tsumo)) {
+                let Some(seat) = self.player_seat(*pid) else {
+                    continue;
+                };
+                let game = self.game.as_mut().unwrap();
+                if let Some(score) = game.try_ron(seat) {
+                    game.declare_ron(seat, score);
+                    self.broadcast_state_view();
+                    self.broadcast_round_result();
+                    return;
+                }
+            }
+        }
+
+        // 然后找 Pon/Minkan (同优先级, 取第一个).
+        for (pid, resp) in &pending {
+            match resp {
+                Some(NetAction::Pon) => {
+                    let Some(seat) = self.player_seat(*pid) else {
+                        continue;
+                    };
+                    let game = self.game.as_mut().unwrap();
+                    let opts = game.legal_calls(seat);
+                    if let Some(two) = opts.pon {
+                        let _ = game.do_pon(seat, two);
+                        self.broadcast_state_view();
+                        return;
+                    }
+                }
+                Some(NetAction::Minkan) => {
+                    let Some(seat) = self.player_seat(*pid) else {
+                        continue;
+                    };
+                    let game = self.game.as_mut().unwrap();
+                    let opts = game.legal_calls(seat);
+                    if let Some(three) = opts.minkan {
+                        let _ = game.do_minkan(seat, three);
+                        self.broadcast_state_view();
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 然后找 Chi (头跳: 只下家可吃).
+        for (pid, resp) in &pending {
+            if let Some(NetAction::Chi(idx)) = resp {
+                let Some(seat) = self.player_seat(*pid) else {
+                    continue;
+                };
+                let game = self.game.as_mut().unwrap();
+                let opts = game.legal_calls(seat);
+                if let Some(two) = opts.chi.get(*idx).copied() {
+                    let _ = game.do_chi(seat, two);
+                    self.broadcast_state_view();
+                    return;
+                }
+            }
+        }
+
+        // 全 Pass: 推进
+        let game = self.game.as_mut().unwrap();
+        game.advance_turn();
         self.broadcast_state_view();
     }
 
@@ -546,10 +657,38 @@ impl RoomActor {
                     self.apply_ai_action(action);
                 }
                 Phase::AwaitCalls => {
-                    // Phase 9 加鸣牌窗口. 现在直接推进 (相当于全员 Pass).
-                    let game = self.game.as_mut().unwrap();
-                    game.advance_turn();
-                    self.broadcast_state_view();
+                    if self.pending_calls.is_some() {
+                        // 已 setup, 等响应
+                        return;
+                    }
+                    // 收集真人玩家的 call options. 只有有 options 且是真人的需等响应.
+                    let game_ref = self.game.as_ref().unwrap();
+                    let last_discarder = game_ref.last_discard.map(|(s, _)| s);
+                    let mut humans_pending: HashMap<u32, Option<NetAction>> = HashMap::new();
+                    for slot in &self.slots {
+                        let Some(seat) = slot.seat else { continue };
+                        if Some(seat) == last_discarder {
+                            continue; // 自切方不参与
+                        }
+                        if slot.is_ai || !slot.connected {
+                            continue;
+                        }
+                        let opts = game_ref.legal_calls(seat);
+                        if opts.any() {
+                            humans_pending.insert(slot.id, None);
+                        }
+                    }
+                    if humans_pending.is_empty() {
+                        // 没真人有 options, AI 全部默认 Pass → 直接 advance
+                        let game = self.game.as_mut().unwrap();
+                        game.advance_turn();
+                        self.broadcast_state_view();
+                        continue;
+                    }
+                    // 进入等待状态
+                    self.pending_calls = Some(humans_pending);
+                    self.broadcast_state_view(); // client 看到 AwaitCalls 时会渲染提示
+                    return;
                 }
                 Phase::RoundEnd => {
                     self.broadcast_round_result();
@@ -919,6 +1058,32 @@ mod tests {
         yield_actor().await;
     }
 
+    /// 等到 host_rx 中收到一个满足条件的 GameStateView, 否则超时.
+    /// 返回最后一个匹配的 view. 用于稳健的状态等待 (避免 yield_actor 时间不够).
+    async fn wait_for_view(
+        rx: &mut UnboundedReceiver<ServerMsg>,
+        latest: &mut Option<GameStateView>,
+        condition: impl Fn(&GameStateView) -> bool,
+        timeout_ms: u64,
+    ) -> Option<GameStateView> {
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        while std::time::Instant::now() < deadline {
+            // drain 当前可读消息, 更新 latest
+            while let Ok(msg) = rx.try_recv() {
+                if let ServerMsg::GameStateView(v) = msg {
+                    *latest = Some(*v);
+                }
+            }
+            if let Some(v) = latest.as_ref()
+                && condition(v)
+            {
+                return latest.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        latest.clone()
+    }
+
     /// AI 驱动: 1 真人 host + 3 AI, 一直推进直到 host 应该出牌 (turn=East AwaitDiscard).
     /// 然后 host 切牌, AI 应继续接管直到下一次 host turn.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -932,17 +1097,16 @@ mod tests {
                 msg: ClientMsg::StartGame,
             })
             .unwrap();
-        yield_actor().await;
 
-        // 收最后一条 GameStateView, 看 phase / turn
-        let mut latest_view: Option<GameStateView> = None;
-        while let Ok(msg) = host_rx.try_recv() {
-            if let ServerMsg::GameStateView(v) = msg {
-                latest_view = Some(*v);
-            }
-        }
-        let view = latest_view.expect("收到至少一个 GameStateView");
-        // 开局 host=East 是亲家, 应该 turn=East 在 AwaitDiscard (摸了 14 张)
+        let mut latest: Option<GameStateView> = None;
+        let view = wait_for_view(
+            &mut host_rx,
+            &mut latest,
+            |v| v.turn == Seat::East && v.phase == Phase::AwaitDiscard,
+            2000,
+        )
+        .await
+        .expect("应在 2s 内收到 East AwaitDiscard 状态");
         assert_eq!(view.turn, Seat::East);
         assert_eq!(view.phase, Phase::AwaitDiscard);
 
@@ -959,27 +1123,32 @@ mod tests {
                 )),
             })
             .unwrap();
-        yield_actor().await;
 
-        // AI 接管 South/West/North 自动出, 然后回到 host (East) AwaitDiscard
-        let mut latest_view2: Option<GameStateView> = None;
-        while let Ok(msg) = host_rx.try_recv() {
-            if let ServerMsg::GameStateView(v) = msg {
-                latest_view2 = Some(*v);
-            }
-        }
-        let view2 = latest_view2.expect("AI 推进后应有新 GameStateView");
-        // 应该回到 East AwaitDiscard, 且事件中至少有 3 个 Discard (3 个 AI 各一)
+        // AI 接管 South/West/North 自动出, 然后回到 host (East) AwaitDiscard.
+        // 等条件: 事件中至少 4 次 Discard 且 turn=East AwaitDiscard.
+        let mut latest2: Option<GameStateView> = None;
+        let view2 = wait_for_view(
+            &mut host_rx,
+            &mut latest2,
+            |v| {
+                v.turn == Seat::East
+                    && v.phase == Phase::AwaitDiscard
+                    && v.events
+                        .iter()
+                        .filter(|e| matches!(e, crate::game::GameEvent::Discard { .. }))
+                        .count()
+                        >= 4
+            },
+            3000,
+        )
+        .await;
+        let view2 = view2.unwrap_or_else(|| {
+            panic!(
+                "AI 推进后应回到 East AwaitDiscard, latest={:?}",
+                latest2.as_ref().map(|v| (v.turn, v.phase))
+            )
+        });
         assert_eq!(view2.turn, Seat::East);
         assert_eq!(view2.phase, Phase::AwaitDiscard);
-        let discard_count = view2
-            .events
-            .iter()
-            .filter(|e| matches!(e, crate::game::GameEvent::Discard { .. }))
-            .count();
-        assert!(
-            discard_count >= 4,
-            "应该至少 4 个 Discard 事件 (host + 3 AI). 实际 {discard_count}"
-        );
     }
 }
