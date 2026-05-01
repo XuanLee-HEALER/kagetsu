@@ -270,6 +270,7 @@ impl App {
                 s.inbox,
                 s.my_player_id,
                 s.my_token,
+                self.local_prefs.theme,
             )));
         }
     }
