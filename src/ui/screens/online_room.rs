@@ -10,12 +10,18 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::net::protocol::{ClientMsg, RoomLifecycle, RoomView, ServerMsg};
 use crate::net::session::NetSession;
 use crate::ui::Transition;
+use crate::ui::edit_config_modal::{EditConfigModal, EditOutcome};
+use crate::ui::theme::ThemeKind;
 
 /// 在线房间. 通过 NetSession 与 server 收发 (本地房主或远程加入者皆可).
 pub struct OnlineRoomState {
     pub session: NetSession,
     pub room_view: RoomView,
     pub message: String,
+    /// 房主开启 config 编辑器. 非 None 时优先吃所有按键.
+    pub editing_config: Option<EditConfigModal>,
+    /// 当前 UI 主题 (App 切主题时同步).
+    pub theme_kind: ThemeKind,
 }
 
 impl OnlineRoomState {
@@ -24,7 +30,13 @@ impl OnlineRoomState {
             session,
             room_view,
             message: String::new(),
+            editing_config: None,
+            theme_kind: ThemeKind::default(),
         }
+    }
+
+    pub fn set_theme(&mut self, kind: ThemeKind) {
+        self.theme_kind = kind;
     }
 
     pub fn my_player_id(&self) -> u32 {
@@ -67,6 +79,21 @@ impl OnlineRoomState {
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
+        // EditConfigModal 优先吃所有按键 (含 Esc).
+        if let Some(modal) = self.editing_config.as_mut() {
+            match modal.handle_key(key) {
+                EditOutcome::Save(cfg) => {
+                    self.session.send(ClientMsg::UpdateConfig(cfg));
+                    self.editing_config = None;
+                    self.message = "已提交配置更新.".into();
+                }
+                EditOutcome::Cancel => {
+                    self.editing_config = None;
+                }
+                EditOutcome::Pending => {}
+            }
+            return None;
+        }
         match key.code {
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 let my_id = self.my_player_id();
@@ -74,14 +101,36 @@ impl OnlineRoomState {
                 let new_ready = me.map(|p| !p.ready).unwrap_or(true);
                 self.session.send(ClientMsg::Ready { ready: new_ready });
             }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                if self.is_host() {
+                    self.editing_config =
+                        Some(EditConfigModal::new(self.room_view.config.clone()));
+                } else {
+                    self.message = "只有房主可改配置.".into();
+                }
+            }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if self.is_host() {
                     self.session.send(ClientMsg::StartGame);
                 }
             }
             KeyCode::Char('l') | KeyCode::Char('L') => {
-                self.session.send(ClientMsg::Leave);
-                return Some(Transition::EnterMainMenu);
+                return Some(Transition::RequestConfirm {
+                    modal: Box::new(crate::ui::confirm::ConfirmModal::new(
+                        "离开房间",
+                        "确定离开房间? 所有进度会丢失.",
+                    )),
+                    action: crate::ui::ConfirmAction::LeaveOnlineRoom,
+                });
+            }
+            KeyCode::Esc => {
+                return Some(Transition::RequestConfirm {
+                    modal: Box::new(crate::ui::confirm::ConfirmModal::new(
+                        "回主菜单",
+                        "确定离开房间回主菜单?",
+                    )),
+                    action: crate::ui::ConfirmAction::LeaveOnlineRoomViaEsc,
+                });
             }
             _ => {}
         }
@@ -171,6 +220,7 @@ impl OnlineRoomState {
         lines.push(Line::from(""));
         let mut hints = vec!["R 切换准备".to_string()];
         if self.is_host() {
+            hints.push("C 改配置".into());
             hints.push("Enter 开始游戏 (空座位补 AI)".into());
         }
         hints.push("L 离开房间".into());
@@ -181,6 +231,12 @@ impl OnlineRoomState {
         )));
 
         f.render_widget(Paragraph::new(lines).alignment(Alignment::Left), inner);
+
+        // EditConfigModal 叠加在最上层.
+        if let Some(modal) = &self.editing_config {
+            let theme = self.theme_kind.theme();
+            modal.render(f.buffer_mut(), area, &theme);
+        }
     }
 
     fn is_host(&self) -> bool {

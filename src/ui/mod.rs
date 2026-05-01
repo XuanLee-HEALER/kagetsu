@@ -3,6 +3,8 @@
 //! 屏间通过 [`Transition`] 切换. App 持有 [`last_config`] / [`last_seed_choice`]
 //! 用于"新游戏"复用上次配置.
 
+pub mod confirm;
+pub mod edit_config_modal;
 pub mod paint;
 pub mod screens;
 pub mod theme;
@@ -20,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::{GameConfig, LocalPrefs};
 use crate::score::Ranking;
+use crate::ui::confirm::{ConfirmChoice, ConfirmModal};
 
 pub use screens::config::{ConfigState, SeedChoice};
 pub use screens::game::GameScreenState;
@@ -53,6 +56,27 @@ pub enum Transition {
     },
     /// 房间内 server 推送 GameStateView/InGame, 切到 OnlineGame.
     EnterOnlineGame,
+    /// 屏请求弹一个 ConfirmModal. App 拦下来 stash, Yes 时执行 ConfirmAction.
+    RequestConfirm {
+        modal: Box<ConfirmModal>,
+        action: ConfirmAction,
+    },
+}
+
+/// 危险操作的副作用类型. 由 App 在 confirm Yes 后 dispatch 执行.
+#[derive(Debug, Clone, Copy)]
+pub enum ConfirmAction {
+    Quit,
+    /// InGame Esc 回主菜单 (丢进度).
+    BackToMainMenu,
+    /// OnlineRoom L (send Leave + 回主菜单).
+    LeaveOnlineRoom,
+    /// OnlineRoom Esc (同 LeaveOnlineRoom 但提示文案不同).
+    LeaveOnlineRoomViaEsc,
+    /// OnlineGame L / Esc (send Leave + 回主菜单).
+    LeaveOnlineGame,
+    /// OnlineLobby Esc (drop browser + 回主菜单).
+    LeaveOnlineLobby,
 }
 
 pub enum Screen {
@@ -78,6 +102,8 @@ pub struct App {
     pub host_port: Option<u16>,
     /// 房主 mode: mDNS 广告. 房间结束 / 退出 lobby 时 drop.
     pub discovery_ad: Option<crate::net::discovery::DiscoveryAd>,
+    /// 当前正在显示的 ConfirmModal (含待执行 action). 拦截一切按键直到关闭.
+    pub pending_confirm: Option<(ConfirmModal, ConfirmAction)>,
 }
 
 impl App {
@@ -91,6 +117,7 @@ impl App {
             runtime,
             host_port: None,
             discovery_ad: None,
+            pending_confirm: None,
         }
     }
 
@@ -144,23 +171,42 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<Transition> {
+        // pending_confirm 优先吃所有按键.
+        if let Some((modal, action)) = self.pending_confirm.as_mut() {
+            if let Some(choice) = modal.handle_key(key) {
+                let action = *action;
+                self.pending_confirm = None;
+                if choice == ConfirmChoice::Yes {
+                    return Some(self.execute_confirm_action(action));
+                }
+            }
+            return None;
+        }
         // 大写 T: 全局切换主题 (避免与 InGame 的小写 t 冲突).
         // COMMAND 模式下放行让命令缓冲区接受字符.
         if key.code == KeyCode::Char('T') && !self.is_in_command_mode() {
             self.cycle_theme();
             return None;
         }
-        // 全局快捷键: Q 总是退出 (但 COMMAND 模式下当字符).
+        // 全局快捷键: Q 弹确认 modal (主菜单除外, 直接退).
+        // COMMAND 模式下当字符.
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) && !self.is_in_command_mode()
         {
-            return Some(Transition::Quit);
+            return Some(Transition::RequestConfirm {
+                modal: Box::new(ConfirmModal::new("退出程序", "确定退出 tui-majo?")),
+                action: ConfirmAction::Quit,
+            });
         }
-        // Esc: 主菜单上不响应; 其它屏回主菜单.
-        // 例外: COMMAND 模式 / Modal 打开时交给屏处理 (取消命令 / 关闭 modal).
+        // Esc: 主菜单不响应; Config/GameOver 直接回主菜单 (无副作用);
+        // 其它 4 屏派发给屏自己 (屏决定要不要弹 confirm).
         if key.code == KeyCode::Esc && !self.is_in_command_mode() && !self.is_in_modal() {
-            return match self.screen {
+            return match &mut self.screen {
                 Screen::MainMenu(_) => None,
-                _ => Some(Transition::EnterMainMenu),
+                Screen::Config(_) | Screen::GameOver(_) => Some(Transition::EnterMainMenu),
+                Screen::InGame(s) => s.handle_event(key),
+                Screen::OnlineLobby(s) => s.handle_event(key),
+                Screen::OnlineRoom(s) => s.handle_event(key),
+                Screen::OnlineGame(s) => s.handle_event(key),
             };
         }
         // 派发到屏.
@@ -172,6 +218,27 @@ impl App {
             Screen::OnlineLobby(s) => s.handle_event(key),
             Screen::OnlineRoom(s) => s.handle_event(key),
             Screen::OnlineGame(s) => s.handle_event(key),
+        }
+    }
+
+    fn execute_confirm_action(&mut self, action: ConfirmAction) -> Transition {
+        match action {
+            ConfirmAction::Quit => Transition::Quit,
+            ConfirmAction::BackToMainMenu | ConfirmAction::LeaveOnlineLobby => {
+                Transition::EnterMainMenu
+            }
+            ConfirmAction::LeaveOnlineRoom | ConfirmAction::LeaveOnlineRoomViaEsc => {
+                if let Screen::OnlineRoom(s) = &mut self.screen {
+                    s.session.send(crate::net::protocol::ClientMsg::Leave);
+                }
+                Transition::EnterMainMenu
+            }
+            ConfirmAction::LeaveOnlineGame => {
+                if let Screen::OnlineGame(s) = &mut self.screen {
+                    s.session.send(crate::net::protocol::ClientMsg::Leave);
+                }
+                Transition::EnterMainMenu
+            }
         }
     }
 
@@ -194,9 +261,12 @@ impl App {
     fn cycle_theme(&mut self) {
         let next = self.local_prefs.theme.next();
         self.local_prefs.theme = next;
-        // 同步到当前屏幕 (InGame 缓存了 theme_kind).
-        if let Screen::InGame(s) = &mut self.screen {
-            s.set_theme(next);
+        // 同步到当前屏幕 (各屏自己缓存了 theme_kind).
+        match &mut self.screen {
+            Screen::InGame(s) => s.set_theme(next),
+            Screen::OnlineRoom(s) => s.set_theme(next),
+            Screen::OnlineGame(s) => s.theme_kind = next,
+            _ => {}
         }
     }
 
@@ -241,6 +311,9 @@ impl App {
             }
             Transition::EnterOnlineGame => {
                 self.transition_room_to_game();
+            }
+            Transition::RequestConfirm { modal, action } => {
+                self.pending_confirm = Some((*modal, action));
             }
         }
     }
@@ -296,7 +369,9 @@ impl App {
             players: vec![],
             state: crate::net::protocol::RoomLifecycle::Lobby,
         };
-        self.screen = Screen::OnlineRoom(Box::new(OnlineRoomState::new(session, placeholder_view)));
+        let mut room_state = OnlineRoomState::new(session, placeholder_view);
+        room_state.set_theme(self.local_prefs.theme);
+        self.screen = Screen::OnlineRoom(Box::new(room_state));
     }
 
     /// 远程加入房间 (走 ws).
@@ -314,8 +389,9 @@ impl App {
                     players: vec![],
                     state: crate::net::protocol::RoomLifecycle::Lobby,
                 };
-                self.screen =
-                    Screen::OnlineRoom(Box::new(OnlineRoomState::new(session, placeholder_view)));
+                let mut room_state = OnlineRoomState::new(session, placeholder_view);
+                room_state.set_theme(self.local_prefs.theme);
+                self.screen = Screen::OnlineRoom(Box::new(room_state));
             }
             Err(e) => {
                 self.screen =
@@ -350,6 +426,11 @@ impl App {
             .split(area);
         self.render_main(f, chunks[0]);
         self.render_global_footer(f, chunks[1]);
+        // 全局叠加 ConfirmModal (在所有屏内容之上).
+        if let Some((modal, _)) = &self.pending_confirm {
+            let theme = self.local_prefs.theme.theme();
+            modal.render(f.buffer_mut(), area, &theme);
+        }
     }
 
     fn render_size_warning(&self, f: &mut ratatui::Frame, area: Rect, min_w: u16, min_h: u16) {

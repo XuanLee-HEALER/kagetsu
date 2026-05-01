@@ -223,8 +223,22 @@ impl OnlineGameState {
                 self.session.send(ClientMsg::Action(NetAction::NextRound));
             }
             KeyCode::Char('L') => {
-                self.session.send(ClientMsg::Leave);
-                return Some(Transition::EnterMainMenu);
+                return Some(Transition::RequestConfirm {
+                    modal: Box::new(crate::ui::confirm::ConfirmModal::new(
+                        "离开对局",
+                        "确定离开当前对局回主菜单? 进度会丢失.",
+                    )),
+                    action: crate::ui::ConfirmAction::LeaveOnlineGame,
+                });
+            }
+            KeyCode::Esc => {
+                return Some(Transition::RequestConfirm {
+                    modal: Box::new(crate::ui::confirm::ConfirmModal::new(
+                        "回主菜单",
+                        "确定离开当前对局回主菜单? 进度会丢失.",
+                    )),
+                    action: crate::ui::ConfirmAction::LeaveOnlineGame,
+                });
             }
             _ => {}
         }

@@ -166,6 +166,13 @@ impl OnlineLobbyState {
                 }
                 _ => None,
             },
+            KeyCode::Esc => Some(Transition::RequestConfirm {
+                modal: Box::new(crate::ui::confirm::ConfirmModal::new(
+                    "回主菜单",
+                    "确定离开局域网大厅?",
+                )),
+                action: crate::ui::ConfirmAction::LeaveOnlineLobby,
+            }),
             _ => None,
         }
     }
