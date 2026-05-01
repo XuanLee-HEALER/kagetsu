@@ -55,8 +55,21 @@ pub fn spawn_room_with_seed(
     config: GameConfig,
     seed: Option<u64>,
 ) -> RoomHandle {
+    spawn_room_advanced(host_nickname, config, seed, None)
+}
+
+/// 全选项版 spawn, 测试用. `call_window_ms_override` 缩短鸣牌窗口加快测试.
+pub fn spawn_room_advanced(
+    host_nickname: String,
+    config: GameConfig,
+    seed: Option<u64>,
+    call_window_ms_override: Option<u64>,
+) -> RoomHandle {
     let (tx, rx) = mpsc::unbounded_channel();
-    let actor = RoomActor::new_with_rx(host_nickname, config, rx, tx.clone(), seed);
+    let mut actor = RoomActor::new_with_rx(host_nickname, config, rx, tx.clone(), seed);
+    if let Some(ms) = call_window_ms_override {
+        actor.call_window_ms = ms;
+    }
     tokio::spawn(actor.run());
     RoomHandle { tx }
 }
@@ -167,6 +180,8 @@ struct RoomActor {
     pending_calls: Option<HashMap<u32, Option<NetAction>>>,
     /// 鸣牌窗口 generation, 每次 setup 自增, timer 触发时校验避免过期影响.
     call_window_gen: u64,
+    /// 鸣牌窗口超时 ms. 默认 [`CALL_WINDOW_MS`], 测试可缩短.
+    call_window_ms: u64,
     /// 测试注入的 seed; None 时 start_game 用真 RNG.
     seed_override: Option<u64>,
 }
@@ -195,6 +210,7 @@ impl RoomActor {
             pending_host_nickname: Some(host_nickname),
             pending_calls: None,
             call_window_gen: 0,
+            call_window_ms: CALL_WINDOW_MS,
             seed_override,
         }
     }
@@ -766,7 +782,8 @@ impl RoomActor {
                     self.pending_calls = Some(humans_pending);
 
                     // 给 hints 推 ActionRequired (让 UI 高亮鸣牌选择)
-                    let deadline = chrono_now_unix_ms() + CALL_WINDOW_MS as i64;
+                    let window_ms = self.call_window_ms;
+                    let deadline = chrono_now_unix_ms() + window_ms as i64;
                     for (pid, hints) in hints_per_player {
                         if let Some(slot) = self.slots.iter().find(|s| s.id == pid)
                             && let Some(sender) = &slot.sender
@@ -783,7 +800,7 @@ impl RoomActor {
                     // spawn timeout
                     let self_tx = self.self_tx.clone();
                     tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(CALL_WINDOW_MS)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(window_ms)).await;
                         let _ = self_tx.send(RoomCmd::CallTimeout {
                             generation: gen_now,
                         });

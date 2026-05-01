@@ -28,7 +28,7 @@ use tui_majo::config::GameConfig;
 use tui_majo::game::{GameEvent, Phase};
 use tui_majo::meld::Seat;
 use tui_majo::net::protocol::{ClientMsg, GameStateView, NetAction, RoomView, ServerMsg};
-use tui_majo::net::room::{RoomCmd, RoomHandle, spawn_room_with_seed};
+use tui_majo::net::room::{RoomCmd, RoomHandle, spawn_room_advanced};
 use tui_majo::tile::{Tile, TileIndex};
 use tui_majo::ui::screens::game::TileSpec;
 
@@ -49,6 +49,8 @@ pub struct TestRoomBuilder {
     /// drain 时检测到 AwaitCalls 鸣牌窗口的 ActionRequired 自动发 Pass.
     /// 默认 true. calls 场景需主动响应时设 false.
     auto_pass_calls: bool,
+    /// 鸣牌窗口超时 ms. 默认 None = server 用 2500ms. 测试可缩短.
+    call_window_ms: Option<u64>,
 }
 
 impl Default for TestRoomBuilder {
@@ -64,11 +66,17 @@ impl TestRoomBuilder {
             config: GameConfig::default(),
             seed: DEFAULT_SEED,
             auto_pass_calls: true,
+            call_window_ms: None,
         }
     }
 
     pub fn auto_pass_calls(mut self, b: bool) -> Self {
         self.auto_pass_calls = b;
+        self
+    }
+
+    pub fn call_window_ms(mut self, ms: u64) -> Self {
+        self.call_window_ms = Some(ms);
         self
     }
 
@@ -100,8 +108,12 @@ impl TestRoomBuilder {
 
     /// spawn 房间 + 所有 humans 加入. 返回 lobby 状态的 TestRoom.
     pub async fn build_lobby(self) -> TestRoom {
-        let handle =
-            spawn_room_with_seed(self.nicks[0].clone(), self.config.clone(), Some(self.seed));
+        let handle = spawn_room_advanced(
+            self.nicks[0].clone(),
+            self.config.clone(),
+            Some(self.seed),
+            self.call_window_ms,
+        );
         let mut clients = Vec::new();
         for nick in &self.nicks {
             let mut c = TestClient::join(handle.clone(), nick.clone()).await;
