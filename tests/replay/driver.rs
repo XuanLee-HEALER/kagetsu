@@ -45,6 +45,10 @@ struct ReplayState {
     riichi: [bool; 4],
     /// 立直后还在一发窗口期 (尚未自家再切 / 任何人鸣牌).
     ippatsu_active: [bool; 4],
+    /// 自家 Kan 后到下次 dahai 之间, 自摸视为岭上开花.
+    rinshan_pending: [bool; 4],
+    /// 最近一次 Kakan 的 actor (chankan 检测: 紧接着的 Hora 是抢杠).
+    last_kakan_actor: Option<Seat>,
     last_drawn: [Option<Tile>; 4],
     last_discard: Option<(Seat, Tile)>,
     dora_indicators: Vec<Tile>,
@@ -63,6 +67,8 @@ impl ReplayState {
             rivers: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             riichi: [false; 4],
             ippatsu_active: [false; 4],
+            rinshan_pending: [false; 4],
+            last_kakan_actor: None,
             last_drawn: [None; 4],
             last_discard: None,
             dora_indicators: vec![log.initial_dora_marker],
@@ -79,6 +85,8 @@ impl ReplayState {
             KyokuEvent::Tsumo { who, tile } => {
                 self.hands[who.index()].push(*tile);
                 self.last_drawn[who.index()] = Some(*tile);
+                // 摸非 Kan 后的牌 → chankan 窗口结束 (Kakan 后未被抢直接进 Tsumo)
+                self.last_kakan_actor = None;
             }
             KyokuEvent::Dahai {
                 who,
@@ -96,6 +104,9 @@ impl ReplayState {
                 self.last_discard = Some((*who, *tile));
                 // 一发: 立直方再次切牌后失效
                 self.ippatsu_active[idx] = false;
+                // 切牌后 rinshan 窗口关闭
+                self.rinshan_pending[idx] = false;
+                self.last_kakan_actor = None;
             }
             KyokuEvent::Pon {
                 who,
@@ -158,6 +169,7 @@ impl ReplayState {
                 consumed,
             } => {
                 self.ippatsu_active = [false; 4];
+                self.rinshan_pending[who.index()] = true;
                 let idx = who.index();
                 for c in consumed {
                     let pos = self.hands[idx]
@@ -179,6 +191,7 @@ impl ReplayState {
             }
             KyokuEvent::Ankan { who, consumed } => {
                 self.ippatsu_active = [false; 4];
+                self.rinshan_pending[who.index()] = true;
                 let idx = who.index();
                 for c in consumed {
                     let pos = self.hands[idx]
@@ -195,7 +208,10 @@ impl ReplayState {
                 });
             }
             KyokuEvent::Kakan { who, target, .. } => {
-                self.ippatsu_active = [false; 4];
+                // Kakan 不清 ippatsu: 若被抢杠 (chankan), kakan 不成立, ippatsu 仍有效;
+                // 否则后续 dahai 会自然清.
+                self.rinshan_pending[who.index()] = true;
+                self.last_kakan_actor = Some(*who);
                 let idx = who.index();
                 // 把已碰的刻子升级为加杠
                 let pon_idx = self.melds[idx]
@@ -480,6 +496,11 @@ fn build_ctx<'a>(
         0
     };
 
+    // chankan: 自家荣和 (winner != from), 而 from 刚 Kakan
+    let is_chankan = !is_tsumo && state.last_kakan_actor == Some(from);
+    // rinshan: 自摸 + 自家有 rinshan 待和 (Kan 后摸的牌)
+    let is_rinshan = is_tsumo && state.rinshan_pending[widx];
+
     WinContext {
         decomposition: decomp,
         seat_wind,
@@ -491,8 +512,8 @@ fn build_ctx<'a>(
         is_ippatsu: state.ippatsu_active[widx],
         is_haitei: false,
         is_houtei: false,
-        is_rinshan: false,
-        is_chankan: false,
+        is_rinshan,
+        is_chankan,
         is_tenhou: false,
         is_chiihou: false,
         is_renhou: false,

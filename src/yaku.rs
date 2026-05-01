@@ -263,7 +263,7 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
         } else if sho {
             yakuman.push((Yaku::Shousuushii, 13));
         }
-        if is_tsuuiisou(ctx) {
+        if is_tsuuiisou(ctx, melds) {
             yakuman.push((Yaku::Tsuuiisou, 13));
         }
         if is_chinroutou(ctx) {
@@ -368,8 +368,11 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
         if has_ittsuu(mentsu) {
             out.push((Yaku::Ittsuu, if ctx.menzen { 2 } else { 1 }));
         }
-        // 对对和
-        if mentsu.iter().all(|m| !matches!(m, Mentsu::Shuntsu(_))) {
+        // 对对和: 闭手全刻 + 副露全刻 (chi 视作顺子, 不计)
+        let melds_all_koutsu = melds
+            .iter()
+            .all(|m| !matches!(m.kind, crate::meld::MeldKind::Chi { .. }));
+        if mentsu.iter().all(|m| !matches!(m, Mentsu::Shuntsu(_))) && melds_all_koutsu {
             out.push((Yaku::Toitoi, 2));
         }
         // 三暗刻
@@ -390,14 +393,14 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
             out.push((Yaku::Sankantsu, 2));
         }
         // 混全/纯全
-        let (chanta, junchan) = chanta_check(mentsu, *pair);
+        let (chanta, junchan) = chanta_check(mentsu, *pair, melds);
         if junchan {
             out.push((Yaku::Junchan, if ctx.menzen { 3 } else { 2 }));
         } else if chanta {
             out.push((Yaku::Chanta, if ctx.menzen { 2 } else { 1 }));
         }
         // 混老头
-        if is_honroutou(mentsu, *pair) {
+        if is_honroutou(mentsu, *pair, melds) {
             out.push((Yaku::Honroutou, 2));
         }
         // 小三元
@@ -544,7 +547,15 @@ fn sushii_check(ctx: &WinContext) -> (bool, bool) {
     (wind_koutsu == 3 && pair_is_wind, wind_koutsu == 4)
 }
 
-fn is_tsuuiisou(ctx: &WinContext) -> bool {
+fn is_tsuuiisou(ctx: &WinContext, melds: &[Meld]) -> bool {
+    // 副露含非字牌 → 非字一色
+    for m in melds {
+        for t in m.tiles() {
+            if !t.kind.is_honor() {
+                return false;
+            }
+        }
+    }
     let Decomposition::Standard { mentsu, pair, .. } = ctx.decomposition else {
         return false;
     };
@@ -757,8 +768,8 @@ fn has_ittsuu(mentsu: &[Mentsu]) -> bool {
     false
 }
 
-/// 返回 (chanta, junchan).
-fn chanta_check(mentsu: &[Mentsu], pair: TileIndex) -> (bool, bool) {
+/// 返回 (chanta, junchan). 含副露分析.
+fn chanta_check(mentsu: &[Mentsu], pair: TileIndex, melds: &[Meld]) -> (bool, bool) {
     let mut has_shuntsu = false;
     let mut has_honor = false;
     let mut all_yaochuu = true;
@@ -788,17 +799,37 @@ fn chanta_check(mentsu: &[Mentsu], pair: TileIndex) -> (bool, bool) {
             }
         }
     }
+    // 副露分析: chi 算 shuntsu (取最小 kind 判起始), pon/kan 算 koutsu/kantsu
+    for meld in melds {
+        match &meld.kind {
+            crate::meld::MeldKind::Chi { .. } => {
+                has_shuntsu = true;
+                let min_kind = meld.tiles().iter().map(|t| t.kind.0).min().unwrap();
+                let r = min_kind % 9;
+                if r != 0 && r != 6 {
+                    all_yaochuu = false;
+                }
+            }
+            _ => {
+                let first_kind = meld.tiles()[0].kind;
+                if first_kind.is_honor() {
+                    has_honor = true;
+                }
+                if !first_kind.is_yaochuu() {
+                    all_yaochuu = false;
+                }
+            }
+        }
+    }
     if !all_yaochuu {
         return (false, false);
     }
-    // 纯全: 全幺九(无字)且至少一个顺子.
     let junchan = !has_honor && has_shuntsu;
-    // 混全: 含字牌 且 至少一个顺子.
     let chanta = has_honor && has_shuntsu;
     (chanta, junchan)
 }
 
-fn is_honroutou(mentsu: &[Mentsu], pair: TileIndex) -> bool {
+fn is_honroutou(mentsu: &[Mentsu], pair: TileIndex, melds: &[Meld]) -> bool {
     if !pair.is_yaochuu() {
         return false;
     }
@@ -810,6 +841,15 @@ fn is_honroutou(mentsu: &[Mentsu], pair: TileIndex) -> bool {
                     return false;
                 }
             }
+        }
+    }
+    // 副露含 chi → 含顺子 → 非 honroutou; 副露含非 yaochuu → 非 honroutou
+    for meld in melds {
+        if matches!(meld.kind, crate::meld::MeldKind::Chi { .. }) {
+            return false;
+        }
+        if !meld.tiles()[0].kind.is_yaochuu() {
+            return false;
         }
     }
     true
