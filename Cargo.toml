@@ -19,6 +19,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 pretty_assertions = "1"
 
+[[bin]]
+name = "tui-majo"
+path = "src/main.rs"
+
+[[bin]]
+name = "tui-majo-game"
+path = "src/bin/game.rs"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
