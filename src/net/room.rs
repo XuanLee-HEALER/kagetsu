@@ -42,8 +42,21 @@ use crate::tile::Tile;
 /// 创建一个新 RoomActor 并 spawn 到当前 tokio runtime.
 /// 返回的 [`RoomHandle`] 可发 [`RoomCmd`] 给 actor.
 pub fn spawn_room(host_nickname: String, config: GameConfig) -> RoomHandle {
+    spawn_room_with_seed(host_nickname, config, None)
+}
+
+/// 同 [`spawn_room`], 但允许测试注入固定 seed (None = 启动时随机).
+///
+/// 注入的 seed 用于:
+/// - `game_seed` (整庄 seed). 局 seed = `seed ^ round_index`
+/// - 局内随机 (洗牌) 决定性可复现
+pub fn spawn_room_with_seed(
+    host_nickname: String,
+    config: GameConfig,
+    seed: Option<u64>,
+) -> RoomHandle {
     let (tx, rx) = mpsc::unbounded_channel();
-    let actor = RoomActor::new_with_rx(host_nickname, config, rx, tx.clone());
+    let actor = RoomActor::new_with_rx(host_nickname, config, rx, tx.clone(), seed);
     tokio::spawn(actor.run());
     RoomHandle { tx }
 }
@@ -154,6 +167,8 @@ struct RoomActor {
     pending_calls: Option<HashMap<u32, Option<NetAction>>>,
     /// 鸣牌窗口 generation, 每次 setup 自增, timer 触发时校验避免过期影响.
     call_window_gen: u64,
+    /// 测试注入的 seed; None 时 start_game 用真 RNG.
+    seed_override: Option<u64>,
 }
 
 impl RoomActor {
@@ -162,6 +177,7 @@ impl RoomActor {
         config: GameConfig,
         rx: UnboundedReceiver<RoomCmd>,
         self_tx: UnboundedSender<RoomCmd>,
+        seed_override: Option<u64>,
     ) -> Self {
         let mut rng = rand::rng();
         let room_id = format!("{:04x}-{:04x}", rng.random::<u16>(), rng.random::<u16>());
@@ -179,6 +195,7 @@ impl RoomActor {
             pending_host_nickname: Some(host_nickname),
             pending_calls: None,
             call_window_gen: 0,
+            seed_override,
         }
     }
 
@@ -385,9 +402,8 @@ impl RoomActor {
             });
         }
 
-        // 启动 GameState
-        let mut rng = rand::rng();
-        self.game_seed = rng.random();
+        // 启动 GameState. 测试可注入固定 seed 以保证决定性.
+        self.game_seed = self.seed_override.unwrap_or_else(|| rand::rng().random());
         self.round_index = 1;
         let mut g = GameState::new(self.config.clone());
         g.start_round(self.game_seed ^ self.round_index);
@@ -560,6 +576,9 @@ impl RoomActor {
                         return;
                     }
                     self.round_index += 1;
+                    // game.next_round 仅设 phase=Deal, 必须再 start_round 发新牌山
+                    let seed = self.game_seed ^ self.round_index;
+                    game.start_round(seed);
                 }
             }
         }
@@ -861,12 +880,15 @@ impl RoomActor {
     }
 
     fn finalize_game(&mut self) {
-        let Some(game) = self.game.as_ref() else {
+        let Some(game) = self.game.as_mut() else {
             return;
         };
+        game.phase = Phase::GameEnd;
         let rankings = final_ranking(&game.players, &game.config);
+        self.broadcast_state_view();
         self.broadcast_to_all(ServerMsg::GameEnd(GameOverView { rankings }));
         self.state = RoomLifecycle::GameEnd;
+        self.broadcast_room_update();
     }
 
     // ========================================================================

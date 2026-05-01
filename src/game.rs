@@ -18,7 +18,7 @@ use crate::wall::Wall;
 use crate::yaku::WinContext;
 
 /// 局内动作事件, 给 UI 渲染最近动作日志使用.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameEvent {
     Draw { who: Seat, tile: Tile },
     Discard { who: Seat, tile: Tile },
@@ -479,7 +479,10 @@ impl GameState {
             self.advance_kyoku();
         }
 
-        self.phase = Phase::Deal;
+        // advance_kyoku 触发整庄结束时, 不要覆盖 phase.
+        if self.phase != Phase::GameEnd {
+            self.phase = Phase::Deal;
+        }
     }
 
     fn advance_kyoku(&mut self) {
@@ -487,9 +490,15 @@ impl GameState {
         if self.dealer == Seat::East {
             // 一圈结束, 推场风.
             self.round_wind = match self.round_wind {
-                RoundWind::East => RoundWind::South,
+                RoundWind::East => {
+                    // 东风战: 东 4 完即结束; 半庄战: 东 4 完进南风.
+                    if matches!(self.config.length, crate::config::LengthRule::Tonpuusen) {
+                        self.phase = Phase::GameEnd;
+                        return;
+                    }
+                    RoundWind::South
+                }
                 RoundWind::South => {
-                    // 半庄结束.
                     self.phase = Phase::GameEnd;
                     return;
                 }
