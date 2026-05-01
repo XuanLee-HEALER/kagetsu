@@ -77,10 +77,16 @@ pub struct GameScreenState {
     pub modal_selected: usize,
     /// 进入 RoundEnd 的时刻, 用于流局后 N 秒自动推进.
     pub round_end_at: Option<Instant>,
+    /// 当前主题 (本地偏好, 不绑 GameConfig).
+    pub theme_kind: crate::ui::theme::ThemeKind,
 }
 
 impl GameScreenState {
-    pub fn new(config: GameConfig, game_seed: u64) -> Self {
+    pub fn new(
+        config: GameConfig,
+        game_seed: u64,
+        theme_kind: crate::ui::theme::ThemeKind,
+    ) -> Self {
         let mut g = GameState::new(config);
         g.start_round(game_seed ^ 1);
         Self {
@@ -98,6 +104,7 @@ impl GameScreenState {
             modal_open: false,
             modal_selected: 0,
             round_end_at: None,
+            theme_kind,
         }
     }
 
@@ -662,7 +669,7 @@ impl GameScreenState {
 
     /// 切换主题 (供全局 T 键调用).
     pub fn set_theme(&mut self, kind: crate::ui::theme::ThemeKind) {
-        self.game.config.theme = kind;
+        self.theme_kind = kind;
     }
 
     /// 剩余思考秒数(向上取整). None = 不限时或不在等候态.
@@ -874,7 +881,7 @@ impl GameScreenState {
     // ============== 渲染 (HiFi-05 设计稿坐标) ==============
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let theme = self.game.config.theme.theme();
+        let theme = self.theme_kind.theme();
         let buf = f.buffer_mut();
         // 整屏背景填充.
         paint_fill(
@@ -1726,7 +1733,7 @@ impl GameScreenState {
             &format!("[{}]", label),
             Style::default()
                 .fg(fg)
-                .bg(self.game.config.theme.theme().panel)
+                .bg(self.theme_kind.theme().panel)
                 .add_modifier(Modifier::BOLD),
         );
         // border_color 暂未使用 (简化 [X] 风格), 留参数以备后续装饰
@@ -2074,7 +2081,7 @@ pub const COMMAND_NAMES: &[&str] = &[
 ];
 
 /// 牌种说明符: 接受 "5p" / "p5" / "五筒" / "東" 等.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TileSpec {
     pub kind: TileIndex,
 }
@@ -2238,7 +2245,11 @@ mod tests {
 
     #[test]
     fn app_can_complete_a_round_without_panic() {
-        let mut app = GameScreenState::new(GameConfig::default(), 0xC0FFEE);
+        let mut app = GameScreenState::new(
+            GameConfig::default(),
+            0xC0FFEE,
+            crate::ui::theme::ThemeKind::Dark,
+        );
         let backend = TestBackend::new(144, 40);
         let mut term = Terminal::new(backend).unwrap();
 
@@ -2266,7 +2277,11 @@ mod tests {
 
     #[test]
     fn app_can_advance_through_multiple_rounds() {
-        let mut app = GameScreenState::new(GameConfig::default(), 0xC0FFEE);
+        let mut app = GameScreenState::new(
+            GameConfig::default(),
+            0xC0FFEE,
+            crate::ui::theme::ThemeKind::Dark,
+        );
         let backend = TestBackend::new(144, 40);
         let mut term = Terminal::new(backend).unwrap();
 
@@ -2368,7 +2383,11 @@ mod tests {
 
     #[test]
     fn modal_actions_in_await_discard() {
-        let mut app = GameScreenState::new(GameConfig::default(), 0xC0FFEE);
+        let mut app = GameScreenState::new(
+            GameConfig::default(),
+            0xC0FFEE,
+            crate::ui::theme::ThemeKind::Dark,
+        );
         // 模拟玩家摸牌阶段
         let _ = app.advance(); // Deal -> Draw
         let _ = app.advance(); // Draw 自家

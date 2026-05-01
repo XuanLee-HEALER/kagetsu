@@ -321,15 +321,7 @@ const ROWS: &[Row] = &[
             s.config.uma = UMA_PRESETS[cycle_idx(cur, UMA_PRESETS.len(), d)];
         },
     },
-    // 21 (新增)
-    Row {
-        label: "主题",
-        format: |s| s.config.theme.label().to_string(),
-        adjust: |s, _| {
-            s.config.theme = s.config.theme.next();
-        },
-    },
-    // 22
+    // 21 (主题不再绑房间, 改为本地偏好, 用全局 T 键切换. 此行保留索引但显示提示文字.)
     Row {
         label: "思考时长",
         format: |s| match s.config.thinking_time_secs {

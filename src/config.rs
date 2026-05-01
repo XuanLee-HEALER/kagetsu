@@ -1,11 +1,16 @@
 //! 游戏规则配置.
 //!
+//! [`GameConfig`] 是规则相关 (绑房间, 多人模式下房主控). [`LocalPrefs`] 是
+//! client 本地偏好 (主题等), 不绑房间, 每人独立.
+//!
 //! 默认采用 WRC 2022 主基, 古役默认关闭(用户可开启).
 //! 详见 docs/spec/README.md
 
+use serde::{Deserialize, Serialize};
+
 use crate::ui::theme::ThemeKind;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MultiRonRule {
     /// 头跳: 仅最近一家可和.
     Atamahane,
@@ -15,7 +20,7 @@ pub enum MultiRonRule {
     TripleRon,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LengthRule {
     /// 半庄(东+南).
     Hanchan,
@@ -23,7 +28,8 @@ pub enum LengthRule {
     Tonpuusen,
 }
 
-#[derive(Debug, Clone)]
+/// 房间共享的规则配置 (多人模式下房主控制, 单机时玩家自己改).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameConfig {
     /// 食断(鸣牌后断幺九成立).
     pub kuitan: bool,
@@ -63,8 +69,6 @@ pub struct GameConfig {
     pub uma: [i32; 4],
     /// 玩家单步思考时长(秒). None = 不限时.
     pub thinking_time_secs: Option<u32>,
-    /// UI 主题.
-    pub theme: ThemeKind,
 }
 
 impl Default for GameConfig {
@@ -92,7 +96,12 @@ impl Default for GameConfig {
             target_score: 30_000,
             uma: [15, 5, -5, -15],
             thinking_time_secs: Some(30),
-            theme: ThemeKind::Dark,
         }
     }
+}
+
+/// 本地 UI 偏好 (不绑房间, 每 client 独立).
+#[derive(Debug, Clone, Default)]
+pub struct LocalPrefs {
+    pub theme: ThemeKind,
 }

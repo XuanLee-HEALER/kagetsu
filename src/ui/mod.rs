@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::time::{Duration, Instant};
 
-use crate::config::GameConfig;
+use crate::config::{GameConfig, LocalPrefs};
 use crate::score::Ranking;
 
 pub use screens::config::{ConfigState, SeedChoice};
@@ -51,6 +51,8 @@ pub struct App {
     pub running: bool,
     pub last_config: GameConfig,
     pub last_seed_choice: SeedChoice,
+    /// 本地 UI 偏好 (主题等), 不绑房间.
+    pub local_prefs: LocalPrefs,
 }
 
 impl App {
@@ -60,6 +62,7 @@ impl App {
             running: true,
             last_config: GameConfig::default(),
             last_seed_choice: SeedChoice::Random,
+            local_prefs: LocalPrefs::default(),
         }
     }
 
@@ -152,13 +155,11 @@ impl App {
     }
 
     fn cycle_theme(&mut self) {
-        let next = self.last_config.theme.next();
-        self.last_config.theme = next;
-        // 同步到当前屏幕.
-        match &mut self.screen {
-            Screen::Config(c) => c.config.theme = next,
-            Screen::InGame(s) => s.set_theme(next),
-            _ => {}
+        let next = self.local_prefs.theme.next();
+        self.local_prefs.theme = next;
+        // 同步到当前屏幕 (InGame 缓存了 theme_kind).
+        if let Screen::InGame(s) = &mut self.screen {
+            s.set_theme(next);
         }
     }
 
@@ -183,6 +184,7 @@ impl App {
                 self.screen = Screen::InGame(Box::new(GameScreenState::new(
                     self.last_config.clone(),
                     seed,
+                    self.local_prefs.theme,
                 )));
             }
             Transition::EnterGameOver { rankings } => {
@@ -208,7 +210,7 @@ impl App {
     }
 
     fn render_size_warning(&self, f: &mut ratatui::Frame, area: Rect, min_w: u16, min_h: u16) {
-        let theme = self.last_config.theme.theme();
+        let theme = self.local_prefs.theme.theme();
         // 整屏背景色.
         let buf = f.buffer_mut();
         for y in area.y..(area.y + area.height) {

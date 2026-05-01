@@ -20,6 +20,7 @@ pub mod decompose;
 pub mod game;
 pub mod hand;
 pub mod meld;
+pub mod net;
 pub mod player;
 pub mod score;
 pub mod tile;

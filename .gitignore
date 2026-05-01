@@ -1,2 +1,4 @@
 /target
 /.design-package
+/.claude/settings.local.json
+/docs/scratch.md

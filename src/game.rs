@@ -6,6 +6,8 @@
 
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::GameConfig;
 use crate::decompose::decompose;
 use crate::hand::Hand;
@@ -16,7 +18,7 @@ use crate::wall::Wall;
 use crate::yaku::WinContext;
 
 /// 局内动作事件, 给 UI 渲染最近动作日志使用.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GameEvent {
     Draw { who: Seat, tile: Tile },
     Discard { who: Seat, tile: Tile },
@@ -32,7 +34,7 @@ pub enum GameEvent {
 
 const MAX_EVENTS: usize = 32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
     /// 配牌中.
     Deal,
@@ -48,7 +50,7 @@ pub enum Phase {
     GameEnd,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RoundWind {
     East,
     South,

@@ -1,8 +1,10 @@
 //! 副露(鸣牌)与座位.
 
+use serde::{Deserialize, Serialize};
+
 use crate::tile::Tile;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Seat {
     East,
     South,
@@ -32,7 +34,7 @@ impl Seat {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MeldKind {
     /// 吃: 必为下家弃牌.
     Chi { tiles: [Tile; 3] },
@@ -46,7 +48,7 @@ pub enum MeldKind {
     Ankan { tiles: [Tile; 4] },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meld {
     pub kind: MeldKind,
     /// 牌取自哪家(暗杠为 None).

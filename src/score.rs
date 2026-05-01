@@ -311,7 +311,7 @@ pub fn distribute(
 }
 
 /// 终局后某家的最终成绩(返点 + uma + oka, 单位 K = 千点).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Ranking {
     pub seat: Seat,
     /// 1..=4

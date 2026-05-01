@@ -8,8 +8,10 @@
 //!
 //! 用 `TileIndex` 表示"种类"(0..34), 用 `Tile` 表示具体某一张(带 id, 用于区分赤五和重复种).
 
+use serde::{Deserialize, Serialize};
+
 /// 花色.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Suit {
     Man,    // 万
     Pin,    // 筒
@@ -27,11 +29,11 @@ pub enum Suit {
 /// |18..27 | 1s..9s      |
 /// |27..31 | 东 南 西 北 |
 /// |31..34 | 白 發 中    |
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TileIndex(pub u8);
 
 /// 一张具体的牌.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Tile {
     pub kind: TileIndex,
     pub red: bool,
