@@ -323,7 +323,7 @@ impl App {
     fn create_online_room(&mut self, nickname: String) {
         use crate::net::discovery::DiscoveryAd;
         use crate::net::room::spawn_room;
-        use crate::net::server::spawn_ws_server;
+        use crate::net::server::{LAN_BIND, spawn_ws_server};
         use crate::net::session::spawn_local_session;
 
         // spawn_room 内部用 tokio::spawn, 必须在 runtime context 中调用.
@@ -331,7 +331,7 @@ impl App {
         // 包在一次 block_on 内确保都在 runtime 内.
         let setup_result = self.runtime.block_on(async {
             let handle = spawn_room(nickname.clone(), self.last_config.clone());
-            let port_addr = spawn_ws_server(handle.clone(), 0)
+            let port_addr = spawn_ws_server(handle.clone(), LAN_BIND, 0)
                 .await
                 .map_err(|e| format!("ws server 启动失败: {e}"))?;
             let session = spawn_local_session(handle.clone(), nickname.clone())

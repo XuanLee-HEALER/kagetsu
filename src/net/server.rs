@@ -54,13 +54,18 @@ pub enum RemoteJoinError {
 
 /// Spawn 一个 axum WS server, 返回真实绑定地址 (port=0 时让 OS 选).
 ///
-/// `handle` 会被 clone 给每个 ws 连接 task. 如果 RoomActor drop, 各连接
-/// task 自然会读到 channel close → 退出.
-pub async fn spawn_ws_server(handle: RoomHandle, port: u16) -> Result<SocketAddr, ServerError> {
+/// `bind` 是绑定地址: 生产 LAN 模式用 `"0.0.0.0"` (任意网卡), 测试用 `"127.0.0.1"`
+/// (loopback, 不触发 Windows 防火墙弹窗). `handle` 会被 clone 给每个 ws 连接 task.
+/// 如果 RoomActor drop, 各连接 task 自然会读到 channel close → 退出.
+pub async fn spawn_ws_server(
+    handle: RoomHandle,
+    bind: &str,
+    port: u16,
+) -> Result<SocketAddr, ServerError> {
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .with_state(Arc::new(handle));
-    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+    let listener = TcpListener::bind((bind, port)).await?;
     let addr = listener.local_addr()?;
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -69,6 +74,12 @@ pub async fn spawn_ws_server(handle: RoomHandle, port: u16) -> Result<SocketAddr
     });
     Ok(addr)
 }
+
+/// LAN 模式绑定地址 — 任意网卡可达.
+pub const LAN_BIND: &str = "0.0.0.0";
+
+/// 测试 / loopback 模式绑定地址 — 不触发 Windows 防火墙.
+pub const LOOPBACK_BIND: &str = "127.0.0.1";
 
 async fn ws_handler(ws: WebSocketUpgrade, State(handle): State<Arc<RoomHandle>>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, handle))
@@ -322,8 +333,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn end_to_end_two_clients_join_via_ws() {
         let handle = spawn_room("Host".into(), GameConfig::default());
-        let addr = spawn_ws_server(handle.clone(), 0).await.expect("bind");
-        // 0.0.0.0 在 Windows 上不是合法目标, 用 127.0.0.1 + 同一 port
+        let addr = spawn_ws_server(handle.clone(), LOOPBACK_BIND, 0)
+            .await
+            .expect("bind");
         let connect_addr = format!("127.0.0.1:{}", addr.port());
 
         // 两个加入者
