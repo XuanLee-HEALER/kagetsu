@@ -76,6 +76,8 @@ pub struct App {
     pub runtime: tokio::runtime::Handle,
     /// 房主 mode: 当前活跃 ws server 的端口 (用于显示给加入者).
     pub host_port: Option<u16>,
+    /// 房主 mode: mDNS 广告. 房间结束 / 退出 lobby 时 drop.
+    pub discovery_ad: Option<crate::net::discovery::DiscoveryAd>,
 }
 
 impl App {
@@ -88,6 +90,7 @@ impl App {
             local_prefs: LocalPrefs::default(),
             runtime,
             host_port: None,
+            discovery_ad: None,
         }
     }
 
@@ -117,6 +120,7 @@ impl App {
         // 推进各屏的 advance (InGame 主推, Online 屏轮询 transport)
         let transition = match &mut self.screen {
             Screen::InGame(s) => s.advance(),
+            Screen::OnlineLobby(s) => s.advance(),
             Screen::OnlineRoom(s) => s.advance(),
             Screen::OnlineGame(s) => s.advance(),
             _ => None,
@@ -202,6 +206,9 @@ impl App {
                 self.running = false;
             }
             Transition::EnterMainMenu => {
+                // 房主退出 → 关 mDNS 广告 + 房间 (RoomHandle 会随 OnlineRoomState drop).
+                self.discovery_ad.take();
+                self.host_port = None;
                 self.screen = Screen::MainMenu(MainMenuState::new());
             }
             Transition::EnterConfig => {
@@ -239,8 +246,9 @@ impl App {
     }
 
     /// 创建本地 RoomActor (房主), 同时启动 ws server 让远程玩家可加入,
-    /// 自己用 LocalSession 直连 RoomActor.
+    /// 自己用 LocalSession 直连 RoomActor. 同时 mDNS 广告该房间.
     fn create_online_room(&mut self, nickname: String) {
+        use crate::net::discovery::DiscoveryAd;
         use crate::net::room::spawn_room;
         use crate::net::server::spawn_ws_server;
         use crate::net::session::spawn_local_session;
@@ -273,6 +281,15 @@ impl App {
                 return;
             }
         };
+
+        // 启动 mDNS 广告 (port 必须存在才有意义).
+        let room_id = format!("{}", uuid::Uuid::new_v4());
+        if let Some(p) = port {
+            match DiscoveryAd::advertise(&nickname, p, &room_id, 1, "lobby") {
+                Ok(ad) => self.discovery_ad = Some(ad),
+                Err(e) => tracing::warn!("mDNS 广告失败: {e}"),
+            }
+        }
 
         let placeholder_view = crate::net::protocol::RoomView {
             room_id: match port {

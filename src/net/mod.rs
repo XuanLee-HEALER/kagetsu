@@ -5,6 +5,7 @@
 //! - 后续 phase 加: server, room, discovery, ai_seat
 
 pub mod client;
+pub mod discovery;
 pub mod protocol;
 pub mod room;
 pub mod server;
