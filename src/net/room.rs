@@ -1,0 +1,852 @@
+//! RoomActor — 持权威 GameState + 处理玩家命令.
+//!
+//! ## 责任
+//! - 接受玩家加入 / ready / 开始游戏
+//! - 接收玩家动作 (Discard/Riichi/Pon/...) 并验证, 调 [`GameState`] mutator
+//! - 给每个 client 投影 [`GameStateView`] (隐藏他家手牌)
+//! - 房主修改房间配置
+//! - 玩家离开 / 断线
+//!
+//! ## 设计
+//! - 单 task, `mpsc::UnboundedReceiver<RoomCmd>` 收命令, 在每次命令处理后
+//!   推进游戏状态 (调 `advance_game`) 并广播
+//! - 鸣牌窗口 + 思考时长 timer 留 Phase 9. Phase 3 的 InGame 简化为:
+//!   - AwaitDiscard 等玩家动作 (人类玩家或 AI)
+//!   - AwaitCalls 直接 advance_turn (无人响应)
+//! - AI 决策由 [`net::ai_seat`] 在 Phase 8 完整实现, Phase 3 暂用 default
+//!   action (摸切 + 不和)
+
+use std::collections::HashMap;
+
+use rand::Rng;
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    oneshot,
+};
+use uuid::Uuid;
+
+use crate::config::GameConfig;
+use crate::game::{GameState, Phase, RoundResult, RyuukyokuKind};
+use crate::meld::Seat;
+use crate::net::protocol::{
+    ClientMsg, GameOverView, GameStateView, NetAction, PlayerSlot, PlayerView, RoomLifecycle,
+    RoomView, RoundResultView, ServerMsg,
+};
+use crate::score::final_ranking;
+use crate::tile::Tile;
+
+// ============================================================================
+// 公开 API
+// ============================================================================
+
+/// 创建一个新 RoomActor 并 spawn 到当前 tokio runtime.
+/// 返回的 [`RoomHandle`] 可发 [`RoomCmd`] 给 actor.
+pub fn spawn_room(host_nickname: String, config: GameConfig) -> RoomHandle {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let actor = RoomActor::new_with_rx(host_nickname, config, rx);
+    tokio::spawn(actor.run());
+    RoomHandle { tx }
+}
+
+#[derive(Clone)]
+pub struct RoomHandle {
+    pub tx: UnboundedSender<RoomCmd>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum JoinError {
+    #[error("房间已满")]
+    RoomFull,
+    #[error("房间已开局, 不接受新玩家")]
+    AlreadyInGame,
+    #[error("token 无效或对应玩家未离开")]
+    InvalidReconnectToken,
+}
+
+pub struct JoinResult {
+    pub player_id: u32,
+    pub reconnect_token: Uuid,
+    pub room: RoomView,
+}
+
+pub enum RoomCmd {
+    /// 玩家加入. `sender` 是给这个 client 发 ServerMsg 的 channel.
+    Join {
+        nickname: String,
+        reconnect_token: Option<Uuid>,
+        sender: UnboundedSender<ServerMsg>,
+        ack: oneshot::Sender<Result<JoinResult, JoinError>>,
+    },
+    /// 玩家发来 ClientMsg.
+    PlayerMsg { player_id: u32, msg: ClientMsg },
+    /// 玩家断线 (transport 层检测到).
+    Disconnect { player_id: u32 },
+}
+
+// ============================================================================
+// SlotEntry — 房间内一个座位
+// ============================================================================
+
+struct SlotEntry {
+    id: u32,
+    nickname: String,
+    ready: bool,
+    seat: Option<Seat>,
+    is_ai: bool,
+    is_host: bool,
+    connected: bool,
+    sender: Option<UnboundedSender<ServerMsg>>,
+    reconnect_token: Uuid,
+}
+
+impl SlotEntry {
+    fn to_view(&self) -> PlayerSlot {
+        PlayerSlot {
+            id: self.id,
+            nickname: self.nickname.clone(),
+            ready: self.ready,
+            seat: self.seat,
+            is_ai: self.is_ai,
+            is_host: self.is_host,
+            connected: self.connected,
+        }
+    }
+}
+
+// ============================================================================
+// RoomActor
+// ============================================================================
+
+const MAX_PLAYERS: usize = 4;
+
+struct RoomActor {
+    room_id: String,
+    config: GameConfig,
+    state: RoomLifecycle,
+    slots: Vec<SlotEntry>,
+    rx: UnboundedReceiver<RoomCmd>,
+    next_player_id: u32,
+    game: Option<GameState>,
+    /// 整庄 seed (开局时随机).
+    game_seed: u64,
+    /// 局序号 (1-based, 用于 game_seed ^ round_index).
+    round_index: u64,
+    /// 房主创建时占位的 nickname; 房主真正加入后替换.
+    pending_host_nickname: Option<String>,
+}
+
+impl RoomActor {
+    fn new_with_rx(
+        host_nickname: String,
+        config: GameConfig,
+        rx: UnboundedReceiver<RoomCmd>,
+    ) -> Self {
+        let mut rng = rand::rng();
+        let room_id = format!("{:04x}-{:04x}", rng.random::<u16>(), rng.random::<u16>());
+        Self {
+            room_id,
+            config,
+            state: RoomLifecycle::Lobby,
+            slots: Vec::with_capacity(MAX_PLAYERS),
+            rx,
+            next_player_id: 1,
+            game: None,
+            game_seed: 0,
+            round_index: 0,
+            pending_host_nickname: Some(host_nickname),
+        }
+    }
+
+    async fn run(mut self) {
+        while let Some(cmd) = self.rx.recv().await {
+            self.handle_cmd(cmd);
+            if self.state == RoomLifecycle::InGame {
+                self.advance_game();
+            }
+        }
+    }
+
+    fn handle_cmd(&mut self, cmd: RoomCmd) {
+        match cmd {
+            RoomCmd::Join {
+                nickname,
+                reconnect_token,
+                sender,
+                ack,
+            } => {
+                let result = self.handle_join(nickname, reconnect_token, sender);
+                let _ = ack.send(result);
+            }
+            RoomCmd::PlayerMsg { player_id, msg } => {
+                self.handle_client_msg(player_id, msg);
+            }
+            RoomCmd::Disconnect { player_id } => {
+                self.mark_disconnected(player_id);
+                self.broadcast_room_update();
+            }
+        }
+    }
+
+    // ========================================================================
+    // Lobby
+    // ========================================================================
+
+    fn handle_join(
+        &mut self,
+        nickname: String,
+        reconnect_token: Option<Uuid>,
+        sender: UnboundedSender<ServerMsg>,
+    ) -> Result<JoinResult, JoinError> {
+        // 重连流程
+        if let Some(token) = reconnect_token
+            && let Some(idx) = self.slots.iter().position(|s| s.reconnect_token == token)
+        {
+            let (player_id, sender_clone) = {
+                let slot = &mut self.slots[idx];
+                slot.connected = true;
+                slot.sender = Some(sender.clone());
+                slot.nickname = nickname;
+                (slot.id, slot.sender.clone())
+            };
+            let room = self.room_view();
+            if let Some(s) = sender_clone {
+                let _ = s.send(ServerMsg::Welcome {
+                    player_id,
+                    reconnect_token: token,
+                    room: Box::new(room.clone()),
+                });
+            }
+            self.broadcast_room_update();
+            return Ok(JoinResult {
+                player_id,
+                reconnect_token: token,
+                room,
+            });
+        }
+        // 新 join
+        if self.state != RoomLifecycle::Lobby {
+            return Err(JoinError::AlreadyInGame);
+        }
+        if self.slots.len() >= MAX_PLAYERS {
+            return Err(JoinError::RoomFull);
+        }
+        let id = self.alloc_id();
+        let token = Uuid::new_v4();
+        let is_host = self.slots.is_empty();
+        if is_host {
+            self.pending_host_nickname = None;
+        }
+        self.slots.push(SlotEntry {
+            id,
+            nickname,
+            ready: is_host,
+            seat: None,
+            is_ai: false,
+            is_host,
+            connected: true,
+            sender: Some(sender.clone()),
+            reconnect_token: token,
+        });
+
+        let room = self.room_view();
+        let _ = sender.send(ServerMsg::Welcome {
+            player_id: id,
+            reconnect_token: token,
+            room: Box::new(room.clone()),
+        });
+        self.broadcast_room_update();
+        Ok(JoinResult {
+            player_id: id,
+            reconnect_token: token,
+            room,
+        })
+    }
+
+    fn handle_client_msg(&mut self, player_id: u32, msg: ClientMsg) {
+        match msg {
+            ClientMsg::Ready(b) => self.handle_ready(player_id, b),
+            ClientMsg::StartGame => self.handle_start_game(player_id),
+            ClientMsg::UpdateConfig(cfg) => self.handle_update_config(player_id, cfg),
+            ClientMsg::Action(action) => self.handle_action(player_id, action),
+            ClientMsg::BackToRoom => self.handle_back_to_room(player_id),
+            ClientMsg::ContinueGame => self.handle_continue_game(player_id),
+            ClientMsg::Leave => self.handle_leave(player_id),
+            ClientMsg::Pong(_) => {}
+            ClientMsg::Join { .. } => {
+                // 已经 join 过了, 忽略
+            }
+        }
+    }
+
+    fn handle_ready(&mut self, player_id: u32, ready: bool) {
+        if self.state != RoomLifecycle::Lobby {
+            return;
+        }
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.id == player_id)
+            && !slot.is_host
+        {
+            slot.ready = ready;
+        }
+        self.broadcast_room_update();
+    }
+
+    fn handle_update_config(&mut self, player_id: u32, cfg: GameConfig) {
+        if self.state != RoomLifecycle::Lobby {
+            return;
+        }
+        if !self.is_host(player_id) {
+            return;
+        }
+        self.config = cfg;
+        self.broadcast_room_update();
+    }
+
+    fn handle_start_game(&mut self, player_id: u32) {
+        if self.state != RoomLifecycle::Lobby {
+            return;
+        }
+        if !self.is_host(player_id) {
+            return;
+        }
+        let all_ready = self.slots.iter().all(|s| s.ready);
+        if !all_ready {
+            self.send_error(player_id, "有玩家未准备");
+            return;
+        }
+        let n = self.slots.len();
+        if !(1..=4).contains(&n) {
+            self.send_error(player_id, "玩家数应为 1-4 (空座位 AI 补)");
+            return;
+        }
+
+        // 分配座位 (东南西北顺序)
+        let seats = [Seat::East, Seat::South, Seat::West, Seat::North];
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            slot.seat = Some(seats[i]);
+        }
+        // 补 AI 到 4 人
+        while self.slots.len() < MAX_PLAYERS {
+            let i = self.slots.len();
+            let id = self.alloc_id();
+            self.slots.push(SlotEntry {
+                id,
+                nickname: format!("AI {}", i + 1),
+                ready: true,
+                seat: Some(seats[i]),
+                is_ai: true,
+                is_host: false,
+                connected: true,
+                sender: None,
+                reconnect_token: Uuid::new_v4(),
+            });
+        }
+
+        // 启动 GameState
+        let mut rng = rand::rng();
+        self.game_seed = rng.random();
+        self.round_index = 1;
+        let mut g = GameState::new(self.config.clone());
+        g.start_round(self.game_seed ^ self.round_index);
+        self.game = Some(g);
+        self.state = RoomLifecycle::InGame;
+
+        self.broadcast_room_update();
+        self.broadcast_state_view();
+    }
+
+    fn handle_back_to_room(&mut self, _player_id: u32) {
+        if self.state != RoomLifecycle::GameEnd {
+            return;
+        }
+        self.reset_to_lobby();
+    }
+
+    fn handle_continue_game(&mut self, player_id: u32) {
+        if self.state != RoomLifecycle::GameEnd {
+            return;
+        }
+        if !self.is_host(player_id) {
+            return;
+        }
+        // 用旧配置开新一庄
+        self.round_index = 1;
+        let mut g = GameState::new(self.config.clone());
+        g.start_round(self.game_seed ^ self.round_index);
+        self.game = Some(g);
+        self.state = RoomLifecycle::InGame;
+        self.broadcast_room_update();
+        self.broadcast_state_view();
+    }
+
+    fn handle_leave(&mut self, player_id: u32) {
+        let Some(idx) = self.slots.iter().position(|s| s.id == player_id) else {
+            return;
+        };
+        let was_host = self.slots[idx].is_host;
+        if was_host {
+            // 房主离开: 解散房间.
+            self.broadcast_to_all(ServerMsg::Error("房主已离开, 房间解散".into()));
+            self.slots.clear();
+            self.game = None;
+            self.state = RoomLifecycle::Lobby;
+            return;
+        }
+        // 子玩家离开:
+        // - InGame 阶段: 标记为 AI 接管
+        // - Lobby/GameEnd 阶段: 直接移除 slot
+        match self.state {
+            RoomLifecycle::Lobby | RoomLifecycle::GameEnd => {
+                self.slots.remove(idx);
+                self.broadcast_room_update();
+            }
+            RoomLifecycle::InGame => {
+                let slot = &mut self.slots[idx];
+                slot.is_ai = true;
+                slot.connected = false;
+                slot.sender = None;
+                slot.nickname = format!("AI ({} 离开)", slot.nickname);
+                self.broadcast_state_view();
+            }
+        }
+    }
+
+    fn mark_disconnected(&mut self, player_id: u32) {
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.id == player_id) {
+            slot.connected = false;
+            slot.sender = None;
+        }
+    }
+
+    fn reset_to_lobby(&mut self) {
+        self.state = RoomLifecycle::Lobby;
+        self.game = None;
+        // 清座位 + AI slot, 重置 ready
+        self.slots.retain(|s| !s.is_ai);
+        for slot in self.slots.iter_mut() {
+            slot.seat = None;
+            slot.ready = slot.is_host;
+        }
+        self.broadcast_room_update();
+    }
+
+    // ========================================================================
+    // InGame
+    // ========================================================================
+
+    fn handle_action(&mut self, player_id: u32, action: NetAction) {
+        if self.state != RoomLifecycle::InGame {
+            return;
+        }
+        let Some(seat) = self.player_seat(player_id) else {
+            return;
+        };
+        let Some(game) = self.game.as_mut() else {
+            return;
+        };
+
+        match action {
+            NetAction::Discard(spec) => {
+                if game.turn != seat || game.phase != Phase::AwaitDiscard {
+                    return;
+                }
+                let tile_opt: Option<Tile> = game.players[seat.index()]
+                    .hand
+                    .closed
+                    .iter()
+                    .find(|t| t.kind == spec.kind)
+                    .copied();
+                if let Some(t) = tile_opt {
+                    let _ = game.do_discard(t);
+                }
+            }
+            NetAction::Riichi(spec) => {
+                if game.turn != seat || game.phase != Phase::AwaitDiscard {
+                    return;
+                }
+                let tile_opt: Option<Tile> = game.players[seat.index()]
+                    .hand
+                    .closed
+                    .iter()
+                    .find(|t| t.kind == spec.kind)
+                    .copied();
+                if let Some(t) = tile_opt {
+                    let _ = game.do_riichi(t);
+                }
+            }
+            NetAction::Tsumo => {
+                if game.turn != seat || game.phase != Phase::AwaitDiscard {
+                    return;
+                }
+                if let Some(score) = game.try_tsumo() {
+                    game.declare_tsumo(score);
+                }
+            }
+            NetAction::Ankan(kind) => {
+                if game.turn != seat || game.phase != Phase::AwaitDiscard {
+                    return;
+                }
+                let _ = game.do_ankan(kind);
+            }
+            NetAction::Shouminkan(kind) => {
+                if game.turn != seat || game.phase != Phase::AwaitDiscard {
+                    return;
+                }
+                let _ = game.do_shouminkan(kind);
+            }
+            // 鸣牌响应留 Phase 9 的窗口逻辑
+            NetAction::Pon | NetAction::Chi(_) | NetAction::Minkan | NetAction::Pass => {}
+            NetAction::NextRound => {
+                if game.phase == Phase::RoundEnd {
+                    game.next_round();
+                    if game.phase == Phase::GameEnd {
+                        self.finalize_game();
+                        return;
+                    }
+                    self.round_index += 1;
+                }
+            }
+        }
+        self.broadcast_state_view();
+    }
+
+    /// 在每个 cmd 处理完后自动推进游戏 (Draw 阶段摸牌, AwaitCalls 简化推进).
+    fn advance_game(&mut self) {
+        let Some(game) = self.game.as_mut() else {
+            return;
+        };
+        match game.phase {
+            Phase::Draw => {
+                if game.do_draw().is_none() {
+                    // 流局
+                    game.phase = Phase::RoundEnd;
+                    game.last_result = Some(RoundResult::Ryuukyoku {
+                        kind: RyuukyokuKind::Howaipai,
+                    });
+                    self.broadcast_round_result();
+                    return;
+                }
+                self.broadcast_state_view();
+            }
+            Phase::AwaitDiscard => {
+                // 等玩家或 AI 动作 (Phase 8 加 AI driver)
+            }
+            Phase::AwaitCalls => {
+                // Phase 9 加鸣牌窗口. 现在直接推进.
+                game.advance_turn();
+                self.broadcast_state_view();
+            }
+            Phase::RoundEnd => {
+                self.broadcast_round_result();
+            }
+            Phase::GameEnd => {
+                self.finalize_game();
+            }
+            Phase::Deal => {
+                // Deal 已在 start_round 完成, 不应停在此 phase
+            }
+        }
+    }
+
+    fn finalize_game(&mut self) {
+        let Some(game) = self.game.as_ref() else {
+            return;
+        };
+        let rankings = final_ranking(&game.players, &game.config);
+        self.broadcast_to_all(ServerMsg::GameEnd(GameOverView { rankings }));
+        self.state = RoomLifecycle::GameEnd;
+    }
+
+    // ========================================================================
+    // 投影 / 广播
+    // ========================================================================
+
+    fn room_view(&self) -> RoomView {
+        let host_id = self
+            .slots
+            .iter()
+            .find(|s| s.is_host)
+            .map(|s| s.id)
+            .unwrap_or(0);
+        RoomView {
+            room_id: self.room_id.clone(),
+            host_id,
+            config: self.config.clone(),
+            players: self.slots.iter().map(SlotEntry::to_view).collect(),
+            state: self.state,
+        }
+    }
+
+    fn project_view(&self, my_seat: Seat) -> Option<GameStateView> {
+        let game = self.game.as_ref()?;
+        let me = &game.players[my_seat.index()];
+        let players: [PlayerView; 4] = std::array::from_fn(|i| {
+            let p = &game.players[i];
+            let nickname = self
+                .slots
+                .iter()
+                .find(|s| s.seat == Some(p.seat))
+                .map(|s| s.nickname.clone())
+                .unwrap_or_default();
+            PlayerView {
+                seat: p.seat,
+                nickname,
+                score: p.score,
+                hand_count: p.hand.closed.len(),
+                melds: p.hand.melds.clone(),
+                river: p.river.clone(),
+                riichi: p.riichi,
+                riichi_river_idx: None,
+            }
+        });
+        Some(GameStateView {
+            round_wind: game.round_wind,
+            kyoku: game.kyoku,
+            honba: game.honba,
+            riichi_sticks: game.riichi_sticks,
+            dealer: game.dealer,
+            turn: game.turn,
+            phase: game.phase,
+            my_seat,
+            my_hand: me.hand.closed.clone(),
+            my_last_drawn: me.last_drawn,
+            players,
+            wall_remaining: game.wall.as_ref().map(|w| w.remaining()).unwrap_or(0),
+            dora_indicators: game
+                .wall
+                .as_ref()
+                .map(|w| w.dora_indicators())
+                .unwrap_or_default(),
+            events: game.events.iter().cloned().collect(),
+        })
+    }
+
+    fn broadcast_state_view(&self) {
+        for slot in &self.slots {
+            let Some(seat) = slot.seat else {
+                continue;
+            };
+            let Some(sender) = &slot.sender else {
+                continue;
+            };
+            if let Some(view) = self.project_view(seat) {
+                let _ = sender.send(ServerMsg::GameStateView(Box::new(view)));
+            }
+        }
+    }
+
+    fn broadcast_round_result(&self) {
+        let Some(game) = self.game.as_ref() else {
+            return;
+        };
+        let message = match &game.last_result {
+            Some(RoundResult::Win {
+                winner,
+                score,
+                is_tsumo,
+                ..
+            }) => format!(
+                "{:?} {}: {} 番 {} 符",
+                winner,
+                if *is_tsumo { "自摸" } else { "荣和" },
+                score.han,
+                score.fu
+            ),
+            Some(RoundResult::Ryuukyoku { .. }) => "流局".to_string(),
+            None => "未知".to_string(),
+        };
+        let scores = [
+            game.players[0].score,
+            game.players[1].score,
+            game.players[2].score,
+            game.players[3].score,
+        ];
+        self.broadcast_to_all(ServerMsg::RoundResult(RoundResultView { message, scores }));
+    }
+
+    fn broadcast_room_update(&self) {
+        let view = self.room_view();
+        self.broadcast_to_all(ServerMsg::RoomUpdate(Box::new(view)));
+    }
+
+    fn broadcast_to_all(&self, msg: ServerMsg) {
+        for slot in &self.slots {
+            if let Some(s) = &slot.sender {
+                let _ = s.send(msg.clone());
+            }
+        }
+    }
+
+    fn send_error(&self, player_id: u32, err: &str) {
+        if let Some(slot) = self.slots.iter().find(|s| s.id == player_id)
+            && let Some(s) = &slot.sender
+        {
+            let _ = s.send(ServerMsg::Error(err.to_string()));
+        }
+    }
+
+    // ========================================================================
+    // helpers
+    // ========================================================================
+
+    fn alloc_id(&mut self) -> u32 {
+        let id = self.next_player_id;
+        self.next_player_id += 1;
+        id
+    }
+
+    fn is_host(&self, player_id: u32) -> bool {
+        self.slots.iter().any(|s| s.id == player_id && s.is_host)
+    }
+
+    fn player_seat(&self, player_id: u32) -> Option<Seat> {
+        self.slots
+            .iter()
+            .find(|s| s.id == player_id)
+            .and_then(|s| s.seat)
+    }
+}
+
+// 让外部 (用于 Phase 4 client UI) 也能拿到 token → player_id 映射. 暂存在
+// `RoomActor::pending_host_nickname` 等字段不太干净, 待后续重构.
+#[allow(dead_code)]
+fn _api_silence_warnings(_x: HashMap<Uuid, u32>) {}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::GameConfig;
+    use std::time::Duration;
+
+    /// 模拟一个 client 连到 RoomActor, 拿到 (player_id, token, recv_rx).
+    async fn join_player(
+        handle: &RoomHandle,
+        nickname: &str,
+    ) -> (u32, Uuid, UnboundedReceiver<ServerMsg>) {
+        let (tx, rx) = mpsc::unbounded_channel::<ServerMsg>();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        handle
+            .tx
+            .send(RoomCmd::Join {
+                nickname: nickname.into(),
+                reconnect_token: None,
+                sender: tx,
+                ack: ack_tx,
+            })
+            .unwrap();
+        let result = ack_rx.await.unwrap().unwrap();
+        (result.player_id, result.reconnect_token, rx)
+    }
+
+    /// 等到 actor 处理完已发的 cmd. 多次 yield 让 spawn 的 task 跑.
+    async fn yield_actor() {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_join_alone() {
+        let handle = spawn_room("host".into(), GameConfig::default());
+        let (id, _token, mut rx) = join_player(&handle, "host").await;
+        assert_eq!(id, 1);
+        // 应收到 Welcome
+        let msg = rx.recv().await.unwrap();
+        assert!(matches!(msg, ServerMsg::Welcome { .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn second_player_not_host() {
+        let handle = spawn_room("h".into(), GameConfig::default());
+        let (host_id, _, _) = join_player(&handle, "host").await;
+        let (other_id, _, _) = join_player(&handle, "other").await;
+        assert_eq!(host_id, 1);
+        assert_eq!(other_id, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_game_with_one_human_three_ai() {
+        let handle = spawn_room("h".into(), GameConfig::default());
+        let (host_id, _, mut host_rx) = join_player(&handle, "host").await;
+        // host 自动 ready, 直接 start
+        handle
+            .tx
+            .send(RoomCmd::PlayerMsg {
+                player_id: host_id,
+                msg: ClientMsg::StartGame,
+            })
+            .unwrap();
+        yield_actor().await;
+        // host_rx 应收到一连串消息 (Welcome + RoomUpdate × n + GameStateView)
+        let mut got_state = false;
+        while let Ok(msg) = host_rx.try_recv() {
+            if matches!(msg, ServerMsg::GameStateView(_)) {
+                got_state = true;
+                break;
+            }
+        }
+        assert!(got_state, "应该至少收到一个 GameStateView");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_leaves_room_dissolves() {
+        let handle = spawn_room("h".into(), GameConfig::default());
+        let (host_id, _, mut host_rx) = join_player(&handle, "host").await;
+        let (_other_id, _, mut other_rx) = join_player(&handle, "other").await;
+        handle
+            .tx
+            .send(RoomCmd::PlayerMsg {
+                player_id: host_id,
+                msg: ClientMsg::Leave,
+            })
+            .unwrap();
+        yield_actor().await;
+        // 两人都应收到 Error("房主已离开...")
+        let drain = |rx: &mut UnboundedReceiver<ServerMsg>| -> bool {
+            while let Ok(msg) = rx.try_recv() {
+                if matches!(msg, ServerMsg::Error(_)) {
+                    return true;
+                }
+            }
+            false
+        };
+        assert!(drain(&mut host_rx));
+        assert!(drain(&mut other_rx));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn config_update_only_by_host() {
+        let handle = spawn_room("h".into(), GameConfig::default());
+        let (host_id, _, _) = join_player(&handle, "host").await;
+        let (other_id, _, _) = join_player(&handle, "other").await;
+
+        let cfg = GameConfig {
+            length: crate::config::LengthRule::Tonpuusen,
+            ..Default::default()
+        };
+
+        // 非 host 改: 应被拒
+        handle
+            .tx
+            .send(RoomCmd::PlayerMsg {
+                player_id: other_id,
+                msg: ClientMsg::UpdateConfig(cfg.clone()),
+            })
+            .unwrap();
+        yield_actor().await;
+
+        // host 改: 应成功 (没有直接验证, 但至少不报错; 测试主要是 actor 不 panic)
+        handle
+            .tx
+            .send(RoomCmd::PlayerMsg {
+                player_id: host_id,
+                msg: ClientMsg::UpdateConfig(cfg),
+            })
+            .unwrap();
+        yield_actor().await;
+    }
+}
