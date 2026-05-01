@@ -43,7 +43,7 @@ use crate::tile::Tile;
 /// 返回的 [`RoomHandle`] 可发 [`RoomCmd`] 给 actor.
 pub fn spawn_room(host_nickname: String, config: GameConfig) -> RoomHandle {
     let (tx, rx) = mpsc::unbounded_channel();
-    let actor = RoomActor::new_with_rx(host_nickname, config, rx);
+    let actor = RoomActor::new_with_rx(host_nickname, config, rx, tx.clone());
     tokio::spawn(actor.run());
     RoomHandle { tx }
 }
@@ -81,6 +81,9 @@ pub enum RoomCmd {
     PlayerMsg { player_id: u32, msg: ClientMsg },
     /// 玩家断线 (transport 层检测到).
     Disconnect { player_id: u32 },
+    /// 鸣牌窗口超时 (内部 timer 触发).
+    /// `expected_round`/`expected_kyoku` 防止过期 timer 影响后续局.
+    CallTimeout { generation: u64 },
 }
 
 // ============================================================================
@@ -118,6 +121,16 @@ impl SlotEntry {
 // ============================================================================
 
 const MAX_PLAYERS: usize = 4;
+/// 鸣牌窗口超时 (ms). 真人玩家在此时间内未按 P/A/M/C 视为 Pass.
+const CALL_WINDOW_MS: u64 = 2500;
+
+/// 当前 unix 毫秒. 失败时返回 0.
+fn chrono_now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 struct RoomActor {
     room_id: String,
@@ -125,6 +138,8 @@ struct RoomActor {
     state: RoomLifecycle,
     slots: Vec<SlotEntry>,
     rx: UnboundedReceiver<RoomCmd>,
+    /// self_tx 用于 RoomActor 自己发 cmd (e.g. CallTimeout from spawned timer).
+    self_tx: UnboundedSender<RoomCmd>,
     next_player_id: u32,
     game: Option<GameState>,
     /// 整庄 seed (开局时随机).
@@ -137,6 +152,8 @@ struct RoomActor {
     /// HashMap<player_id, response>, None = 待响应.
     /// 收齐后或裁决后清空.
     pending_calls: Option<HashMap<u32, Option<NetAction>>>,
+    /// 鸣牌窗口 generation, 每次 setup 自增, timer 触发时校验避免过期影响.
+    call_window_gen: u64,
 }
 
 impl RoomActor {
@@ -144,6 +161,7 @@ impl RoomActor {
         host_nickname: String,
         config: GameConfig,
         rx: UnboundedReceiver<RoomCmd>,
+        self_tx: UnboundedSender<RoomCmd>,
     ) -> Self {
         let mut rng = rand::rng();
         let room_id = format!("{:04x}-{:04x}", rng.random::<u16>(), rng.random::<u16>());
@@ -153,12 +171,14 @@ impl RoomActor {
             state: RoomLifecycle::Lobby,
             slots: Vec::with_capacity(MAX_PLAYERS),
             rx,
+            self_tx,
             next_player_id: 1,
             game: None,
             game_seed: 0,
             round_index: 0,
             pending_host_nickname: Some(host_nickname),
             pending_calls: None,
+            call_window_gen: 0,
         }
     }
 
@@ -188,6 +208,17 @@ impl RoomActor {
             RoomCmd::Disconnect { player_id } => {
                 self.mark_disconnected(player_id);
                 self.broadcast_room_update();
+            }
+            RoomCmd::CallTimeout { generation } => {
+                // 过期 timer (玩家已响应或已进入下一回合), 忽略
+                if generation != self.call_window_gen {
+                    return;
+                }
+                if self.pending_calls.is_none() {
+                    return;
+                }
+                tracing::debug!("call window timeout, generation={generation}");
+                self.resolve_call_window();
             }
         }
     }
@@ -656,7 +687,9 @@ impl RoomActor {
                 }
                 Phase::AwaitDiscard => {
                     if !self.is_seat_ai(turn) {
-                        return; // 等真人
+                        // 给该真人推 ActionRequired (含思考时长 deadline).
+                        self.send_thinking_action_required(turn);
+                        return;
                     }
                     let action = {
                         let game = self.game.as_ref().unwrap();
@@ -666,17 +699,18 @@ impl RoomActor {
                 }
                 Phase::AwaitCalls => {
                     if self.pending_calls.is_some() {
-                        // 已 setup, 等响应
+                        // 已 setup, 等响应或 timer 触发
                         return;
                     }
-                    // 收集真人玩家的 call options. 只有有 options 且是真人的需等响应.
+                    // 收集真人玩家的 call options.
                     let game_ref = self.game.as_ref().unwrap();
                     let last_discarder = game_ref.last_discard.map(|(s, _)| s);
                     let mut humans_pending: HashMap<u32, Option<NetAction>> = HashMap::new();
+                    let mut hints_per_player: Vec<(u32, Vec<NetAction>)> = Vec::new();
                     for slot in &self.slots {
                         let Some(seat) = slot.seat else { continue };
                         if Some(seat) == last_discarder {
-                            continue; // 自切方不参与
+                            continue;
                         }
                         if slot.is_ai || !slot.connected {
                             continue;
@@ -684,18 +718,57 @@ impl RoomActor {
                         let opts = game_ref.legal_calls(seat);
                         if opts.any() {
                             humans_pending.insert(slot.id, None);
+                            let mut hints: Vec<NetAction> = Vec::new();
+                            if opts.pon.is_some() {
+                                hints.push(NetAction::Pon);
+                            }
+                            for i in 0..opts.chi.len() {
+                                hints.push(NetAction::Chi(i));
+                            }
+                            if opts.minkan.is_some() {
+                                hints.push(NetAction::Minkan);
+                            }
+                            if opts.ron {
+                                hints.push(NetAction::Tsumo);
+                            }
+                            hints.push(NetAction::Pass);
+                            hints_per_player.push((slot.id, hints));
                         }
                     }
                     if humans_pending.is_empty() {
-                        // 没真人有 options, AI 全部默认 Pass → 直接 advance
                         let game = self.game.as_mut().unwrap();
                         game.advance_turn();
                         self.broadcast_state_view();
                         continue;
                     }
-                    // 进入等待状态
+                    // 进入等待状态: setup pending_calls + spawn timeout timer
+                    self.call_window_gen = self.call_window_gen.wrapping_add(1);
+                    let gen_now = self.call_window_gen;
                     self.pending_calls = Some(humans_pending);
-                    self.broadcast_state_view(); // client 看到 AwaitCalls 时会渲染提示
+
+                    // 给 hints 推 ActionRequired (让 UI 高亮鸣牌选择)
+                    let deadline = chrono_now_unix_ms() + CALL_WINDOW_MS as i64;
+                    for (pid, hints) in hints_per_player {
+                        if let Some(slot) = self.slots.iter().find(|s| s.id == pid)
+                            && let Some(sender) = &slot.sender
+                        {
+                            let _ = sender.send(ServerMsg::ActionRequired {
+                                hints,
+                                deadline_unix_ms: deadline,
+                            });
+                        }
+                    }
+
+                    self.broadcast_state_view();
+
+                    // spawn timeout
+                    let self_tx = self.self_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(CALL_WINDOW_MS)).await;
+                        let _ = self_tx.send(RoomCmd::CallTimeout {
+                            generation: gen_now,
+                        });
+                    });
                     return;
                 }
                 Phase::RoundEnd => {
@@ -712,6 +785,32 @@ impl RoomActor {
             }
         }
         tracing::warn!("advance_game 达到 200 步上限, 中止防死循环");
+    }
+
+    /// 给真人 turn 推 ActionRequired (含 thinking_time deadline).
+    /// 同一 turn 重复推不要紧 (client 用最新 deadline 覆盖).
+    fn send_thinking_action_required(&self, seat: Seat) {
+        let Some(slot) = self.slots.iter().find(|s| s.seat == Some(seat)) else {
+            return;
+        };
+        let Some(sender) = &slot.sender else { return };
+        let secs = self.config.thinking_time_secs.unwrap_or(0);
+        let deadline_ms = if secs == 0 {
+            0 // 不限时
+        } else {
+            chrono_now_unix_ms() + (secs as i64) * 1000
+        };
+        // hints 简化: 列出主要可用动作 (UI 自己渲染按键速查).
+        let hints = vec![
+            NetAction::Discard(crate::ui::screens::game::TileSpec {
+                kind: crate::tile::TileIndex(0),
+            }),
+            NetAction::Tsumo,
+        ];
+        let _ = sender.send(ServerMsg::ActionRequired {
+            hints,
+            deadline_unix_ms: deadline_ms,
+        });
     }
 
     /// 当前 seat 是否 AI 控制 (slot 标记 AI 或对应 slot 已断线).

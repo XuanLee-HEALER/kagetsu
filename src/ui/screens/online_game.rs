@@ -81,6 +81,11 @@ pub struct OnlineGameState {
     pub selected: usize,
     /// 主题 (从 App.local_prefs 拷一份).
     pub theme_kind: ThemeKind,
+    /// server 推送的当前 ActionRequired (鸣牌窗口或思考倒计时).
+    /// None = 没有未决动作.
+    pub current_hints: Option<Vec<NetAction>>,
+    /// 当前动作 deadline (unix ms). 0 表示无限期.
+    pub current_deadline_ms: i64,
 }
 
 impl OnlineGameState {
@@ -91,6 +96,8 @@ impl OnlineGameState {
             message: "等待 server 推送状态...".into(),
             selected: 0,
             theme_kind,
+            current_hints: None,
+            current_deadline_ms: 0,
         }
     }
 
@@ -118,18 +125,31 @@ impl OnlineGameState {
                 if self.selected >= max && max > 0 {
                     self.selected = max - 1;
                 }
+                // 收到新 state, 旧 hints 失效 (新一轮才会再发 ActionRequired)
+                if !matches!(new_view.phase, crate::game::Phase::AwaitCalls) {
+                    self.current_hints = None;
+                    self.current_deadline_ms = 0;
+                }
                 self.state_view = Some(new_view);
                 self.message.clear();
             }
+            ServerMsg::ActionRequired {
+                hints,
+                deadline_unix_ms,
+            } => {
+                self.current_hints = Some(hints);
+                self.current_deadline_ms = deadline_unix_ms;
+            }
             ServerMsg::RoundResult(r) => {
                 self.message = format!("局结算: {} | 分数 {:?}", r.message, r.scores);
+                self.current_hints = None;
             }
             ServerMsg::GameEnd(_) => {
                 self.message = "整庄结束, 按 N 回房间, L 回主菜单".into();
+                self.current_hints = None;
             }
             ServerMsg::BackToRoom => {
                 self.message = "回房间".into();
-                // 切回 OnlineRoom: 由 App 检测 RoomUpdate(Lobby) 处理. 这里不直接触发.
             }
             ServerMsg::RoomUpdate(view) => {
                 if view.state == RoomLifecycle::Lobby {
@@ -1012,11 +1032,14 @@ impl OnlineGameState {
             Phase::GameEnd => "整庄结束",
         };
         let your_turn = view.turn == view.my_seat;
+        let has_hints = self.current_hints.is_some();
         let phase_text = format!(
             " {} · 当前 {} · {}",
             phase_label,
             absolute_seat_label(view.turn),
-            if your_turn {
+            if has_hints {
+                "**等你响应**"
+            } else if your_turn {
                 "你的回合"
             } else {
                 "他家行动"
@@ -1028,14 +1051,45 @@ impl OnlineGameState {
             oy + 38,
             &phase_text,
             Style::default()
-                .fg(if your_turn { theme.accent } else { theme.dim })
+                .fg(if has_hints || your_turn {
+                    theme.accent
+                } else {
+                    theme.dim
+                })
                 .bg(theme.panel)
-                .add_modifier(if your_turn {
+                .add_modifier(if has_hints || your_turn {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
                 }),
         );
+        // 倒计时 (col ~ 80)
+        if self.current_deadline_ms > 0 {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let remaining_ms = (self.current_deadline_ms - now_ms).max(0);
+            let remaining_s = (remaining_ms + 999) / 1000;
+            let countdown_style = if remaining_s <= 1 {
+                Style::default()
+                    .fg(theme.bg)
+                    .bg(theme.danger)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme.danger)
+                    .bg(theme.panel)
+                    .add_modifier(Modifier::BOLD)
+            };
+            paint_str(
+                buf,
+                ox + 80,
+                oy + 38,
+                &format!(" ⏱  {} 秒 ", remaining_s),
+                countdown_style,
+            );
+        }
         paint_str(
             buf,
             ox + 120,
