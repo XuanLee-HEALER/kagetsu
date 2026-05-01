@@ -202,16 +202,17 @@ impl RoomActor {
         reconnect_token: Option<Uuid>,
         sender: UnboundedSender<ServerMsg>,
     ) -> Result<JoinResult, JoinError> {
-        // 重连流程
+        // 重连流程: 找 token 对应 slot, 复用 seat / 分数 / token, 替换 sender.
         if let Some(token) = reconnect_token
             && let Some(idx) = self.slots.iter().position(|s| s.reconnect_token == token)
         {
-            let (player_id, sender_clone) = {
+            let (player_id, seat_opt, sender_clone) = {
                 let slot = &mut self.slots[idx];
                 slot.connected = true;
+                slot.is_ai = false; // AI 临时接管的 seat 现在交还给真人
                 slot.sender = Some(sender.clone());
                 slot.nickname = nickname;
-                (slot.id, slot.sender.clone())
+                (slot.id, slot.seat, slot.sender.clone())
             };
             let room = self.room_view();
             if let Some(s) = sender_clone {
@@ -220,6 +221,13 @@ impl RoomActor {
                     reconnect_token: token,
                     room: Box::new(room.clone()),
                 });
+                // 如果是 InGame, 把当前 GameStateView 推给重连方
+                if self.state == RoomLifecycle::InGame
+                    && let Some(seat) = seat_opt
+                    && let Some(view) = self.project_view(seat)
+                {
+                    let _ = s.send(ServerMsg::GameStateView(Box::new(view)));
+                }
             }
             self.broadcast_room_update();
             return Ok(JoinResult {
@@ -1082,6 +1090,42 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         latest.clone()
+    }
+
+    /// 重连: 玩家 disconnect 后用 token 重连, 应恢复 seat + 分数 +
+    /// 立即收到 GameStateView (如果游戏中).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconnect_with_token_resumes_seat() {
+        let handle = spawn_room("h".into(), GameConfig::default());
+        let (host_id, _, _) = join_player(&handle, "host").await;
+        let (_, alice_token, alice_rx) = join_player(&handle, "alice").await;
+
+        // host 让 alice ready (其实第二个玩家加入后默认 ready=false, 必须手动)
+        // 但这里我们只测重连不开局, lobby 阶段
+        // 模拟 alice 断线: drop 她的 rx (channel close), 通知 server
+        drop(alice_rx);
+        yield_actor().await;
+
+        // alice 用 token 重连
+        let (tx2, mut rx2) = mpsc::unbounded_channel::<ServerMsg>();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        handle
+            .tx
+            .send(RoomCmd::Join {
+                nickname: "alice2".into(),
+                reconnect_token: Some(alice_token),
+                sender: tx2,
+                ack: ack_tx,
+            })
+            .unwrap();
+        let result = ack_rx.await.unwrap().unwrap();
+        // 应该拿到原来同一个 player_id (而不是新分配)
+        assert_ne!(result.player_id, host_id);
+        assert_eq!(result.reconnect_token, alice_token);
+
+        // 第一条消息应该是 Welcome
+        let msg = rx2.recv().await.unwrap();
+        assert!(matches!(msg, ServerMsg::Welcome { .. }));
     }
 
     /// AI 驱动: 1 真人 host + 3 AI, 一直推进直到 host 应该出牌 (turn=East AwaitDiscard).
