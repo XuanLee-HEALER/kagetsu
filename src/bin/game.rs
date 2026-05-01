@@ -11,7 +11,8 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io;
 
-fn main() -> Result<()> {
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

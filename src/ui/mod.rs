@@ -25,6 +25,9 @@ pub use screens::config::{ConfigState, SeedChoice};
 pub use screens::game::GameScreenState;
 pub use screens::gameover::GameOverState;
 pub use screens::main_menu::MainMenuState;
+pub use screens::online_game::OnlineGameState;
+pub use screens::online_lobby::OnlineLobbyState;
+pub use screens::online_room::OnlineRoomState;
 
 /// 屏间转换请求.
 pub enum Transition {
@@ -37,6 +40,14 @@ pub enum Transition {
     EnterGameOver {
         rankings: [Ranking; 4],
     },
+    /// 主菜单进局域网大厅.
+    EnterOnlineLobby,
+    /// 大厅创建房间 → 进 OnlineRoom.
+    CreateOnlineRoom {
+        nickname: String,
+    },
+    /// 房间内 server 推送 GameStateView/InGame, 切到 OnlineGame.
+    EnterOnlineGame,
 }
 
 pub enum Screen {
@@ -44,6 +55,9 @@ pub enum Screen {
     Config(ConfigState),
     InGame(Box<GameScreenState>),
     GameOver(GameOverState),
+    OnlineLobby(OnlineLobbyState),
+    OnlineRoom(Box<OnlineRoomState>),
+    OnlineGame(Box<OnlineGameState>),
 }
 
 pub struct App {
@@ -89,9 +103,14 @@ impl App {
             self.apply_transition(t);
             return Ok(());
         }
-        if let Screen::InGame(s) = &mut self.screen
-            && let Some(t) = s.advance()
-        {
+        // 推进各屏的 advance (InGame 主推, Online 屏轮询 transport)
+        let transition = match &mut self.screen {
+            Screen::InGame(s) => s.advance(),
+            Screen::OnlineRoom(s) => s.advance(),
+            Screen::OnlineGame(s) => s.advance(),
+            _ => None,
+        };
+        if let Some(t) = transition {
             self.apply_transition(t);
         }
         Ok(())
@@ -135,6 +154,9 @@ impl App {
             Screen::Config(s) => s.handle_event(key),
             Screen::InGame(s) => s.handle_event(key),
             Screen::GameOver(s) => s.handle_event(key),
+            Screen::OnlineLobby(s) => s.handle_event(key),
+            Screen::OnlineRoom(s) => s.handle_event(key),
+            Screen::OnlineGame(s) => s.handle_event(key),
         }
     }
 
@@ -190,6 +212,65 @@ impl App {
             Transition::EnterGameOver { rankings } => {
                 self.screen = Screen::GameOver(GameOverState::new(rankings));
             }
+            Transition::EnterOnlineLobby => {
+                self.screen = Screen::OnlineLobby(OnlineLobbyState::new());
+            }
+            Transition::CreateOnlineRoom { nickname } => {
+                self.create_online_room(nickname);
+            }
+            Transition::EnterOnlineGame => {
+                self.transition_room_to_game();
+            }
+        }
+    }
+
+    /// 创建本地 RoomActor (房主), 自己 join 进去, 切到 OnlineRoom 屏.
+    fn create_online_room(&mut self, nickname: String) {
+        use crate::net::room::{RoomCmd, spawn_room};
+        use tokio::sync::{mpsc, oneshot};
+
+        let handle = spawn_room(nickname.clone(), self.last_config.clone());
+        // 自己 join: 创建一个 mpsc channel 作为 server → us 的 inbox
+        let (s2c_tx, inbox) = mpsc::unbounded_channel();
+        let (ack_tx, _ack_rx) = oneshot::channel();
+        let _ = handle.tx.send(RoomCmd::Join {
+            nickname: nickname.clone(),
+            reconnect_token: None,
+            sender: s2c_tx,
+            ack: ack_tx,
+        });
+        // ack 在 sync 上下文不能 await — 我们简化: 假设第一个 join 的 player_id = 1
+        // (RoomActor 实际是这样分配的). 真实 token / 详细 RoomView 通过 inbox 收
+        // ServerMsg::Welcome 时更新.
+        let my_player_id: u32 = 1;
+        let room_view = crate::net::protocol::RoomView {
+            room_id: "...".into(),
+            host_id: my_player_id,
+            config: self.last_config.clone(),
+            players: vec![],
+            state: crate::net::protocol::RoomLifecycle::Lobby,
+        };
+        self.screen = Screen::OnlineRoom(Box::new(OnlineRoomState {
+            handle,
+            inbox,
+            room_view,
+            my_player_id,
+            my_token: uuid::Uuid::nil(),
+            message: String::new(),
+        }));
+    }
+
+    /// OnlineRoom → OnlineGame: 移交 handle + inbox.
+    fn transition_room_to_game(&mut self) {
+        let prev = std::mem::replace(&mut self.screen, Screen::MainMenu(MainMenuState::new()));
+        if let Screen::OnlineRoom(state) = prev {
+            let s = *state;
+            self.screen = Screen::OnlineGame(Box::new(OnlineGameState::new(
+                s.handle,
+                s.inbox,
+                s.my_player_id,
+                s.my_token,
+            )));
         }
     }
 
@@ -249,6 +330,9 @@ impl App {
             Screen::Config(s) => s.render(f, area),
             Screen::InGame(s) => s.render(f, area),
             Screen::GameOver(s) => s.render(f, area),
+            Screen::OnlineLobby(s) => s.render(f, area),
+            Screen::OnlineRoom(s) => s.render(f, area),
+            Screen::OnlineGame(s) => s.render(f, area),
         }
     }
 

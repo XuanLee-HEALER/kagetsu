@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::ui::Transition;
 
-const ITEMS: &[&str] = &["单人游戏", "多人游戏(暂未支持)", "退出"];
+const ITEMS: &[&str] = &["单人游戏", "局域网游戏", "退出"];
 
 #[derive(Debug, Default)]
 pub struct MainMenuState {
@@ -38,10 +38,7 @@ impl MainMenuState {
             }
             KeyCode::Enter | KeyCode::Char(' ') => match self.selected {
                 0 => Some(Transition::EnterConfig),
-                1 => {
-                    self.message = "多人游戏暂未支持.".into();
-                    None
-                }
+                1 => Some(Transition::EnterOnlineLobby),
                 2 => Some(Transition::Quit),
                 _ => None,
             },
@@ -74,9 +71,6 @@ impl MainMenuState {
                     .fg(Color::Black)
                     .bg(Color::Yellow)
                     .add_modifier(Modifier::BOLD);
-            } else if i == 1 {
-                // 多人游戏 — 灰显
-                style = style.fg(Color::DarkGray);
             }
             lines.push(Line::from(Span::styled(
                 format!("{}{}", prefix, item),

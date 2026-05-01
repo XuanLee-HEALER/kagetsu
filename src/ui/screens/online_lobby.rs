@@ -1,0 +1,165 @@
+//! 局域网大厅: 输入 nickname → 创建房间 / 加入(发现, phase 6) / 手动 IP(phase 5).
+
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::Frame;
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+
+use crate::ui::Transition;
+
+/// 大厅项目焦点.
+const FOCUS_NICKNAME: usize = 0;
+const FOCUS_CREATE: usize = 1;
+const FOCUS_JOIN: usize = 2;
+const FOCUS_MANUAL: usize = 3;
+const ITEM_COUNT: usize = 4;
+
+#[derive(Debug)]
+pub struct OnlineLobbyState {
+    pub nickname: String,
+    pub focus: usize,
+    pub message: String,
+}
+
+impl OnlineLobbyState {
+    pub fn new() -> Self {
+        Self {
+            nickname: String::new(),
+            focus: FOCUS_NICKNAME,
+            message: String::new(),
+        }
+    }
+
+    pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
+        match key.code {
+            KeyCode::Tab | KeyCode::Down => {
+                self.focus = (self.focus + 1) % ITEM_COUNT;
+                None
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                self.focus = (self.focus + ITEM_COUNT - 1) % ITEM_COUNT;
+                None
+            }
+            KeyCode::Char(c) if self.focus == FOCUS_NICKNAME => {
+                if self.nickname.chars().count() < 16 {
+                    self.nickname.push(c);
+                }
+                None
+            }
+            KeyCode::Backspace if self.focus == FOCUS_NICKNAME => {
+                self.nickname.pop();
+                None
+            }
+            KeyCode::Enter => match self.focus {
+                FOCUS_NICKNAME => {
+                    // Enter 在输入框 = 跳到 "创建房间" 焦点
+                    self.focus = FOCUS_CREATE;
+                    None
+                }
+                FOCUS_CREATE => {
+                    if self.nickname.trim().is_empty() {
+                        self.message = "请输入昵称".into();
+                        self.focus = FOCUS_NICKNAME;
+                        return None;
+                    }
+                    Some(Transition::CreateOnlineRoom {
+                        nickname: self.nickname.trim().to_string(),
+                    })
+                }
+                FOCUS_JOIN => {
+                    self.message = "(mDNS 发现待 phase 6 实现)".into();
+                    None
+                }
+                FOCUS_MANUAL => {
+                    self.message = "(手动 IP 待 phase 5 实现)".into();
+                    None
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub fn render(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" 局域网游戏 · 大厅 ")
+            .title_alignment(Alignment::Center);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(""));
+
+        // 昵称输入
+        let nickname_label = if self.focus == FOCUS_NICKNAME {
+            "▶ 昵称: "
+        } else {
+            "  昵称: "
+        };
+        let mut nickname_text = self.nickname.clone();
+        if self.focus == FOCUS_NICKNAME {
+            nickname_text.push('_');
+        }
+        lines.push(Line::from(vec![
+            Span::raw(nickname_label),
+            Span::styled(
+                nickname_text,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(""));
+
+        // 选项
+        let options = [
+            (FOCUS_CREATE, "创建房间", false),
+            (FOCUS_JOIN, "加入房间 (发现, 待施工)", true),
+            (FOCUS_MANUAL, "手动输入 IP (待施工)", true),
+        ];
+        for (idx, label, disabled) in options {
+            let prefix = if self.focus == idx { "▶ " } else { "  " };
+            let mut style = Style::default();
+            if self.focus == idx {
+                style = style
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD);
+            } else if disabled {
+                style = style.fg(Color::DarkGray);
+            }
+            lines.push(Line::from(Span::styled(
+                format!("{}{}", prefix, label),
+                style,
+            )));
+        }
+
+        if !self.message.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                self.message.clone(),
+                Style::default().fg(Color::Red),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "↑↓/Tab 切焦点 · 回车 确认",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(Span::styled(
+            "Esc 回主菜单 · Q 退出",
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        f.render_widget(Paragraph::new(lines).alignment(Alignment::Left), inner);
+    }
+}
+
+impl Default for OnlineLobbyState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
