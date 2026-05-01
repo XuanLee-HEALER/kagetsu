@@ -253,10 +253,10 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
             };
             yakuman.push((Yaku::Suuankou { tanki }, 13 * mult));
         }
-        if is_daisangen(ctx) {
+        if is_daisangen(ctx, melds) {
             yakuman.push((Yaku::Daisangen, 13));
         }
-        let (sho, dai) = sushii_check(ctx);
+        let (sho, dai) = sushii_check(ctx, melds);
         if dai {
             let mult = if ctx.config.double_yakuman { 2 } else { 1 };
             yakuman.push((Yaku::Daisuushii, 13 * mult));
@@ -266,13 +266,13 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
         if is_tsuuiisou(ctx, melds) {
             yakuman.push((Yaku::Tsuuiisou, 13));
         }
-        if is_chinroutou(ctx) {
+        if is_chinroutou(ctx, melds) {
             yakuman.push((Yaku::Chinroutou, 13));
         }
-        if is_ryuuiisou(ctx) {
+        if is_ryuuiisou(ctx, melds) {
             yakuman.push((Yaku::Ryuuiisou, 13));
         }
-        if is_suukantsu(ctx) {
+        if is_suukantsu(ctx, melds) {
             yakuman.push((Yaku::Suukantsu, 13));
         }
         if let Some(nine_wait) = chuurenpoutou_check(ctx) {
@@ -347,8 +347,8 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
                 }
             }
         }
-        // 平和
-        if is_pinfu(ctx) {
+        // 平和: 任何鸣牌(含 ankan, 因为 kantsu 破坏 pinfu)都不允许.
+        if melds.is_empty() && is_pinfu(ctx) {
             out.push((Yaku::Pinfu, 1));
         }
         // 一杯口/二杯口(门清)
@@ -360,12 +360,12 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
                 out.push((Yaku::Ippeikou, 1));
             }
         }
-        // 三色同顺
-        if has_sanshoku(mentsu) {
+        // 三色同顺 / 一气通贯: 含副露 chi 的顺子也参与判定.
+        let all_mentsu = mentsu_with_melds(mentsu, melds);
+        if has_sanshoku(&all_mentsu) {
             out.push((Yaku::Sanshoku, if ctx.menzen { 2 } else { 1 }));
         }
-        // 一气通贯
-        if has_ittsuu(mentsu) {
+        if has_ittsuu(&all_mentsu) {
             out.push((Yaku::Ittsuu, if ctx.menzen { 2 } else { 1 }));
         }
         // 对对和: 闭手全刻 + 副露全刻 (chi 视作顺子, 不计)
@@ -379,8 +379,8 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
         if count_concealed_koutsu(ctx) >= 3 {
             out.push((Yaku::Sanankou, 2));
         }
-        // 三色同刻
-        if has_sanshoku_doukou(mentsu) {
+        // 三色同刻: 含副露 pon/kan 的刻子.
+        if has_sanshoku_doukou(&all_mentsu) {
             out.push((Yaku::SanshokuDoukou, 2));
         }
         // 三杠子
@@ -507,13 +507,14 @@ fn is_suuankou(ctx: &WinContext) -> bool {
     count_concealed_koutsu(ctx) == 4
 }
 
-fn is_daisangen(ctx: &WinContext) -> bool {
+fn is_daisangen(ctx: &WinContext, melds: &[Meld]) -> bool {
     let Decomposition::Standard { mentsu, .. } = ctx.decomposition else {
         return false;
     };
+    let all = mentsu_with_melds(mentsu, melds);
     let dragons = [TileIndex::HAKU, TileIndex::HATSU, TileIndex::CHUN];
     dragons.iter().all(|d| {
-        mentsu.iter().any(|m| match m {
+        all.iter().any(|m| match m {
             Mentsu::Koutsu(t, _) | Mentsu::Kantsu(t, _) => t == d,
             _ => false,
         })
@@ -521,10 +522,11 @@ fn is_daisangen(ctx: &WinContext) -> bool {
 }
 
 /// 返回 (小四喜, 大四喜).
-fn sushii_check(ctx: &WinContext) -> (bool, bool) {
+fn sushii_check(ctx: &WinContext, melds: &[Meld]) -> (bool, bool) {
     let Decomposition::Standard { mentsu, pair, .. } = ctx.decomposition else {
         return (false, false);
     };
+    let all = mentsu_with_melds(mentsu, melds);
     let winds = [
         TileIndex::EAST,
         TileIndex::SOUTH,
@@ -534,7 +536,7 @@ fn sushii_check(ctx: &WinContext) -> (bool, bool) {
     let mut wind_koutsu = 0;
     let mut pair_is_wind = false;
     for w in winds {
-        if mentsu.iter().any(|m| match m {
+        if all.iter().any(|m| match m {
             Mentsu::Koutsu(t, _) | Mentsu::Kantsu(t, _) => *t == w,
             _ => false,
         }) {
@@ -566,25 +568,27 @@ fn is_tsuuiisou(ctx: &WinContext, melds: &[Meld]) -> bool {
         })
 }
 
-fn is_chinroutou(ctx: &WinContext) -> bool {
+fn is_chinroutou(ctx: &WinContext, melds: &[Meld]) -> bool {
     let Decomposition::Standard { mentsu, pair, .. } = ctx.decomposition else {
         return false;
     };
+    let all = mentsu_with_melds(mentsu, melds);
     pair.is_terminal()
-        && mentsu.iter().all(|m| match m {
+        && all.iter().all(|m| match m {
             Mentsu::Shuntsu(_) => false,
             Mentsu::Koutsu(t, _) | Mentsu::Kantsu(t, _) => t.is_terminal(),
         })
 }
 
-fn is_ryuuiisou(ctx: &WinContext) -> bool {
+fn is_ryuuiisou(ctx: &WinContext, melds: &[Meld]) -> bool {
     let Decomposition::Standard { mentsu, pair, .. } = ctx.decomposition else {
         return false;
     };
     if !pair.is_green() {
         return false;
     }
-    for m in mentsu {
+    let all = mentsu_with_melds(mentsu, melds);
+    for m in &all {
         match m {
             Mentsu::Shuntsu(start) => {
                 // 只 234s 是绿色顺子.
@@ -602,12 +606,12 @@ fn is_ryuuiisou(ctx: &WinContext) -> bool {
     true
 }
 
-fn is_suukantsu(ctx: &WinContext) -> bool {
+fn is_suukantsu(ctx: &WinContext, melds: &[Meld]) -> bool {
     let Decomposition::Standard { mentsu, .. } = ctx.decomposition else {
         return false;
     };
-    mentsu
-        .iter()
+    let all = mentsu_with_melds(mentsu, melds);
+    all.iter()
         .filter(|m| matches!(m, Mentsu::Kantsu(_, _)))
         .count()
         == 4
@@ -751,6 +755,32 @@ fn has_sanshoku_doukou(mentsu: &[Mentsu]) -> bool {
         }
     }
     (0..9).any(|r| have[0][r] && have[1][r] && have[2][r])
+}
+
+/// 把 closed mentsu 与 副露 melds 合并成统一 Mentsu 视图.
+/// chi → Shuntsu, pon → Koutsu(open), minkan/shouminkan → Kantsu(open), ankan → Kantsu(closed).
+fn mentsu_with_melds(closed: &[Mentsu], melds: &[Meld]) -> Vec<Mentsu> {
+    let mut out: Vec<Mentsu> = closed.to_vec();
+    for m in melds {
+        match &m.kind {
+            crate::meld::MeldKind::Chi { tiles, .. } => {
+                let mut kinds = [tiles[0].kind.0, tiles[1].kind.0, tiles[2].kind.0];
+                kinds.sort();
+                out.push(Mentsu::Shuntsu(TileIndex(kinds[0])));
+            }
+            crate::meld::MeldKind::Pon { tiles } => {
+                out.push(Mentsu::Koutsu(tiles[0].kind, false));
+            }
+            crate::meld::MeldKind::Minkan { tiles }
+            | crate::meld::MeldKind::Shouminkan { tiles } => {
+                out.push(Mentsu::Kantsu(tiles[0].kind, false));
+            }
+            crate::meld::MeldKind::Ankan { tiles } => {
+                out.push(Mentsu::Kantsu(tiles[0].kind, true));
+            }
+        }
+    }
+    out
 }
 
 fn has_ittsuu(mentsu: &[Mentsu]) -> bool {

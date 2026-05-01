@@ -47,8 +47,10 @@ pub fn calculate_fu(d: &Decomposition, ctx: &WinContext, melds: &[Meld]) -> u32 
             wait,
             winning_tile,
         } => {
-            // 检测 pinfu (会绑定特殊符规则)
+            // 检测 pinfu (会绑定特殊符规则).
+            // 任何鸣牌 (含 ankan, kantsu 破坏 pinfu) 都不允许.
             let is_pinfu = ctx.menzen
+                && melds.is_empty()
                 && mentsu.iter().all(|m| matches!(m, Mentsu::Shuntsu(_)))
                 && *wait == WaitKind::Ryanmen
                 && !pair.is_dragon()
@@ -100,12 +102,10 @@ pub fn calculate_fu(d: &Decomposition, ctx: &WinContext, melds: &[Meld]) -> u32 
                 fu += meld_fu(meld);
             }
 
-            // 向上取整到 10. 但若没有任何加成(只有副露+无符), 至少给 30 (副露荣和无符的最小).
-
-            // 完全开门(全部副露,雀头无符,基础 20+无加成) 时按 30 兜底
-            // 实际 fu 起步至少 20 + 自摸 2 / 门清 10 = 22 / 30, 取整后通常 30+.
-            // 此处遵守"向上取整 10",不再额外兜底.
-            fu.div_ceil(10) * 10
+            // 向上取整到 10, 然后兜底 30.
+            // 非 pinfu/chiitoitsu 的标准型 fu 最小 30 (天凤规则).
+            // 副露 ron + 0 加成 = 20 → 必须圆到 30.
+            (fu.div_ceil(10) * 10).max(30)
         }
     }
 }
