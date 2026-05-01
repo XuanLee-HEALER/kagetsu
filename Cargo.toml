@@ -3,7 +3,7 @@ name = "tui-majo"
 version = "0.1.0"
 edition = "2024"
 description = "Riichi Mahjong (日本麻将) in your terminal, written in Rust + ratatui"
-license = "MIT"
+license = "GPL-3.0-or-later"
 default-run = "tui-majo"
 
 [dependencies]
