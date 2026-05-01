@@ -208,4 +208,47 @@ mod tests {
         let r = reason.replace(|c: char| c.is_ascii_digit(), "N");
         r.chars().take(60).collect()
     }
+
+    /// 输出每个 diff 的完整细节, 含 fixture/kyoku 索引.
+    /// 用于调试 ResultMismatch 找具体 case 修.
+    #[test]
+    #[ignore = "用 cargo test ... --ignored 显式跑, 输出每个 diff 的完整原文"]
+    fn diff_full_details() {
+        let dir = std::path::Path::new("tests/replay/fixtures");
+        if !dir.exists() {
+            return;
+        }
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        entries.sort_by_key(|e| e.path());
+        for entry in entries {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("mjlog") {
+                continue;
+            }
+            let Ok(r) = run_fixture(&path) else { continue };
+            for (idx, o) in r.kyoku_results.iter().enumerate() {
+                if let KyokuOutcome::Diffs(diffs) = o {
+                    for d in diffs {
+                        match d {
+                            ReplayDiff::ResultMismatch { reason } => {
+                                eprintln!("[{}#{}] {}", r.fixture, idx, reason);
+                            }
+                            ReplayDiff::EventFailed {
+                                idx: ev_idx,
+                                reason,
+                            } => {
+                                eprintln!(
+                                    "[{}#{}] EventFailed at ev {}: {}",
+                                    r.fixture, idx, ev_idx, reason
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

@@ -9,6 +9,7 @@
 
 use crate::config::GameConfig;
 use crate::decompose::{Decomposition, Mentsu, WaitKind};
+use crate::meld::Meld;
 use crate::tile::TileIndex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -207,7 +208,7 @@ pub struct WinContext<'a> {
 
 /// 返回所有命中的役及其番数.
 /// 役满成立时只返回役满列表(不与一般役混合).
-pub fn detect_yaku(ctx: &WinContext) -> Vec<(Yaku, u32)> {
+pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
     // ---------- 役满 ----------
     let mut yakuman: Vec<(Yaku, u32)> = Vec::new();
 
@@ -321,12 +322,28 @@ pub fn detect_yaku(ctx: &WinContext) -> Vec<(Yaku, u32)> {
     }
 
     if let Decomposition::Standard { mentsu, pair, .. } = ctx.decomposition {
-        // 役牌
+        // 役牌 (闭手刻子)
         for m in mentsu {
             if let Mentsu::Koutsu(t, _) | Mentsu::Kantsu(t, _) = m {
                 let han = yakuhai_for(*t, ctx);
                 if han > 0 {
                     out.push((Yaku::Yakuhai(yakuhai_kind(*t, ctx)), han));
+                }
+            }
+        }
+        // 役牌 (副露刻子: pon/kan)
+        for meld in melds {
+            let first_tile = match &meld.kind {
+                crate::meld::MeldKind::Pon { tiles } => Some(tiles[0]),
+                crate::meld::MeldKind::Minkan { tiles } => Some(tiles[0]),
+                crate::meld::MeldKind::Shouminkan { tiles } => Some(tiles[0]),
+                crate::meld::MeldKind::Ankan { tiles } => Some(tiles[0]),
+                crate::meld::MeldKind::Chi { .. } => None,
+            };
+            if let Some(t) = first_tile {
+                let han = yakuhai_for(t.kind, ctx);
+                if han > 0 {
+                    out.push((Yaku::Yakuhai(yakuhai_kind(t.kind, ctx)), han));
                 }
             }
         }
@@ -390,12 +407,12 @@ pub fn detect_yaku(ctx: &WinContext) -> Vec<(Yaku, u32)> {
     }
 
     // 断幺九
-    if is_tanyao(ctx.decomposition) && (ctx.menzen || ctx.config.kuitan) {
+    if is_tanyao(ctx.decomposition, melds) && (ctx.menzen || ctx.config.kuitan) {
         out.push((Yaku::Tanyao, 1));
     }
 
     // 清一/混一(适用于标准型和七对子)
-    if let Some(suit) = single_suit(ctx.decomposition) {
+    if let Some(suit) = single_suit(ctx.decomposition, melds) {
         if suit.is_some() {
             out.push((Yaku::Chinitsu, if ctx.menzen { 6 } else { 5 }));
         } else {
@@ -815,7 +832,15 @@ fn is_shousangen(mentsu: &[Mentsu], pair: TileIndex) -> bool {
     k_count == 2 && pair_dragon.is_some()
 }
 
-fn is_tanyao(d: &Decomposition) -> bool {
+fn is_tanyao(d: &Decomposition, melds: &[Meld]) -> bool {
+    // 任何副露含 yaochuu 牌 → 非 tanyao
+    for m in melds {
+        for t in m.tiles() {
+            if t.kind.is_yaochuu() {
+                return false;
+            }
+        }
+    }
     match d {
         Decomposition::Standard { mentsu, pair, .. } => {
             if pair.is_yaochuu() {
@@ -825,11 +850,11 @@ fn is_tanyao(d: &Decomposition) -> bool {
                 match m {
                     Mentsu::Shuntsu(s) => {
                         let r = s.0 % 9;
-                        // 顺子 234..678 的起始 1..=5
-                        if r > 5 {
+                        // 顺子起始 r ∈ [1, 5] 才不含 1/9 (即 234..678).
+                        // r=0 起始 1 含 1; r=6,7,8 起始 7/8/9 (8 9 不存在), r=6 含 9.
+                        if !(1..=5).contains(&r) {
                             return false;
                         }
-                        // 起始 0 (123) 含 1, 起始 6 (789) 含 9 → 已被排除.
                     }
                     Mentsu::Koutsu(t, _) | Mentsu::Kantsu(t, _) => {
                         if t.is_yaochuu() {
@@ -846,8 +871,9 @@ fn is_tanyao(d: &Decomposition) -> bool {
 }
 
 /// 返回 Some(Some(()))=清一; Some(None)=混一; None=既非.
-fn single_suit(d: &Decomposition) -> Option<Option<()>> {
-    let mut suits = [false; 5]; // 0..3 数, 3 风, 4 三元... 实际我们只关心数花色 0..3 与是否含字牌
+/// 必须检查闭手分解 + 所有副露 (鸣牌牌也属于一色).
+fn single_suit(d: &Decomposition, melds: &[Meld]) -> Option<Option<()>> {
+    let mut suits = [false; 3]; // m/p/s
     let mut has_honor = false;
     let mut record = |t: TileIndex| {
         if t.is_honor() {
@@ -873,7 +899,13 @@ fn single_suit(d: &Decomposition) -> Option<Option<()>> {
         }
         Decomposition::Kokushi { .. } => return None,
     }
-    let suit_count = (0..3).filter(|&i| suits[i]).count();
+    // 副露中的牌也参与
+    for m in melds {
+        for t in m.tiles() {
+            record(t.kind);
+        }
+    }
+    let suit_count = suits.iter().filter(|&&b| b).count();
     match (suit_count, has_honor) {
         (1, false) => Some(Some(())),
         (1, true) => Some(None),
@@ -932,7 +964,7 @@ mod tests {
             .find(|d| matches!(d, Decomposition::Chiitoitsu { .. }))
             .unwrap();
         let ctx = ctx_for(d, true);
-        let yakus = detect_yaku(&ctx);
+        let yakus = detect_yaku(&ctx, &[]);
         assert!(yakus.iter().any(|(y, _)| matches!(y, Yaku::Chiitoitsu)));
     }
 
@@ -974,7 +1006,7 @@ mod tests {
             })
             .unwrap();
         let ctx = ctx_for(d, true);
-        let yakus = detect_yaku(&ctx);
+        let yakus = detect_yaku(&ctx, &[]);
         assert!(
             yakus.iter().any(|(y, _)| matches!(y, Yaku::Pinfu)),
             "应识别 pinfu, got {:?}",
@@ -1003,7 +1035,7 @@ mod tests {
             .find(|d| matches!(d, Decomposition::Standard { .. }))
             .unwrap();
         let ctx = ctx_for(d, true);
-        let yakus = detect_yaku(&ctx);
+        let yakus = detect_yaku(&ctx, &[]);
         assert!(yakus.iter().any(|(y, _)| matches!(y, Yaku::Tanyao)));
     }
 
@@ -1020,7 +1052,7 @@ mod tests {
             .find(|d| matches!(d, Decomposition::Kokushi { .. }))
             .unwrap();
         let ctx = ctx_for(d, true);
-        let yakus = detect_yaku(&ctx);
+        let yakus = detect_yaku(&ctx, &[]);
         assert!(yakus.iter().any(|(y, _)| matches!(y, Yaku::Kokushi { .. })));
     }
 }

@@ -190,7 +190,7 @@ pub fn ceil_to_100(n: i32) -> i32 {
 /// 综合判定: 调用 detect_yaku, 算 fu, 算 base_points 和 level.
 /// 若无役 (除 dora 外没有真役) 返回 None.
 pub fn evaluate(ctx: &WinContext, melds: &[Meld]) -> Option<ScoreResult> {
-    let yaku = detect_yaku(ctx);
+    let yaku = detect_yaku(ctx, melds);
     if yaku.is_empty() {
         return None;
     }

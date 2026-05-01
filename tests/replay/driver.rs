@@ -43,6 +43,8 @@ struct ReplayState {
     melds: [Vec<Meld>; 4],
     rivers: [Vec<Tile>; 4],
     riichi: [bool; 4],
+    /// 立直后还在一发窗口期 (尚未自家再切 / 任何人鸣牌).
+    ippatsu_active: [bool; 4],
     last_drawn: [Option<Tile>; 4],
     last_discard: Option<(Seat, Tile)>,
     dora_indicators: Vec<Tile>,
@@ -60,6 +62,7 @@ impl ReplayState {
             melds: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             rivers: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             riichi: [false; 4],
+            ippatsu_active: [false; 4],
             last_drawn: [None; 4],
             last_discard: None,
             dora_indicators: vec![log.initial_dora_marker],
@@ -91,6 +94,8 @@ impl ReplayState {
                 self.rivers[idx].push(*tile);
                 self.last_drawn[idx] = None;
                 self.last_discard = Some((*who, *tile));
+                // 一发: 立直方再次切牌后失效
+                self.ippatsu_active[idx] = false;
             }
             KyokuEvent::Pon {
                 who,
@@ -98,6 +103,8 @@ impl ReplayState {
                 target,
                 consumed,
             } => {
+                // 鸣牌使所有立直方一发失效
+                self.ippatsu_active = [false; 4];
                 let idx = who.index();
                 for c in consumed {
                     let pos = self.hands[idx]
@@ -124,6 +131,7 @@ impl ReplayState {
                 target,
                 consumed,
             } => {
+                self.ippatsu_active = [false; 4];
                 let idx = who.index();
                 for c in consumed {
                     let pos = self.hands[idx]
@@ -149,6 +157,7 @@ impl ReplayState {
                 target,
                 consumed,
             } => {
+                self.ippatsu_active = [false; 4];
                 let idx = who.index();
                 for c in consumed {
                     let pos = self.hands[idx]
@@ -169,6 +178,7 @@ impl ReplayState {
                 self.last_discard = None;
             }
             KyokuEvent::Ankan { who, consumed } => {
+                self.ippatsu_active = [false; 4];
                 let idx = who.index();
                 for c in consumed {
                     let pos = self.hands[idx]
@@ -185,6 +195,7 @@ impl ReplayState {
                 });
             }
             KyokuEvent::Kakan { who, target, .. } => {
+                self.ippatsu_active = [false; 4];
                 let idx = who.index();
                 // 把已碰的刻子升级为加杠
                 let pon_idx = self.melds[idx]
@@ -218,6 +229,7 @@ impl ReplayState {
             KyokuEvent::ReachAccepted { who } => {
                 self.scores[who.index()] -= 1000;
                 self.riichi_sticks += 1;
+                self.ippatsu_active[who.index()] = true;
             }
             KyokuEvent::Dora { tile } => {
                 self.dora_indicators.push(*tile);
@@ -278,25 +290,47 @@ impl<'a> ReplayDriver<'a> {
 
 fn verify_hora(state: &ReplayState, log: &KyokuLog, config: &GameConfig) -> Vec<ReplayDiff> {
     let mut diffs = Vec::new();
-    let (winner, from, winning_tile, expected_fu, expected_han, expected_yakuman, _expected_points) =
-        match &log.result {
-            Some(KyokuResult::Hora {
-                winner,
-                from,
-                winning_tile,
-                fu,
-                han,
-                yakuman,
-                points,
-                ..
-            }) => (*winner, *from, *winning_tile, *fu, *han, *yakuman, *points),
-            _ => return diffs,
-        };
+    let (
+        winner,
+        from,
+        winning_tile,
+        expected_fu,
+        expected_han,
+        expected_yakuman,
+        _expected_points,
+        ura_markers,
+    ) = match &log.result {
+        Some(KyokuResult::Hora {
+            winner,
+            from,
+            winning_tile,
+            fu,
+            han,
+            yakuman,
+            points,
+            uradora_markers,
+            ..
+        }) => (
+            *winner,
+            *from,
+            *winning_tile,
+            *fu,
+            *han,
+            *yakuman,
+            *points,
+            uradora_markers.clone(),
+        ),
+        _ => return diffs,
+    };
 
     let widx = winner.index();
+    let is_tsumo = winner == from;
     let mut full_hand = state.hands[widx].clone();
-    // hand + winning_tile 应可分解
-    full_hand.push(winning_tile);
+    // 自摸时 winning_tile 已经在 hand (上次 Tsumo 加进去后未切),
+    // 荣和时不在 hand (是他家切的牌, 在 last_discard).
+    if !is_tsumo {
+        full_hand.push(winning_tile);
+    }
     let counts = count_by_kind(&full_hand);
     let decomps = decompose(&counts, &state.melds[widx], winning_tile.kind);
     if decomps.is_empty() {
@@ -317,7 +351,16 @@ fn verify_hora(state: &ReplayState, log: &KyokuLog, config: &GameConfig) -> Vec<
     // 取分数最高的分解
     let mut best: Option<tui_majo::score::ScoreResult> = None;
     for decomp in &decomps {
-        let ctx = build_ctx(decomp, state, log, config, winner, from, winning_tile);
+        let ctx = build_ctx(
+            decomp,
+            state,
+            log,
+            config,
+            winner,
+            from,
+            winning_tile,
+            &ura_markers,
+        );
         if let Some(res) = tui_majo::score::evaluate(&ctx, &state.melds[widx])
             && best
                 .as_ref()
@@ -345,7 +388,6 @@ fn verify_hora(state: &ReplayState, log: &KyokuLog, config: &GameConfig) -> Vec<
         });
     }
     if expected_yakuman > 0 {
-        // 役満对比 (我们 score 用 han 表示役満, e.g. 13han = 役満, 26 = 双倍)
         let actual_yakuman = actual.han / 13;
         if actual_yakuman as u8 != expected_yakuman {
             diffs.push(ReplayDiff::ResultMismatch {
@@ -356,10 +398,24 @@ fn verify_hora(state: &ReplayState, log: &KyokuLog, config: &GameConfig) -> Vec<
             });
         }
     } else if actual.han as u8 != expected_han {
+        let expected_yakus = match &log.result {
+            Some(KyokuResult::Hora { yakus, .. }) => yakus
+                .iter()
+                .map(|(n, h)| format!("{n}+{h}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            _ => String::new(),
+        };
+        let actual_yakus = actual
+            .yaku
+            .iter()
+            .map(|(y, h)| format!("{y:?}+{h}"))
+            .collect::<Vec<_>>()
+            .join(",");
         diffs.push(ReplayDiff::ResultMismatch {
             reason: format!(
-                "han 不一致: actual={} expected={}",
-                actual.han, expected_han
+                "han 不一致: actual={} expected={} | actual_yakus=[{}] expected_yakus=[{}]",
+                actual.han, expected_han, actual_yakus, expected_yakus
             ),
         });
     }
@@ -384,6 +440,7 @@ fn verify_hora(state: &ReplayState, log: &KyokuLog, config: &GameConfig) -> Vec<
     diffs
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_ctx<'a>(
     decomp: &'a Decomposition,
     state: &'a ReplayState,
@@ -392,9 +449,11 @@ fn build_ctx<'a>(
     winner: Seat,
     from: Seat,
     winning_tile: Tile,
+    ura_markers: &[Tile],
 ) -> WinContext<'a> {
     let widx = winner.index();
     let is_tsumo = winner == from;
+    // 门清: 没有副露 (暗杠不算副露 → 仍门清)
     let menzen = state.melds[widx]
         .iter()
         .all(|m| matches!(m.kind, MeldKind::Ankan { .. }));
@@ -403,9 +462,23 @@ fn build_ctx<'a>(
     let seat_wind = seat_wind_tile(winner, state.dealer);
     let round_wind_tile = round_wind_to_tile(state.round_wind);
 
-    // dora 计数: 每张 dora indicator 的 next 是 dora, 检查 winner 的牌中有几张
-    let dora_count = count_dora(state, widx, winning_tile, false);
-    let aka_count = count_aka(state, widx, winning_tile);
+    // dora 计数: 每张 dora indicator 的 next 是 dora.
+    // 自摸时 winning_tile 已在 state.hands, 荣和时不在.
+    let winning_in_hand = is_tsumo;
+    let dora_count = count_dora_by_indicators(
+        state,
+        widx,
+        winning_tile,
+        winning_in_hand,
+        &state.dora_indicators,
+    );
+    let aka_count = count_aka(state, widx, winning_tile, winning_in_hand);
+    // 立直时和才看里 dora; mjai 给的 ura_markers 已含全部 (1 + 杠 + 数).
+    let ura_dora_count = if state.riichi[widx] {
+        count_dora_by_indicators(state, widx, winning_tile, winning_in_hand, ura_markers)
+    } else {
+        0
+    };
 
     WinContext {
         decomposition: decomp,
@@ -415,7 +488,7 @@ fn build_ctx<'a>(
         is_tsumo,
         is_riichi: state.riichi[widx],
         is_double_riichi: false,
-        is_ippatsu: false,
+        is_ippatsu: state.ippatsu_active[widx],
         is_haitei: false,
         is_houtei: false,
         is_rinshan: false,
@@ -427,7 +500,7 @@ fn build_ctx<'a>(
         fully_concealed,
         dora_count,
         aka_count,
-        ura_dora_count: 0, // 我们没存 ura_dora_indicators (mjai 给在 hora 内)
+        ura_dora_count,
         config,
     }
 }
@@ -451,29 +524,43 @@ fn round_wind_to_tile(rw: RoundWind) -> TileIndex {
     }
 }
 
-/// 统计 winner 的牌 (含和牌) 中 dora 的张数.
-fn count_dora(state: &ReplayState, widx: usize, winning_tile: Tile, _ura: bool) -> u32 {
-    let dora_kinds: Vec<TileIndex> = state
-        .dora_indicators
-        .iter()
-        .map(|t| t.kind.next_dora())
-        .collect();
+/// 统计 winner 的牌 (含和牌) 中按给定 indicators 的 dora 张数.
+/// 同 kind 的 indicator 重复算 (4 个 N 切牌 → next dora 各算 4 次).
+///
+/// `winning_in_hand`: 自摸=true (winning_tile 已在 hand) / 荣和=false.
+fn count_dora_by_indicators(
+    state: &ReplayState,
+    widx: usize,
+    winning_tile: Tile,
+    winning_in_hand: bool,
+    indicators: &[Tile],
+) -> u32 {
+    let dora_kinds: Vec<TileIndex> = indicators.iter().map(|t| t.kind.next_dora()).collect();
     let mut all_tiles: Vec<Tile> = state.hands[widx].clone();
-    all_tiles.push(winning_tile);
+    if !winning_in_hand {
+        all_tiles.push(winning_tile);
+    }
     for m in &state.melds[widx] {
         for t in meld_tiles(m) {
             all_tiles.push(t);
         }
     }
-    all_tiles
-        .iter()
-        .filter(|t| dora_kinds.contains(&t.kind))
-        .count() as u32
+    let mut count = 0u32;
+    for tile in &all_tiles {
+        for dk in &dora_kinds {
+            if tile.kind == *dk {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
-fn count_aka(state: &ReplayState, widx: usize, winning_tile: Tile) -> u32 {
+fn count_aka(state: &ReplayState, widx: usize, winning_tile: Tile, winning_in_hand: bool) -> u32 {
     let mut all_tiles: Vec<Tile> = state.hands[widx].clone();
-    all_tiles.push(winning_tile);
+    if !winning_in_hand {
+        all_tiles.push(winning_tile);
+    }
     for m in &state.melds[widx] {
         for t in meld_tiles(m) {
             all_tiles.push(t);
