@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use crate::action::Action;
 use crate::config::GameConfig;
 use crate::game::{CallOptions, GameEvent, GameState, Phase, RoundResult, RyuukyokuKind};
-use crate::meld::Seat;
+use crate::meld::{MeldKind, Seat};
 use crate::player::{ai_choose_discard, default_action_on_timeout};
 use crate::score::final_ranking;
 use crate::tile::{Tile, TileIndex};
@@ -33,7 +33,7 @@ use crate::ui::Transition;
 use crate::ui::paint::{
     TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row,
     paint_discard_grid_wide, paint_double_box, paint_fill, paint_hr, paint_hr_accent,
-    paint_meld_row_tight, paint_str, paint_tile_wide,
+    paint_meld_row_tight, paint_str, paint_tile_tight, paint_tile_wide,
 };
 use crate::ui::theme::Theme;
 use crate::ui::widgets::seat_label;
@@ -75,6 +75,8 @@ pub struct GameScreenState {
     pub modal_open: bool,
     /// Modal 当前选中项.
     pub modal_selected: usize,
+    /// 进入 RoundEnd 的时刻, 用于流局后 N 秒自动推进.
+    pub round_end_at: Option<Instant>,
 }
 
 impl GameScreenState {
@@ -95,6 +97,7 @@ impl GameScreenState {
             command_buffer: String::new(),
             modal_open: false,
             modal_selected: 0,
+            round_end_at: None,
         }
     }
 
@@ -221,37 +224,54 @@ impl GameScreenState {
                 self.clear_deadline();
             }
             Phase::RoundEnd => {
-                if !self.message.contains("下一局")
-                    && let Some(result) = self.game.last_result.clone()
-                {
-                    self.message = match &result {
-                        RoundResult::Ryuukyoku { .. } => "流局. 按 N 进下一局.".to_string(),
-                        RoundResult::Win {
-                            winner,
-                            score,
-                            is_tsumo,
-                            ..
-                        } => {
-                            let mut s = format!(
-                                "{} {}: {} 番 {} 符",
-                                seat_label(*winner),
-                                if *is_tsumo { "自摸" } else { "荣和" },
-                                score.han,
-                                score.fu,
-                            );
-                            let yaku_str: Vec<String> = score
-                                .yaku
-                                .iter()
-                                .map(|(y, h)| format!("{}({})", y.name_zh(), h))
-                                .collect();
-                            if !yaku_str.is_empty() {
-                                s.push_str(" | ");
-                                s.push_str(&yaku_str.join(" "));
+                // 首次进入 RoundEnd: 设置 message + 计时起点.
+                if self.round_end_at.is_none() {
+                    self.round_end_at = Some(Instant::now());
+                    if let Some(result) = self.game.last_result.clone() {
+                        self.message = match &result {
+                            RoundResult::Ryuukyoku { .. } => {
+                                "流局. 2 秒后自动进下一局 (或按 N).".to_string()
                             }
-                            s.push_str(". 按 N 进下一局.");
-                            s
-                        }
-                    };
+                            RoundResult::Win {
+                                winner,
+                                score,
+                                is_tsumo,
+                                ..
+                            } => {
+                                let mut s = format!(
+                                    "{} {}: {} 番 {} 符",
+                                    seat_label(*winner),
+                                    if *is_tsumo { "自摸" } else { "荣和" },
+                                    score.han,
+                                    score.fu,
+                                );
+                                let yaku_str: Vec<String> = score
+                                    .yaku
+                                    .iter()
+                                    .map(|(y, h)| format!("{}({})", y.name_zh(), h))
+                                    .collect();
+                                if !yaku_str.is_empty() {
+                                    s.push_str(" | ");
+                                    s.push_str(&yaku_str.join(" "));
+                                }
+                                s.push_str(". 按 N 进下一局.");
+                                s
+                            }
+                        };
+                    }
+                }
+                // 流局自动推进 (2 秒后); 和牌等用户按 N.
+                let is_ryuukyoku =
+                    matches!(self.game.last_result, Some(RoundResult::Ryuukyoku { .. }));
+                if is_ryuukyoku
+                    && self
+                        .round_end_at
+                        .is_some_and(|t| t.elapsed().as_secs() >= 2)
+                {
+                    self.game.next_round();
+                    self.round_end_at = None;
+                    self.message.clear();
+                    self.last_step_at = Instant::now();
                 }
             }
             Phase::GameEnd => {
@@ -338,6 +358,8 @@ impl GameScreenState {
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 if self.game.phase == Phase::RoundEnd {
                     self.game.next_round();
+                    self.round_end_at = None;
+                    self.message.clear();
                     self.last_step_at = Instant::now();
                 }
             }
@@ -887,6 +909,7 @@ impl GameScreenState {
         self.paint_center_info(buf, ox, oy, &theme);
         self.paint_my_river(buf, ox, oy, &theme);
         self.paint_my_status(buf, ox, oy, &theme);
+        self.paint_my_message_and_melds(buf, ox, oy, &theme);
         self.paint_my_hand(buf, ox, oy, &theme);
         self.paint_bottom(buf, ox, oy, &theme);
 
@@ -1316,6 +1339,69 @@ impl GameScreenState {
                     .bg(theme.bg)
                     .add_modifier(Modifier::BOLD),
             );
+        }
+    }
+
+    /// row 30: 左侧 self.message (临时消息), 右侧自家副露.
+    fn paint_my_message_and_melds(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
+        // ==== 左侧 message (col 4..78) ====
+        if !self.message.is_empty() {
+            let style = match self.game.phase {
+                Phase::RoundEnd => Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD),
+                _ => Style::default().fg(theme.fg).bg(theme.bg),
+            };
+            // 截断长 message 到 col 78 (~74 cells = 37 中文 / 74 半角)
+            let mut msg = self.message.clone();
+            let max_w = 74usize;
+            while UnicodeWidthStr::width(msg.as_str()) > max_w {
+                msg.pop();
+            }
+            paint_str(buf, ox + 4, oy + 30, &msg, style);
+        }
+
+        // ==== 右侧自家副露 (col 82+) ====
+        let p = self.player();
+        if p.hand.melds.is_empty() {
+            return;
+        }
+        let mut col = ox + 82;
+        for meld in &p.hand.melds {
+            let (label, label_color) = match &meld.kind {
+                MeldKind::Chi { .. } => ("[吃]", theme.info),
+                MeldKind::Pon { .. } => ("[碰]", theme.info),
+                MeldKind::Minkan { .. } => ("[明杠]", theme.accent),
+                MeldKind::Shouminkan { .. } => ("[加杠]", theme.accent),
+                MeldKind::Ankan { .. } => ("[暗杠]", theme.dim),
+            };
+            let label_w = UnicodeWidthStr::width(label) as u16;
+            // 牌数 (吃/碰 3, 杠 4)
+            let tile_count = match &meld.kind {
+                MeldKind::Chi { .. } | MeldKind::Pon { .. } => 3u16,
+                _ => 4,
+            };
+            let total_w = label_w + tile_count * 3 + 1;
+            if col + total_w >= ox + 142 {
+                break;
+            }
+            paint_str(
+                buf,
+                col,
+                oy + 30,
+                label,
+                Style::default()
+                    .fg(label_color)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let mut tx = col + label_w;
+            for tile in meld.tiles() {
+                paint_tile_tight(buf, tx, oy + 30, Some(tile), theme, TileState::Normal);
+                tx += 3;
+            }
+            col += total_w;
         }
     }
 
