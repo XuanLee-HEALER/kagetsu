@@ -12,12 +12,7 @@ use ratatui::backend::CrosstermBackend;
 use std::io;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    init_tracing();
 
     // 显式构造 tokio runtime, 把 handle 传给 App.
     // (sync UI 主循环 + 后台异步 net 任务共存的最简方案.)
@@ -43,4 +38,30 @@ fn main() -> Result<()> {
     // 显式 drop, 触发 graceful shutdown
     drop(runtime);
     result
+}
+
+/// 初始化 tracing.
+///
+/// 默认写文件 (临时目录 / tui-majo.log), 不打到 stderr 避免污染 ratatui TUI.
+/// 默认过滤 `warn,tui_majo=info,libp2p=warn` — libp2p 各 crate 的 INFO 太冗余, 仅保留 warn+.
+/// 用户可通过 `RUST_LOG` 环境变量覆盖, 例: `RUST_LOG=debug` 或 `RUST_LOG=tui_majo=trace,libp2p=info`.
+/// 文件打不开时静默降级 (绝不 fallback 到 stderr).
+fn init_tracing() {
+    let log_path = std::env::temp_dir().join("tui-majo.log");
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,tui_majo=info,libp2p=warn"));
+
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .init();
+        tracing::info!("tui-majo started, log = {}", log_path.display());
+    }
+    // 文件打不开 → 完全静默, 不走 stderr (会撞 TUI).
 }

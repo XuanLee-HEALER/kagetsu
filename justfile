@@ -10,6 +10,11 @@
 # Windows 上用 PowerShell 7 跑 recipe (其它平台仍用默认 sh).
 set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
+# 默认 RUST_LOG: libp2p 内部 INFO 太冗余 (会撞 TUI), 仅留 warn+; 自家 tui_majo 留 info.
+# 日志默认写到 %TEMP%/tui-majo.log (见 src/bin/game.rs::init_tracing).
+# 临时覆盖: `$env:RUST_LOG="debug"; just play` (Windows) / `RUST_LOG=debug just play` (其它).
+export RUST_LOG := env_var_or_default("RUST_LOG", "warn,tui_majo=info,libp2p=warn")
+
 # 默认: 列出 recipes
 default:
     @just --list
