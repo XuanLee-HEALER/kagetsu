@@ -51,6 +51,7 @@ libp2p = { version = "0.56", features = [
     "macros",
     "serde",
     "ping",
+    "gossipsub",
 ] }
 uuid = { version = "1", features = ["v4", "serde"] }
 

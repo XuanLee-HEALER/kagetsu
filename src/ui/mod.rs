@@ -420,11 +420,15 @@ impl App {
         let room_id = format!("{}", uuid::Uuid::new_v4());
         let metadata = encode_metadata(&nickname, 1, "lobby", &room_id);
         let bootstrap = effective_bootstrap_relays(&self.local_prefs.network.bootstrap_relays);
+        let lobby_meta = crate::net::p2p::host::LobbyMeta {
+            host_nick: nickname.clone(),
+            room_id: room_id.clone(),
+        };
 
         // spawn_room 内部用 tokio::spawn, 必须在 runtime context 中调用.
         let setup_result = self.runtime.block_on(async {
             let handle = spawn_room(nickname.clone(), self.last_config.clone());
-            let listener = spawn_p2p_listener(handle.clone(), metadata, bootstrap)
+            let listener = spawn_p2p_listener(handle.clone(), metadata, bootstrap, lobby_meta)
                 .await
                 .map_err(|e| format!("P2P listener 启动失败: {e}"))?;
             let session = spawn_local_session(handle.clone(), nickname.clone())

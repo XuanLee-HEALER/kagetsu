@@ -12,16 +12,25 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use libp2p::{
-    Multiaddr, PeerId, Swarm, autonat, identify, multiaddr::Protocol, request_response,
+    Multiaddr, PeerId, Swarm, autonat, gossipsub, identify, multiaddr::Protocol, request_response,
     swarm::SwarmEvent,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::net::p2p::behaviour::{Ack, P2pBehaviour, P2pBehaviourEvent};
+use crate::net::p2p::behaviour::{
+    Ack, LOBBY_TOPIC, LobbyAnnouncement, P2pBehaviour, P2pBehaviourEvent,
+};
 use crate::net::p2p::swarm::{build_swarm, new_keypair};
 use crate::net::protocol::{ClientMsg, ServerMsg};
 use crate::net::room::{RoomCmd, RoomHandle};
+
+/// 房主端定期 publish 到 gossipsub LOBBY_TOPIC 的元数据.
+#[derive(Debug, Clone)]
+pub struct LobbyMeta {
+    pub host_nick: String,
+    pub room_id: String,
+}
 
 #[derive(Debug, Error)]
 pub enum ListenerError {
@@ -44,12 +53,19 @@ pub async fn spawn_p2p_listener(
     handle: RoomHandle,
     room_metadata: String,
     bootstrap_relays: Vec<Multiaddr>,
+    lobby_meta: LobbyMeta,
 ) -> Result<HostHandle, ListenerError> {
     let kp = new_keypair();
     let local_peer_id = PeerId::from(&kp.public());
 
     let mut swarm =
         build_swarm(kp, room_metadata).map_err(|e| ListenerError::Swarm(e.to_string()))?;
+
+    // 订阅 lobby topic, 让自己也参与 mesh 传播 (帮助小型网络下消息扩散).
+    let topic = gossipsub::IdentTopic::new(LOBBY_TOPIC);
+    if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
+        tracing::warn!("订阅 lobby topic 失败: {e}");
+    }
 
     swarm
         .listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap())
@@ -119,6 +135,8 @@ pub async fn spawn_p2p_listener(
         event_tx,
         shutdown_rx,
         pending_circuit_listens,
+        lobby_meta,
+        local_peer_id,
     ));
 
     Ok(HostHandle {
@@ -191,11 +209,18 @@ async fn host_swarm_task(
     event_tx: mpsc::UnboundedSender<HostEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
     mut pending_circuit_listens: HashMap<PeerId, Multiaddr>,
+    lobby_meta: LobbyMeta,
+    local_peer_id: PeerId,
 ) {
     let mut peers: HashMap<PeerId, PeerSlot> = HashMap::new();
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<(PeerId, ServerMsg)>();
-    // pending: 还没收到 Join 之前的 peer (其入站消息会被立刻处理 Join).
-    // 已 Join 的 peer 直接走 RoomCmd::PlayerMsg.
+    // 累积全部 listen addr 用于 publish (含 LAN/公网/circuit).
+    let mut my_listen_addrs: Vec<Multiaddr> = Vec::new();
+
+    // 每 5 秒 publish lobby announcement.
+    let mut publish_interval = tokio::time::interval(Duration::from_secs(5));
+    publish_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let topic = gossipsub::IdentTopic::new(LOBBY_TOPIC);
 
     loop {
         tokio::select! {
@@ -209,7 +234,20 @@ async fn host_swarm_task(
                     swarm.behaviour_mut().rr_s2c.send_request(&peer_id, msg);
                 }
             }
+            _ = publish_interval.tick() => {
+                publish_lobby(&mut swarm, &topic, &lobby_meta, local_peer_id, &my_listen_addrs);
+            }
             event = swarm.select_next_some() => {
+                if let SwarmEvent::NewListenAddr { ref address, .. } = event {
+                    let full = if address.iter().any(|p| matches!(p, Protocol::P2p(_))) {
+                        address.clone()
+                    } else {
+                        address.clone().with(Protocol::P2p(local_peer_id))
+                    };
+                    if !my_listen_addrs.contains(&full) {
+                        my_listen_addrs.push(full);
+                    }
+                }
                 handle_swarm_event(
                     &mut swarm,
                     event,
@@ -220,6 +258,51 @@ async fn host_swarm_task(
                     &mut pending_circuit_listens,
                 ).await;
             }
+        }
+    }
+}
+
+/// 把当前房间状态序列化为 JSON 后通过 gossipsub publish 到 LOBBY_TOPIC.
+/// 失败 (没 mesh peer / 序列化错) 仅 warn 不致命.
+fn publish_lobby(
+    swarm: &mut Swarm<P2pBehaviour>,
+    topic: &gossipsub::IdentTopic,
+    meta: &LobbyMeta,
+    local_peer_id: PeerId,
+    listen_addrs: &[Multiaddr],
+) {
+    if listen_addrs.is_empty() {
+        return;
+    }
+    let announcement = LobbyAnnouncement {
+        schema_version: 1,
+        host_peer_id: local_peer_id.to_string(),
+        host_nick: meta.host_nick.clone(),
+        players: 1, // TODO M3.E: 跟 RoomActor 同步真实人数
+        lifecycle: "lobby".into(),
+        room_id: meta.room_id.clone(),
+        multiaddrs: listen_addrs.iter().map(|a| a.to_string()).collect(),
+        timestamp_unix_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
+    };
+    let payload = match serde_json::to_vec(&announcement) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("序列化 lobby announcement 失败: {e}");
+            return;
+        }
+    };
+    match swarm
+        .behaviour_mut()
+        .gossipsub
+        .publish(topic.clone(), payload)
+    {
+        Ok(_) => tracing::debug!("published lobby announcement, addrs={}", listen_addrs.len()),
+        Err(e) => {
+            // 启动早期 mesh 还没建立, NoPeers 错误正常; 其它也只 debug 不阻塞.
+            tracing::debug!("publish lobby pending: {e}");
         }
     }
 }
@@ -475,6 +558,10 @@ mod tests {
             handle.clone(),
             "host_nick=Host;players=1;lifecycle=lobby;room_id=t".into(),
             vec![], // 单元测试不连 bootstrap relay
+            LobbyMeta {
+                host_nick: "Host".into(),
+                room_id: "t".into(),
+            },
         )
         .await
         .expect("listener");

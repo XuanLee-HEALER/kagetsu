@@ -17,6 +17,7 @@ pub fn build_swarm(
 ) -> Result<Swarm<P2pBehaviour>, Box<dyn std::error::Error + Send + Sync>> {
     let local_pubkey = keypair.public();
     let local_peer_id = PeerId::from(&local_pubkey);
+    let keypair_for_gossipsub = keypair.clone();
 
     let swarm = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
@@ -31,6 +32,7 @@ pub fn build_swarm(
             P2pBehaviour::new(
                 local_peer_id,
                 local_pubkey.clone(),
+                keypair_for_gossipsub,
                 relay_client,
                 agent_metadata,
             )

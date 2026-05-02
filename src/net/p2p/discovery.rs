@@ -1,21 +1,27 @@
-//! 房间发现 — libp2p mDNS Behaviour + identify 协议.
+//! 房间发现 — 两路:
+//! 1. **LAN mDNS**: 同 WiFi 用 libp2p mDNS Behaviour 自动发现 peer, 然后通过
+//!    identify 协议拿房间 metadata (agent_version 携带 host_nick=...;players=...).
+//! 2. **公网 gossipsub**: 订阅 LOBBY_TOPIC, 房主每 5 秒 publish LobbyAnnouncement,
+//!    大厅累积 + 30 秒过期淘汰.
 //!
-//! 房间元数据通过 identify 的 `agent_version` 字段携带:
-//! `tui-majo/host_nick=Alice;players=2;lifecycle=lobby;room_id=xxxx`
+//! 两路结果合并到同一个 RoomEntry 列表, UI 不区分.
 //!
-//! [`RoomBrowser`] 由 UI 屏 own. 内部 spawn 一个 swarm task 跑 mDNS 浏览 +
-//! 自动 dial 发现的 peer 触发 identify exchange. UI 屏每帧 [`Self::poll`]
-//! 拉空内部事件并更新房间列表.
+//! [`RoomBrowser`] 由 UI 屏 own. 内部 spawn 一个 swarm task 跑两路发现.
+//! UI 屏每帧 [`Self::poll`] 拉空内部事件并更新房间列表.
 
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
-use libp2p::{Multiaddr, PeerId, identify, mdns, swarm::SwarmEvent};
+use libp2p::{Multiaddr, PeerId, gossipsub, identify, mdns, swarm::SwarmEvent};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
-use super::behaviour::{AGENT_PREFIX, P2pBehaviourEvent};
+use super::behaviour::{AGENT_PREFIX, LOBBY_TOPIC, LobbyAnnouncement, P2pBehaviourEvent};
 use super::swarm::{build_swarm, new_keypair};
+
+/// gossipsub announcement 超过这个时间没刷新视为下线 (从 rooms() 中过滤).
+const LOBBY_ENTRY_TTL_MS: i64 = 30_000;
 
 /// 发现到的一个房间. 给 UI 显示用.
 #[derive(Debug, Clone)]
@@ -67,14 +73,26 @@ struct RoomMetadata {
     players: u8,
     state: String,
     room_id: String,
+    /// gossipsub announcement 路径填; mDNS 路径填 0 (永不过期).
+    last_seen_unix_ms: i64,
 }
 
 /// Browser swarm task → UI 的事件.
 #[derive(Debug, Clone)]
 pub enum BrowserEvent {
-    PeerFound { peer: PeerId, addr: Multiaddr },
-    PeerLost { peer: PeerId },
-    Identified { peer: PeerId, agent_version: String },
+    PeerFound {
+        peer: PeerId,
+        addr: Multiaddr,
+    },
+    PeerLost {
+        peer: PeerId,
+    },
+    Identified {
+        peer: PeerId,
+        agent_version: String,
+    },
+    /// gossipsub 收到的房间 announcement.
+    LobbyAnnouncement(LobbyAnnouncement),
 }
 
 #[derive(Debug, Error)]
@@ -107,6 +125,12 @@ impl RoomBrowser {
             tracing::warn!("browser listen QUIC 失败: {e}");
         }
 
+        // 订阅 lobby topic 让 gossipsub 路径发现房间.
+        let topic = gossipsub::IdentTopic::new(LOBBY_TOPIC);
+        if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
+            tracing::warn!("browser 订阅 lobby topic 失败: {e}");
+        }
+
         let (event_tx, event_rx) = mpsc::unbounded_channel::<BrowserEvent>();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
@@ -127,6 +151,23 @@ impl RoomBrowser {
                                     peer: peer_id,
                                     agent_version: info.agent_version,
                                 });
+                            }
+                            SwarmEvent::Behaviour(P2pBehaviourEvent::Gossipsub(
+                                gossipsub::Event::Message { message, .. },
+                            )) => {
+                                if message.topic.as_str() == LOBBY_TOPIC {
+                                    match serde_json::from_slice::<LobbyAnnouncement>(&message.data) {
+                                        Ok(ann) => {
+                                            let _ = event_tx
+                                                .send(BrowserEvent::LobbyAnnouncement(ann));
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!(
+                                                "lobby announcement 解析失败: {e}"
+                                            );
+                                        }
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -152,14 +193,22 @@ impl RoomBrowser {
         }
     }
 
-    /// 当前可显示房间.
+    /// 当前可显示房间. gossipsub 路径填了 last_seen_unix_ms 的, 超过 TTL 则过滤掉.
     pub fn rooms(&self) -> Vec<RoomEntry> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
         let mut out: Vec<RoomEntry> = self
             .state
             .addrs
             .iter()
             .filter_map(|(peer, addrs)| {
                 let md = self.state.metadata.get(peer)?;
+                // gossipsub 路径 (last_seen_unix_ms > 0) 过期检查.
+                if md.last_seen_unix_ms > 0 && now_ms - md.last_seen_unix_ms > LOBBY_ENTRY_TTL_MS {
+                    return None;
+                }
                 Some(RoomEntry {
                     peer_id: *peer,
                     addrs: addrs.clone(),
@@ -221,6 +270,30 @@ impl BrowserState {
                 if let Some(md) = parse_metadata(&agent_version) {
                     self.metadata.insert(peer, md);
                 }
+            }
+            BrowserEvent::LobbyAnnouncement(ann) => {
+                let Ok(peer) = ann.host_peer_id.parse::<PeerId>() else {
+                    return;
+                };
+                // 把 announcement 含的 multiaddrs 全部加进 addrs 列表.
+                let list = self.addrs.entry(peer).or_default();
+                for s in &ann.multiaddrs {
+                    if let Ok(addr) = s.parse::<Multiaddr>()
+                        && !list.contains(&addr)
+                    {
+                        list.push(addr);
+                    }
+                }
+                self.metadata.insert(
+                    peer,
+                    RoomMetadata {
+                        host_nick: ann.host_nick,
+                        players: ann.players,
+                        state: ann.lifecycle,
+                        room_id: ann.room_id,
+                        last_seen_unix_ms: ann.timestamp_unix_ms,
+                    },
+                );
             }
         }
     }
