@@ -39,16 +39,19 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use libp2p::{
-    Multiaddr, PeerId, SwarmBuilder, identify, identity, multiaddr::Protocol, ping, relay,
-    swarm::NetworkBehaviour, swarm::SwarmEvent,
+    Multiaddr, PeerId, SwarmBuilder, gossipsub, identify, identity, multiaddr::Protocol, ping,
+    relay, swarm::NetworkBehaviour, swarm::SwarmEvent,
 };
+use tui_majo::net::p2p::behaviour::LOBBY_TOPIC;
 
 /// relay 节点的 NetworkBehaviour: 只跑必要协议.
+/// gossipsub 作 lobby mesh 桥接节点 (relay 不 publish, 只订阅参与 mesh forward).
 #[derive(NetworkBehaviour)]
 struct RelayBehaviour {
     identify: identify::Behaviour,
     relay: relay::Behaviour,
     ping: ping::Behaviour,
+    gossipsub: gossipsub::Behaviour,
 }
 
 const DEFAULT_KEY_FILE: &str = "tui-majo-relay.key";
@@ -70,6 +73,7 @@ async fn main() -> Result<()> {
     let keypair = load_or_create_keypair(&key_file)?;
     let local_peer_id = PeerId::from(&keypair.public());
 
+    let kp_for_gs = keypair.clone();
     let mut swarm = SwarmBuilder::with_existing_identity(keypair.clone())
         .with_tokio()
         .with_tcp(
@@ -78,16 +82,38 @@ async fn main() -> Result<()> {
             libp2p::yamux::Config::default,
         )?
         .with_quic()
-        .with_behaviour(|key| RelayBehaviour {
-            identify: identify::Behaviour::new(
-                identify::Config::new("/tui-majo/id/1".into(), key.public())
-                    .with_agent_version("tui-majo-relay/1".into()),
-            ),
-            relay: relay::Behaviour::new(local_peer_id, relay::Config::default()),
-            ping: ping::Behaviour::new(ping::Config::default()),
+        .with_behaviour(|key| {
+            // gossipsub config 跟 client (lib P2pBehaviour) 保持一致, 否则 mesh 不通.
+            let gs_config = gossipsub::ConfigBuilder::default()
+                .heartbeat_interval(Duration::from_secs(1))
+                .validation_mode(gossipsub::ValidationMode::Strict)
+                .build()
+                .expect("valid gossipsub config");
+            let gs = gossipsub::Behaviour::new(
+                gossipsub::MessageAuthenticity::Signed(kp_for_gs),
+                gs_config,
+            )
+            .expect("gossipsub init");
+            RelayBehaviour {
+                identify: identify::Behaviour::new(
+                    identify::Config::new("/tui-majo/id/1".into(), key.public())
+                        .with_agent_version("tui-majo-relay/1".into()),
+                ),
+                relay: relay::Behaviour::new(local_peer_id, relay::Config::default()),
+                ping: ping::Behaviour::new(ping::Config::default()),
+                gossipsub: gs,
+            }
         })?
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
+
+    // 订阅 lobby topic 让 relay 参与 mesh forward (不 publish, 只转发).
+    let topic = gossipsub::IdentTopic::new(LOBBY_TOPIC);
+    if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
+        tracing::warn!("relay 订阅 lobby topic 失败: {e}");
+    } else {
+        tracing::info!("relay subscribed to {LOBBY_TOPIC} as mesh bridge");
+    }
 
     swarm.listen_on(format!("/ip4/0.0.0.0/udp/{port}/quic-v1").parse()?)?;
     swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{port}").parse()?)?;
@@ -144,6 +170,25 @@ async fn main() -> Result<()> {
             }
             SwarmEvent::Behaviour(RelayBehaviourEvent::Ping(e)) => {
                 tracing::trace!("ping: {e:?}");
+            }
+            SwarmEvent::Behaviour(RelayBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                propagation_source,
+                message,
+                ..
+            })) => {
+                tracing::debug!(
+                    "gossipsub forward: from={propagation_source} topic={} bytes={}",
+                    message.topic,
+                    message.data.len()
+                );
+            }
+            SwarmEvent::Behaviour(RelayBehaviourEvent::Gossipsub(
+                gossipsub::Event::Subscribed { peer_id, topic },
+            )) => {
+                tracing::info!("peer subscribed: {peer_id} → {topic}");
+            }
+            SwarmEvent::Behaviour(RelayBehaviourEvent::Gossipsub(_)) => {
+                // 其它 gossipsub 事件不消费.
             }
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 tracing::info!("peer connected: {peer_id}");
