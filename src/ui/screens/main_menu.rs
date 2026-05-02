@@ -46,7 +46,7 @@ impl MainMenuState {
         }
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect) {
+    pub fn render(&self, f: &mut Frame, area: Rect, startup_banner: Option<&str>) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" tui-majo · 主菜单 ")
@@ -63,6 +63,22 @@ impl MainMenuState {
                 .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
+        // 启动一次性 banner (prefs schema 升级 / 损坏修复 / 不可访问提示).
+        // 任意按键后 App 会清掉这个 banner.
+        if let Some(msg) = startup_banner {
+            lines.push(Line::from(Span::styled(
+                format!("⚠ {}", msg),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                "(按任意键关闭)",
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(""));
+        }
         for (i, item) in ITEMS.iter().enumerate() {
             let prefix = if i == self.selected { "▶ " } else { "  " };
             let mut style = Style::default();

@@ -20,6 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::time::{Duration, Instant};
 
+use crate::config::LoadResult;
 use crate::config::LocalPrefs;
 use crate::engine::rules::GameRules;
 use crate::engine::score::Ranking;
@@ -105,20 +106,26 @@ pub struct App {
     pub host_listener: Option<crate::net::p2p::host::HostHandle>,
     /// 当前正在显示的 ConfirmModal (含待执行 action). 拦截一切按键直到关闭.
     pub pending_confirm: Option<(ConfirmModal, ConfirmAction)>,
+    /// 启动时 prefs 加载状态产生的一次性 banner (主菜单显示).
+    /// 第一次按键后清掉, 不再显示.
+    pub startup_banner: Option<String>,
 }
 
 impl App {
     pub fn new(runtime: tokio::runtime::Handle) -> Self {
+        let LoadResult { prefs, status } = LocalPrefs::load();
+        let startup_banner = status.user_visible_banner();
         Self {
             screen: Screen::MainMenu(MainMenuState::new()),
             running: true,
             last_config: GameRules::default(),
             last_seed_choice: SeedChoice::Random,
-            local_prefs: LocalPrefs::load(),
+            local_prefs: prefs,
             runtime,
             host_dial_addr: None,
             host_listener: None,
             pending_confirm: None,
+            startup_banner,
         }
     }
 
@@ -172,6 +179,8 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<Transition> {
+        // 第一次任何按键后清启动 banner.
+        self.startup_banner = None;
         // pending_confirm 优先吃所有按键.
         if let Some((modal, action)) = self.pending_confirm.as_mut() {
             if let Some(choice) = modal.handle_key(key) {
@@ -483,7 +492,7 @@ impl App {
 
     fn render_main(&self, f: &mut ratatui::Frame, area: Rect) {
         match &self.screen {
-            Screen::MainMenu(s) => s.render(f, area),
+            Screen::MainMenu(s) => s.render(f, area, self.startup_banner.as_deref()),
             Screen::Config(s) => s.render(f, area),
             Screen::InGame(s) => s.render(f, area),
             Screen::GameOver(s) => s.render(f, area),

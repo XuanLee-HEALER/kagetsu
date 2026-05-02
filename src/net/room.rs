@@ -1270,7 +1270,8 @@ mod tests {
     /// 然后 host 切牌, AI 应继续接管直到下一次 host turn.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ai_drives_when_seat_is_ai() {
-        let handle = spawn_room("h".into(), GameRules::default());
+        // 缩短 call_window 到 100ms 加快测试 (默认 5 秒 × 4 次摸切 = 20s 易 flaky).
+        let handle = spawn_room_advanced("h".into(), GameRules::default(), None, Some(100));
         let (host_id, _, mut host_rx) = join_player(&handle, "host").await;
         handle
             .tx
