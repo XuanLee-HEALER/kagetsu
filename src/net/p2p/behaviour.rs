@@ -18,6 +18,7 @@ use libp2p::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::net::p2p::region::Region;
 use crate::net::protocol::{ClientMsg, ServerMsg};
 
 /// 协议名: client → server.
@@ -73,6 +74,9 @@ pub struct LobbyAnnouncement {
     pub multiaddrs: Vec<String>,
     /// unix 毫秒, 用于过期判断 (大厅超过 30 秒没收到新 announcement 视为下线).
     pub timestamp_unix_ms: i64,
+    /// 房间地理区域 (M3.E). 老 schema 的 announcement 没此字段时 default = Unknown.
+    #[serde(default)]
+    pub region: Region,
 }
 
 /// Tier 2 玩家 relay 贡献池公告.

@@ -394,7 +394,11 @@ impl App {
                 let bootstrap = crate::net::p2p::bootstrap::effective_bootstrap_relays(
                     &self.local_prefs.network.bootstrap_relays,
                 );
-                self.screen = Screen::OnlineLobby(OnlineLobbyState::new(&self.runtime, bootstrap));
+                self.screen = Screen::OnlineLobby(OnlineLobbyState::new(
+                    &self.runtime,
+                    bootstrap,
+                    self.local_prefs.network.region,
+                ));
             }
             Transition::CreateOnlineRoom { nickname } => {
                 self.create_online_room(nickname);
@@ -444,6 +448,7 @@ impl App {
         let lobby_meta = crate::net::p2p::host::LobbyMeta {
             host_nick: nickname.clone(),
             room_id: room_id.clone(),
+            region: self.local_prefs.network.region,
         };
 
         // spawn_room 内部用 tokio::spawn, 必须在 runtime context 中调用.
@@ -467,6 +472,7 @@ impl App {
                 self.screen = Screen::OnlineLobby(OnlineLobbyState::with_message(
                     &self.runtime,
                     bootstrap,
+                    self.local_prefs.network.region,
                     format!("创建失败: {e}"),
                 ));
                 return;
@@ -504,6 +510,7 @@ impl App {
                 self.screen = Screen::OnlineLobby(OnlineLobbyState::with_message(
                     &self.runtime,
                     bootstrap,
+                    self.local_prefs.network.region,
                     format!("地址格式错误: {e}"),
                 ));
                 return;
@@ -532,6 +539,7 @@ impl App {
                 self.screen = Screen::OnlineLobby(OnlineLobbyState::with_message(
                     &self.runtime,
                     bootstrap,
+                    self.local_prefs.network.region,
                     format!("加入失败: {e}"),
                 ));
             }

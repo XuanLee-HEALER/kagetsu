@@ -50,6 +50,10 @@ pub struct NetworkPrefs {
     /// 用户自定义 bootstrap relay 列表 (multiaddr 字符串).
     /// 非空时覆盖 [`crate::net::p2p::bootstrap::DEFAULT_BOOTSTRAP_RELAYS`].
     pub bootstrap_relays: Vec<String>,
+    /// 用户所在 / 偏好的房间地理区域 (M3.E).
+    /// 创建房间时填进 LobbyAnnouncement, 大厅过滤器据此筛选房间.
+    /// 默认 [`crate::net::p2p::Region::Unknown`] = 不过滤, 显示所有房间.
+    pub region: crate::net::p2p::Region,
 }
 
 /// 启动加载结果.

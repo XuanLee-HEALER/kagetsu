@@ -35,8 +35,10 @@ pub mod bootstrap;
 pub mod discovery;
 pub mod host;
 pub mod join;
+pub mod region;
 pub mod swarm;
 
 pub use discovery::{RoomBrowser, RoomEntry};
 pub use host::spawn_p2p_listener;
 pub use join::join_remote;
+pub use region::Region;

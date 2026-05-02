@@ -21,6 +21,7 @@ use super::behaviour::{
     AGENT_PREFIX, LOBBY_TOPIC, LobbyAnnouncement, P2pBehaviourEvent, RELAYS_TOPIC,
     RelayAnnouncement,
 };
+use super::region::Region;
 use super::swarm::{build_swarm, new_keypair};
 
 /// gossipsub announcement 超过这个时间没刷新视为下线 (从 rooms() / relays() 中过滤).
@@ -37,6 +38,8 @@ pub struct RoomEntry {
     /// `lobby` / `in_game` 等. 字段名 `state` 兼容旧 UI 调用.
     pub state: String,
     pub room_id: String,
+    /// 房间地理区域 (M3.E). LAN/mDNS 路径下发现的房间默认 Unknown.
+    pub region: Region,
 }
 
 impl RoomEntry {
@@ -87,6 +90,8 @@ struct RoomMetadata {
     room_id: String,
     /// gossipsub announcement 路径填; mDNS 路径填 0 (永不过期).
     last_seen_unix_ms: i64,
+    /// 房间地理区域 (M3.E). mDNS 路径目前不携带 region, 默认 Unknown.
+    region: Region,
 }
 
 /// Browser swarm task → UI 的事件.
@@ -264,6 +269,7 @@ impl RoomBrowser {
                     players: md.players,
                     state: md.state.clone(),
                     room_id: md.room_id.clone(),
+                    region: md.region,
                 })
             })
             .collect();
@@ -390,6 +396,7 @@ impl BrowserState {
                         state: ann.lifecycle,
                         room_id: ann.room_id,
                         last_seen_unix_ms: ann.timestamp_unix_ms,
+                        region: ann.region,
                     },
                 );
             }

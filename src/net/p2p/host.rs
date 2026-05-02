@@ -31,6 +31,8 @@ use crate::net::room::{RoomCmd, RoomHandle};
 pub struct LobbyMeta {
     pub host_nick: String,
     pub room_id: String,
+    /// 房间地理区域 (M3.E). 大厅根据用户偏好 region 过滤展示.
+    pub region: crate::net::p2p::Region,
 }
 
 #[derive(Debug, Error)]
@@ -329,6 +331,7 @@ fn publish_lobby(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0),
+        region: meta.region,
     };
     let payload = match serde_json::to_vec(&announcement) {
         Ok(b) => b,
@@ -647,6 +650,7 @@ mod tests {
             LobbyMeta {
                 host_nick: "Host".into(),
                 room_id: "t".into(),
+                region: crate::net::p2p::Region::Unknown,
             },
         )
         .await

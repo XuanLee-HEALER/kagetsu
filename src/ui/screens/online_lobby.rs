@@ -12,6 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::net::p2p::Region;
 use crate::net::p2p::discovery::{RoomBrowser, RoomEntry};
 use crate::ui::Transition;
 
@@ -31,10 +32,15 @@ pub struct OnlineLobbyState {
     pub message: String,
     /// mDNS browser, 启动失败时 None (e.g. 容器/受限网络).
     pub browser: Option<RoomBrowser>,
-    /// 当前发现到的房间列表 (每帧 poll 更新).
+    /// 当前发现到的房间列表, 已按 region_filter 过滤 (每帧 poll 更新).
     pub discovered: Vec<RoomEntry>,
     /// discovered 列表里选中行 (focus=FOCUS_DISCOVERED 时生效).
     pub discovered_selected: usize,
+    /// 大厅 region 过滤器 (M3.E). 初值取自 prefs.network.region;
+    /// 'R' 键 cycle 切换. Unknown 表示不过滤显示全部.
+    pub region_filter: Region,
+    /// 过滤前总房间数 (UI 显示 "3/5" 用).
+    pub discovered_total: usize,
 }
 
 /// 给一个发现到的房间打 tag: [LAN] / [中转] / [远程].
@@ -80,8 +86,19 @@ fn room_addr_tag(room: &RoomEntry) -> &'static str {
     }
 }
 
+/// 'R' 键切换时, 按 Region::all() 顺序循环到下一个.
+fn next_region(current: Region) -> Region {
+    let all = Region::all();
+    let pos = all.iter().position(|r| *r == current).unwrap_or(0);
+    all[(pos + 1) % all.len()]
+}
+
 impl OnlineLobbyState {
-    pub fn new(runtime: &tokio::runtime::Handle, bootstrap_relays: Vec<libp2p::Multiaddr>) -> Self {
+    pub fn new(
+        runtime: &tokio::runtime::Handle,
+        bootstrap_relays: Vec<libp2p::Multiaddr>,
+        region_filter: Region,
+    ) -> Self {
         let browser = RoomBrowser::start(runtime, bootstrap_relays).ok();
         Self {
             nickname: String::new(),
@@ -91,25 +108,33 @@ impl OnlineLobbyState {
             browser,
             discovered: Vec::new(),
             discovered_selected: 0,
+            region_filter,
+            discovered_total: 0,
         }
     }
 
     pub fn with_message(
         runtime: &tokio::runtime::Handle,
         bootstrap_relays: Vec<libp2p::Multiaddr>,
+        region_filter: Region,
         message: String,
     ) -> Self {
         Self {
             message,
-            ..Self::new(runtime, bootstrap_relays)
+            ..Self::new(runtime, bootstrap_relays, region_filter)
         }
     }
 
-    /// App.tick 调用: 让 browser poll mDNS 事件.
+    /// App.tick 调用: 让 browser poll mDNS 事件, 按 region_filter 过滤后赋给 discovered.
     pub fn advance(&mut self) -> Option<Transition> {
         if let Some(b) = self.browser.as_mut() {
             b.poll();
-            self.discovered = b.rooms();
+            let all = b.rooms();
+            self.discovered_total = all.len();
+            self.discovered = all
+                .into_iter()
+                .filter(|r| Region::matches_filter(r.region, self.region_filter))
+                .collect();
             if self.discovered_selected >= self.discovered.len() && !self.discovered.is_empty() {
                 self.discovered_selected = self.discovered.len() - 1;
             }
@@ -135,6 +160,14 @@ impl OnlineLobbyState {
             }
         }
         match key.code {
+            // 'R' / 'r': cycle 切换 region 过滤器 (任意 focus 下都生效, 但
+            // 排除 nickname/addr 输入焦点免抢字符输入).
+            KeyCode::Char('r') | KeyCode::Char('R')
+                if !matches!(self.focus, FOCUS_NICKNAME | FOCUS_ADDR) =>
+            {
+                self.region_filter = next_region(self.region_filter);
+                None
+            }
             KeyCode::Tab | KeyCode::Down => {
                 self.focus = (self.focus + 1) % ITEM_COUNT;
                 None
@@ -301,8 +334,19 @@ impl OnlineLobbyState {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         };
+        let filter_label = if matches!(self.region_filter, Region::Unknown) {
+            "全部".to_string()
+        } else {
+            self.region_filter.short_tag().to_string()
+        };
         lines.push(Line::from(Span::styled(
-            format!("{}发现的房间 ({})", header_prefix, self.discovered.len()),
+            format!(
+                "{}发现的房间 ({}/{}) · 筛选: {} [R 切换]",
+                header_prefix,
+                self.discovered.len(),
+                self.discovered_total,
+                filter_label,
+            ),
             header_style,
         )));
         if self.browser.is_none() {
@@ -331,11 +375,13 @@ impl OnlineLobbyState {
                     Style::default().fg(Color::White)
                 };
                 let tag = room_addr_tag(room);
+                let region_tag = room.region.short_tag();
                 lines.push(Line::from(Span::styled(
                     format!(
-                        "{} [{}] {} @ {} · {}/4 · {}",
+                        "{} [{}][{}] {} @ {} · {}/4 · {}",
                         cursor,
                         tag,
+                        region_tag,
                         room.host_nick,
                         room.addr(),
                         room.players,
