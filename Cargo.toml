@@ -54,6 +54,17 @@ libp2p = { version = "0.56", features = [
     "gossipsub",
 ] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# Mental Poker (M4 零信任模式) — 自实现, embed 在 src/mental_poker/.
+# arkworks 0.5 提供 ECC + Fr/Fq scalar/base field 算术. 选 BLS12-381 G1 作普通
+# ECC 群 (不用 pairing), 256-bit Fr 标量域, 安全性 + 生态最广.
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-std = "0.5"
+ark-serialize = { version = "0.5", features = ["derive"] }
+ark-bls12-381 = "0.5"
+# Mental Poker Sigma 协议的 Fiat-Shamir transcript (challenge = hash). sha2 已被
+# libp2p 间接引入, 直接拿来用免增加版本碎片.
+sha2 = "0.10"
 
 [dev-dependencies]
 pretty_assertions = "1"
