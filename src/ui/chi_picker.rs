@@ -113,7 +113,7 @@ impl ChiPicker {
             };
             paint_str(buf, mx + 2, row, &prefix, prefix_style);
             // 3 张牌排序展示 (target + 2 张本家, 按 kind asc).
-            let mut tiles = vec![self.target, opts[0], opts[1]];
+            let mut tiles = [self.target, opts[0], opts[1]];
             tiles.sort_by_key(|t| (t.kind.0, !t.red));
             let tiles_x = mx + 6;
             for (j, t) in tiles.iter().enumerate() {

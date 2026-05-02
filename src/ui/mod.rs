@@ -223,16 +223,13 @@ impl App {
             }
             return None;
         }
-        // 大写 T: 全局切换主题 (避免与 InGame 的小写 t 冲突).
-        // COMMAND 模式下放行让命令缓冲区接受字符.
-        if key.code == KeyCode::Char('T') && !self.is_in_command_mode() {
+        // 大写 T: 全局切换主题.
+        if key.code == KeyCode::Char('T') {
             self.cycle_theme();
             return None;
         }
         // 全局快捷键: Q 弹确认 modal (主菜单除外, 直接退).
-        // COMMAND 模式下当字符.
-        if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) && !self.is_in_command_mode()
-        {
+        if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
             return Some(Transition::RequestConfirm {
                 modal: Box::new(ConfirmModal::new("退出程序", "确定退出 tui-majo?")),
                 action: ConfirmAction::Quit,
@@ -240,7 +237,7 @@ impl App {
         }
         // Esc: 主菜单不响应; Config/GameOver 直接回主菜单 (无副作用);
         // 其它 4 屏派发给屏自己 (屏决定要不要弹 confirm).
-        if key.code == KeyCode::Esc && !self.is_in_command_mode() && !self.is_in_modal() {
+        if key.code == KeyCode::Esc && !self.is_in_modal() {
             return match &mut self.screen {
                 Screen::MainMenu(_) => None,
                 Screen::Config(_) | Screen::GameOver(_) => Some(Transition::EnterMainMenu),
@@ -280,14 +277,6 @@ impl App {
                 }
                 Transition::EnterMainMenu
             }
-        }
-    }
-
-    fn is_in_command_mode(&self) -> bool {
-        if let Screen::InGame(s) = &self.screen {
-            s.is_command_mode()
-        } else {
-            false
         }
     }
 
