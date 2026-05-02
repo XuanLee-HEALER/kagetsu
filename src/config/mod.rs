@@ -54,6 +54,8 @@ pub struct NetworkPrefs {
     /// 创建房间时填进 LobbyAnnouncement, 大厅过滤器据此筛选房间.
     /// 默认 [`crate::net::p2p::Region::Unknown`] = 不过滤, 显示所有房间.
     pub region: crate::net::p2p::Region,
+    /// 创建房间时默认信任模式 (M4.B). 默认 Standard (跟现状兼容).
+    pub default_room_mode: crate::net::p2p::RoomMode,
 }
 
 /// 启动加载结果.

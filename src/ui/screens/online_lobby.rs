@@ -12,8 +12,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::net::p2p::Region;
 use crate::net::p2p::discovery::{RoomBrowser, RoomEntry};
+use crate::net::p2p::{Region, RoomMode};
 use crate::ui::Transition;
 
 /// 大厅项目焦点.
@@ -376,12 +376,14 @@ impl OnlineLobbyState {
                 };
                 let tag = room_addr_tag(room);
                 let region_tag = room.region.short_tag();
+                let mode_tag = room.mode.short_tag();
                 lines.push(Line::from(Span::styled(
                     format!(
-                        "{} [{}][{}] {} @ {} · {}/4 · {}",
+                        "{} [{}][{}][{}] {} @ {} · {}/4 · {}",
                         cursor,
                         tag,
                         region_tag,
+                        mode_tag,
                         room.host_nick,
                         room.addr(),
                         room.players,

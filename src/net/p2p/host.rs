@@ -33,6 +33,8 @@ pub struct LobbyMeta {
     pub room_id: String,
     /// 房间地理区域 (M3.E). 大厅根据用户偏好 region 过滤展示.
     pub region: crate::net::p2p::Region,
+    /// 房间信任模式 (M4.B). 决定开局走 Standard 还是 ZeroTrust.
+    pub mode: crate::net::p2p::RoomMode,
 }
 
 #[derive(Debug, Error)]
@@ -332,6 +334,7 @@ fn publish_lobby(
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0),
         region: meta.region,
+        mode: meta.mode,
     };
     let payload = match serde_json::to_vec(&announcement) {
         Ok(b) => b,
@@ -651,6 +654,7 @@ mod tests {
                 host_nick: "Host".into(),
                 room_id: "t".into(),
                 region: crate::net::p2p::Region::Unknown,
+                mode: crate::net::p2p::RoomMode::Standard,
             },
         )
         .await

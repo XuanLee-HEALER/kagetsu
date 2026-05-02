@@ -449,6 +449,7 @@ impl App {
             host_nick: nickname.clone(),
             room_id: room_id.clone(),
             region: self.local_prefs.network.region,
+            mode: self.local_prefs.network.default_room_mode,
         };
 
         // spawn_room 内部用 tokio::spawn, 必须在 runtime context 中调用.

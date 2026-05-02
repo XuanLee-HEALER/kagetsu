@@ -18,6 +18,7 @@ use libp2p::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::net::p2p::mode::RoomMode;
 use crate::net::p2p::region::Region;
 use crate::net::protocol::{ClientMsg, ServerMsg};
 
@@ -77,6 +78,9 @@ pub struct LobbyAnnouncement {
     /// 房间地理区域 (M3.E). 老 schema 的 announcement 没此字段时 default = Unknown.
     #[serde(default)]
     pub region: Region,
+    /// 房间信任模式 (M4.B). 老 schema 时 default = Standard.
+    #[serde(default)]
+    pub mode: RoomMode,
 }
 
 /// Tier 2 玩家 relay 贡献池公告.

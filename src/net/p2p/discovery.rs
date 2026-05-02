@@ -21,6 +21,7 @@ use super::behaviour::{
     AGENT_PREFIX, LOBBY_TOPIC, LobbyAnnouncement, P2pBehaviourEvent, RELAYS_TOPIC,
     RelayAnnouncement,
 };
+use super::mode::RoomMode;
 use super::region::Region;
 use super::swarm::{build_swarm, new_keypair};
 
@@ -40,6 +41,8 @@ pub struct RoomEntry {
     pub room_id: String,
     /// 房间地理区域 (M3.E). LAN/mDNS 路径下发现的房间默认 Unknown.
     pub region: Region,
+    /// 房间信任模式 (M4.B). LAN/mDNS 路径默认 Standard.
+    pub mode: RoomMode,
 }
 
 impl RoomEntry {
@@ -92,6 +95,8 @@ struct RoomMetadata {
     last_seen_unix_ms: i64,
     /// 房间地理区域 (M3.E). mDNS 路径目前不携带 region, 默认 Unknown.
     region: Region,
+    /// 房间信任模式 (M4.B). mDNS 路径目前不携带 mode, 默认 Standard.
+    mode: RoomMode,
 }
 
 /// Browser swarm task → UI 的事件.
@@ -270,6 +275,7 @@ impl RoomBrowser {
                     state: md.state.clone(),
                     room_id: md.room_id.clone(),
                     region: md.region,
+                    mode: md.mode,
                 })
             })
             .collect();
@@ -397,6 +403,7 @@ impl BrowserState {
                         room_id: ann.room_id,
                         last_seen_unix_ms: ann.timestamp_unix_ms,
                         region: ann.region,
+                        mode: ann.mode,
                     },
                 );
             }
