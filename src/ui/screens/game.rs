@@ -945,11 +945,12 @@ impl GameScreenState {
             "─── 对家",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
+        let wind = self.game.seat_wind_of(Seat::West).short();
         paint_str(
             buf,
             ox + 75,
             oy + 3,
-            "西",
+            &wind,
             Style::default()
                 .fg(theme.info)
                 .bg(theme.bg)
@@ -1012,10 +1013,11 @@ impl GameScreenState {
             "上家",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
+        let wind = self.game.seat_wind_of(Seat::North).short();
         let label = if p.riichi {
-            format!("北 {}★", p.score)
+            format!("{} {}★", wind, p.score)
         } else {
-            format!("北 {}", p.score)
+            format!("{} {}", wind, p.score)
         };
         let style = if p.riichi {
             Style::default()
@@ -1067,10 +1069,11 @@ impl GameScreenState {
             "下家",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
+        let wind = self.game.seat_wind_of(Seat::South).short();
         let label = if p.riichi {
-            format!("南 {}★", p.score)
+            format!("{} {}★", wind, p.score)
         } else {
-            format!("南 {}", p.score)
+            format!("{} {}", wind, p.score)
         };
         let style = if p.riichi {
             Style::default()
