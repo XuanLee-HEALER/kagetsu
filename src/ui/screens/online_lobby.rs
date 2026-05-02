@@ -12,8 +12,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::net::p2p::Region;
 use crate::net::p2p::discovery::{RoomBrowser, RoomEntry};
-use crate::net::p2p::{Region, RoomMode};
 use crate::ui::Transition;
 
 /// 大厅项目焦点.

@@ -42,6 +42,7 @@ pub mod pedersen;
 pub mod protocol_draw;
 pub mod protocol_reveal;
 pub mod schnorr;
+pub mod session;
 pub mod shuffle;
 pub mod transcript;
 
