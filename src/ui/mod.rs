@@ -3,6 +3,7 @@
 //! 屏间通过 [`Transition`] 切换. App 持有 [`last_config`] / [`last_seed_choice`]
 //! 用于"新游戏"复用上次配置.
 
+pub mod chi_picker;
 pub mod confirm;
 pub mod edit_config_modal;
 pub mod paint;

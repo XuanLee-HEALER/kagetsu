@@ -82,6 +82,8 @@ pub struct GameScreenState {
     pub round_end_at: Option<Instant>,
     /// 当前主题 (本地偏好, 不绑 GameRules).
     pub theme_kind: crate::ui::theme::ThemeKind,
+    /// 多选吃法时弹出的 picker. 非 None 时优先吃所有按键.
+    pub chi_picker: Option<crate::ui::chi_picker::ChiPicker>,
 }
 
 impl GameScreenState {
@@ -104,6 +106,7 @@ impl GameScreenState {
             modal_selected: 0,
             round_end_at: None,
             theme_kind,
+            chi_picker: None,
         }
     }
 
@@ -275,6 +278,22 @@ impl GameScreenState {
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
+        // ChiPicker 打开: 优先吃所有按键.
+        if let Some(picker) = self.chi_picker.as_mut() {
+            use crate::ui::chi_picker::ChiOutcome;
+            match picker.handle_key(key) {
+                ChiOutcome::Pick(idx) => {
+                    self.chi_picker = None;
+                    self.do_chi_at(idx);
+                }
+                ChiOutcome::Cancel => {
+                    self.chi_picker = None;
+                    self.message = "取消吃.".into();
+                }
+                ChiOutcome::Pending => {}
+            }
+            return None;
+        }
         // COMMAND 模式: 字符进 buffer.
         if self.input_mode == InputMode::Command {
             return self.handle_command_key(key);
@@ -861,8 +880,31 @@ impl GameScreenState {
         let Some(opts) = self.player_calls.clone() else {
             return;
         };
-        let Some(&two) = opts.chi.first() else {
+        if opts.chi.is_empty() {
             self.message = "不能吃.".into();
+            return;
+        }
+        if opts.chi.len() == 1 {
+            self.do_chi_at(0);
+            return;
+        }
+        // ≥ 2 种吃法 → 弹 picker. target = 别人切的牌.
+        let Some((_, target)) = self.game.last_discard else {
+            self.message = "找不到弃牌目标.".into();
+            return;
+        };
+        self.chi_picker = Some(crate::ui::chi_picker::ChiPicker::new(
+            opts.chi.clone(),
+            target,
+        ));
+    }
+
+    fn do_chi_at(&mut self, idx: usize) {
+        let Some(opts) = self.player_calls.clone() else {
+            return;
+        };
+        let Some(&two) = opts.chi.get(idx) else {
+            self.message = "无效吃法 idx.".into();
             return;
         };
         if let Err(e) = self.game.do_chi(PLAYER_SEAT, two) {
@@ -925,6 +967,9 @@ impl GameScreenState {
 
         if self.modal_open {
             self.paint_modal(buf, ox, oy, &theme);
+        }
+        if let Some(picker) = &self.chi_picker {
+            picker.render(buf, area, &theme);
         }
     }
 

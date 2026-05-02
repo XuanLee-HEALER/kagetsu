@@ -87,6 +87,8 @@ pub struct OnlineGameState {
     pub current_hints: Option<Vec<NetAction>>,
     /// 当前动作 deadline (unix ms). 0 表示无限期.
     pub current_deadline_ms: i64,
+    /// 多选吃法时弹的 picker. 非 None 时优先吃所有按键.
+    pub chi_picker: Option<crate::ui::chi_picker::ChiPicker>,
 }
 
 impl OnlineGameState {
@@ -99,7 +101,49 @@ impl OnlineGameState {
             theme_kind,
             current_hints: None,
             current_deadline_ms: 0,
+            chi_picker: None,
         }
+    }
+
+    /// 从 my_hand + target tile 枚举可能的吃法 (本家 2 张组合).
+    /// 算法与 server-side `engine::state::legal_calls` 对齐.
+    fn enumerate_chi_options(my_hand: &[Tile], target: Tile) -> Vec<[Tile; 2]> {
+        let kind = target.kind;
+        if !kind.is_suupai() {
+            return Vec::new();
+        }
+        let r = (kind.0 % 9) as i32;
+        let suit_base = (kind.0 / 9) as i32 * 9;
+        let mut counts = [0u8; 34];
+        for t in my_hand {
+            counts[t.kind.0 as usize] += 1;
+        }
+        let mut out = Vec::new();
+        for (a, b) in [(-2i32, -1i32), (-1, 1), (1, 2)] {
+            let na = r + a;
+            let nb = r + b;
+            if !(0..=8).contains(&na) || !(0..=8).contains(&nb) {
+                continue;
+            }
+            let ka = (suit_base + na) as usize;
+            let kb = (suit_base + nb) as usize;
+            if counts[ka] > 0 && counts[kb] > 0 {
+                let ta = *my_hand.iter().find(|t| t.kind.0 as usize == ka).unwrap();
+                let tb = *my_hand.iter().find(|t| t.kind.0 as usize == kb).unwrap();
+                out.push([ta, tb]);
+            }
+        }
+        out
+    }
+
+    /// 找 events 里最近一条 Discard 事件的 tile (用于 chi target).
+    fn last_discard_tile(view: &GameStateView) -> Option<Tile> {
+        for ev in view.events.iter().rev() {
+            if let GameEvent::Discard { tile, .. } = ev {
+                return Some(*tile);
+            }
+        }
+        None
     }
 
     pub fn my_player_id(&self) -> u32 {
@@ -166,6 +210,22 @@ impl OnlineGameState {
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
+        // ChiPicker 打开时优先吃所有按键.
+        if let Some(picker) = self.chi_picker.as_mut() {
+            use crate::ui::chi_picker::ChiOutcome;
+            match picker.handle_key(key) {
+                ChiOutcome::Pick(idx) => {
+                    self.chi_picker = None;
+                    self.session.send(ClientMsg::Action(NetAction::Chi(idx)));
+                }
+                ChiOutcome::Cancel => {
+                    self.chi_picker = None;
+                    self.message = "取消吃.".into();
+                }
+                ChiOutcome::Pending => {}
+            }
+            return None;
+        }
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => self.move_select(-1),
             KeyCode::Right | KeyCode::Char('l') if !key.modifiers.is_empty() => self.move_select(1),
@@ -209,7 +269,7 @@ impl OnlineGameState {
                 self.session.send(ClientMsg::Action(NetAction::Pon));
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
-                self.session.send(ClientMsg::Action(NetAction::Chi(0)));
+                self.do_chi();
             }
             KeyCode::Char('m') | KeyCode::Char('M') => {
                 self.session.send(ClientMsg::Action(NetAction::Minkan));
@@ -358,6 +418,29 @@ impl OnlineGameState {
 
     /// 暗杠: 简化版, 选自家手牌中第一种数量 ≥ 4 的牌种发上去.
     /// (server 端会校验, 不合法回 Error.)
+    fn do_chi(&mut self) {
+        let Some(view) = self.state_view.as_ref() else {
+            return;
+        };
+        let Some(target) = Self::last_discard_tile(view) else {
+            self.message = "找不到弃牌目标.".into();
+            return;
+        };
+        let options = Self::enumerate_chi_options(&view.my_hand, target);
+        match options.len() {
+            0 => {
+                self.message = "不能吃.".into();
+            }
+            1 => {
+                self.session.send(ClientMsg::Action(NetAction::Chi(0)));
+            }
+            _ => {
+                self.chi_picker =
+                    Some(crate::ui::chi_picker::ChiPicker::new(options, target));
+            }
+        }
+    }
+
     fn do_ankan(&mut self) {
         let Some(view) = self.state_view.as_ref() else {
             return;
@@ -414,6 +497,9 @@ impl OnlineGameState {
         self.paint_my_message_and_melds(buf, ox, oy, &theme, view, layout.bottom);
         self.paint_my_hand(buf, ox, oy, &theme, view);
         self.paint_bottom(buf, ox, oy, &theme, view);
+        if let Some(picker) = &self.chi_picker {
+            picker.render(buf, area, &theme);
+        }
     }
 
     fn paint_top_status(
