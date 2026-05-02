@@ -28,7 +28,12 @@ pub fn build_swarm(
         .with_quic()
         .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)?
         .with_behaviour(|_, relay_client| {
-            P2pBehaviour::new(local_peer_id, local_pubkey.clone(), relay_client, agent_metadata)
+            P2pBehaviour::new(
+                local_peer_id,
+                local_pubkey.clone(),
+                relay_client,
+                agent_metadata,
+            )
         })?
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();

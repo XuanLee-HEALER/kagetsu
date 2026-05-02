@@ -26,14 +26,14 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
+use crate::domain::meld::{MeldKind, Seat};
+use crate::domain::tile::{Tile, TileIndex};
 use crate::engine::event::GameEvent;
 use crate::engine::phase::Phase;
-use crate::domain::meld::{MeldKind, Seat};
 use crate::net::protocol::{
     ClientMsg, GameStateView, NetAction, PlayerView, RoomLifecycle, ServerMsg,
 };
 use crate::net::session::NetSession;
-use crate::domain::tile::{Tile, TileIndex};
 use crate::ui::Transition;
 use crate::ui::paint::{
     TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row,

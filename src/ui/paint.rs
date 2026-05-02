@@ -79,7 +79,11 @@ fn tile_segments_wide(t: &Tile, theme: &Theme) -> TileSegments<'static> {
         } else {
             [theme.tile_man_num, theme.tile_pin_num, theme.tile_sou_num][suit_idx]
         };
-        let suit_color = [theme.tile_man_suit, theme.tile_pin_suit, theme.tile_sou_suit][suit_idx];
+        let suit_color = [
+            theme.tile_man_suit,
+            theme.tile_pin_suit,
+            theme.tile_sou_suit,
+        ][suit_idx];
         TileSegments {
             seg1: NUMERALS[num_idx],
             seg2: SUIT_CN[suit_idx],
@@ -121,7 +125,11 @@ fn tile_segments_tight(t: &Tile, theme: &Theme) -> TileSegments<'static> {
         } else {
             [theme.tile_man_num, theme.tile_pin_num, theme.tile_sou_num][suit_idx]
         };
-        let suit_color = [theme.tile_man_suit, theme.tile_pin_suit, theme.tile_sou_suit][suit_idx];
+        let suit_color = [
+            theme.tile_man_suit,
+            theme.tile_pin_suit,
+            theme.tile_sou_suit,
+        ][suit_idx];
         TileSegments {
             seg1: NUMERALS_ASCII[num_idx],
             seg2: SUIT_CN[suit_idx],
@@ -334,7 +342,11 @@ pub fn paint_boxed_row(
 
         // 内容: 两段绘制 (数字 + 花色 / 字牌单字).
         let segs = tile_segments_wide(t, theme);
-        let bg = if is_drawn { theme.accent } else { theme.tile_bg };
+        let bg = if is_drawn {
+            theme.accent
+        } else {
+            theme.tile_bg
+        };
         // is_drawn 时整张换 accent 反色, 失去花色区分 — 用 theme.bg 一致写两段.
         let (fg1, fg2) = if is_drawn {
             (theme.bg, theme.bg)

@@ -98,8 +98,8 @@ impl RoomBrowser {
     pub fn start(runtime: &tokio::runtime::Handle) -> Result<Self, BrowserError> {
         let _guard = runtime.enter();
         let kp = new_keypair();
-        let mut swarm = build_swarm(kp, "browser".into())
-            .map_err(|e| BrowserError::Swarm(e.to_string()))?;
+        let mut swarm =
+            build_swarm(kp, "browser".into()).map_err(|e| BrowserError::Swarm(e.to_string()))?;
 
         // listen 一个 QUIC 端口让 mDNS service 能注册地址.
         // 这是必要的: libp2p mDNS query 需要本地有 listen 才会发 mDNS announcement.

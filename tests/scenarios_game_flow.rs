@@ -4,9 +4,9 @@ mod common;
 
 use std::time::Duration;
 
-use tui_majo::engine::rules::{GameRules, LengthRule};
 use tui_majo::engine::event::GameEvent;
 use tui_majo::engine::phase::Phase;
+use tui_majo::engine::rules::{GameRules, LengthRule};
 use tui_majo::net::protocol::{RoomLifecycle, ServerMsg};
 
 use common::TestRoomBuilder;

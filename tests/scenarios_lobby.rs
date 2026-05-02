@@ -86,8 +86,7 @@ async fn host_can_update_config_others_cannot() {
     };
 
     // 非 host 改 → 忽略
-    room.client(1)
-        .send(ClientMsg::UpdateRules(new_cfg.clone()));
+    room.client(1).send(ClientMsg::UpdateRules(new_cfg.clone()));
     room.drain_all().await;
     let r = room.clients[0].latest_room.as_ref().unwrap();
     assert!(

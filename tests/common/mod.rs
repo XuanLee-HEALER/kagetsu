@@ -24,13 +24,13 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use tui_majo::engine::rules::GameRules;
+use tui_majo::domain::meld::Seat;
+use tui_majo::domain::tile::{Tile, TileIndex};
 use tui_majo::engine::event::GameEvent;
 use tui_majo::engine::phase::Phase;
-use tui_majo::domain::meld::Seat;
+use tui_majo::engine::rules::GameRules;
 use tui_majo::net::protocol::{ClientMsg, GameStateView, NetAction, RoomView, ServerMsg};
 use tui_majo::net::room::{RoomCmd, RoomHandle, spawn_room_advanced};
-use tui_majo::domain::tile::{Tile, TileIndex};
 use tui_majo::ui::screens::game::TileSpec;
 
 /// 默认测试 seed; 改这里影响所有未指定 seed 的用例.

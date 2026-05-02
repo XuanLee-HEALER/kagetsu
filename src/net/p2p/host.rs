@@ -11,12 +11,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use libp2p::{
-    Multiaddr, PeerId, Swarm,
-    multiaddr::Protocol,
-    request_response,
-    swarm::SwarmEvent,
-};
+use libp2p::{Multiaddr, PeerId, Swarm, multiaddr::Protocol, request_response, swarm::SwarmEvent};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
@@ -60,8 +55,7 @@ pub async fn spawn_p2p_listener(
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
-                let is_quic =
-                    address.iter().any(|p| matches!(p, Protocol::QuicV1));
+                let is_quic = address.iter().any(|p| matches!(p, Protocol::QuicV1));
                 listen_addrs.push(address);
                 if is_quic {
                     return;
@@ -203,10 +197,9 @@ async fn handle_rr_c2s(
 ) {
     if let request_response::Event::Message {
         peer,
-        message:
-            request_response::Message::Request {
-                request, channel, ..
-            },
+        message: request_response::Message::Request {
+            request, channel, ..
+        },
         ..
     } = event
     {
@@ -332,9 +325,12 @@ mod tests {
             .try_init();
 
         let handle = spawn_room("Host".into(), GameRules::default());
-        let host = spawn_p2p_listener(handle.clone(), "host_nick=Host;players=1;lifecycle=lobby;room_id=t".into())
-            .await
-            .expect("listener");
+        let host = spawn_p2p_listener(
+            handle.clone(),
+            "host_nick=Host;players=1;lifecycle=lobby;room_id=t".into(),
+        )
+        .await
+        .expect("listener");
         let dial_addr = host.dial_addr.clone().expect("dial_addr");
 
         // 房主自己用 spawn_local_session join (作为 player_id=1).
@@ -379,9 +375,6 @@ mod tests {
                 }
             }
         }
-        assert!(
-            max_ready >= 3,
-            "host 应看到 ≥3 ready, 实际 {max_ready}"
-        );
+        assert!(max_ready >= 3, "host 应看到 ≥3 ready, 实际 {max_ready}");
     }
 }

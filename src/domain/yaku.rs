@@ -7,10 +7,10 @@
 //! - 全部役满完整实现
 //! - 古役: 类型完整, 实现按需逐个补 (默认关闭)
 
-use crate::engine::rules::GameRules;
 use crate::domain::decompose::{Decomposition, Mentsu, WaitKind};
 use crate::domain::meld::Meld;
 use crate::domain::tile::TileIndex;
+use crate::engine::rules::GameRules;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum YakuhaiKind {
@@ -986,8 +986,8 @@ fn single_suit(d: &Decomposition, melds: &[Meld]) -> Option<Option<()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::rules::GameRules;
     use crate::domain::decompose::decompose;
+    use crate::engine::rules::GameRules;
 
     fn ctx_for(d: &Decomposition, menzen: bool) -> WinContext<'_> {
         // 预先构造一个临时上下文.config 必须是引用,但我们这里返回 owned,

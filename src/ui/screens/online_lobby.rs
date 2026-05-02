@@ -361,4 +361,3 @@ impl OnlineLobbyState {
         f.render_widget(Paragraph::new(lines).alignment(Alignment::Left), inner);
     }
 }
-

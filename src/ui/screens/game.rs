@@ -22,16 +22,16 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use std::time::{Duration, Instant};
 
-use crate::domain::action::Action;
-use crate::engine::rules::GameRules;
-use crate::engine::event::GameEvent;
-use crate::engine::phase::Phase;
-use crate::engine::state::{CallOptions, GameState, RoundResult, RyuukyokuKind};
-use crate::domain::meld::{MeldKind, Seat};
 use crate::ai::dummy::ai_choose_discard;
 use crate::ai::timeout::default_action_on_timeout;
-use crate::engine::score::final_ranking;
+use crate::domain::action::Action;
+use crate::domain::meld::{MeldKind, Seat};
 use crate::domain::tile::{Tile, TileIndex};
+use crate::engine::event::GameEvent;
+use crate::engine::phase::Phase;
+use crate::engine::rules::GameRules;
+use crate::engine::score::final_ranking;
+use crate::engine::state::{CallOptions, GameState, RoundResult, RyuukyokuKind};
 use crate::ui::Transition;
 use crate::ui::paint::{
     TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row,
@@ -85,11 +85,7 @@ pub struct GameScreenState {
 }
 
 impl GameScreenState {
-    pub fn new(
-        config: GameRules,
-        game_seed: u64,
-        theme_kind: crate::ui::theme::ThemeKind,
-    ) -> Self {
+    pub fn new(config: GameRules, game_seed: u64, theme_kind: crate::ui::theme::ThemeKind) -> Self {
         let mut g = GameState::new(config);
         g.start_round(game_seed ^ 1);
         Self {

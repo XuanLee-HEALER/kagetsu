@@ -14,13 +14,13 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::engine::rules::GameRules;
+use crate::domain::meld::{Meld, Seat};
+use crate::domain::tile::{Tile, TileIndex};
 use crate::engine::event::GameEvent;
 use crate::engine::phase::Phase;
-use crate::engine::state::RoundWind;
-use crate::domain::meld::{Meld, Seat};
+use crate::engine::rules::GameRules;
 use crate::engine::score::Ranking;
-use crate::domain::tile::{Tile, TileIndex};
+use crate::engine::state::RoundWind;
 use crate::ui::screens::game::TileSpec;
 
 // ============================================================================

@@ -192,7 +192,11 @@ impl EditConfigModal {
 }
 
 fn bool_label(v: bool) -> String {
-    if v { "☑ 开".into() } else { "☐ 关".into() }
+    if v {
+        "☑ 开".into()
+    } else {
+        "☐ 关".into()
+    }
 }
 
 #[cfg(test)]

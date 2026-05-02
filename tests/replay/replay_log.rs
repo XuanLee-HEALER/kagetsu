@@ -3,9 +3,9 @@
 //! 后续可加 `tenhou_to_replay_log` / `paipu_to_replay_log` 都转成这个 IR,
 //! ReplayDriver 只对 ReplayLog 一种输入.
 
-use tui_majo::engine::state::RoundWind;
 use tui_majo::domain::meld::Seat;
 use tui_majo::domain::tile::Tile;
+use tui_majo::engine::state::RoundWind;
 
 use super::mjai_pai::parse_mjai_pai;
 use super::mjai_parser::{MjaiEvent, MjaiYaku};

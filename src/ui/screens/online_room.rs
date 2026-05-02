@@ -103,8 +103,7 @@ impl OnlineRoomState {
             }
             KeyCode::Char('c') | KeyCode::Char('C') => {
                 if self.is_host() {
-                    self.editing_config =
-                        Some(EditConfigModal::new(self.room_view.config.clone()));
+                    self.editing_config = Some(EditConfigModal::new(self.room_view.config.clone()));
                 } else {
                     self.message = "只有房主可改配置.".into();
                 }

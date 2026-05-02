@@ -119,9 +119,10 @@ async fn wait_welcome(
             if let SwarmEvent::Behaviour(P2pBehaviourEvent::RrS2c(rr_event)) = event
                 && let request_response::Event::Message {
                     peer,
-                    message: request_response::Message::Request {
-                        request, channel, ..
-                    },
+                    message:
+                        request_response::Message::Request {
+                            request, channel, ..
+                        },
                     ..
                 } = rr_event
                 && peer == host_peer_id
@@ -185,9 +186,10 @@ async fn handle_event(
         SwarmEvent::Behaviour(P2pBehaviourEvent::RrS2c(rr_event)) => {
             if let request_response::Event::Message {
                 peer,
-                message: request_response::Message::Request {
-                    request, channel, ..
-                },
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
                 ..
             } = rr_event
                 && peer == host_peer_id

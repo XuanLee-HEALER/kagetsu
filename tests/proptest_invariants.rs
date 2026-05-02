@@ -31,8 +31,8 @@ use std::time::Duration;
 use proptest::prelude::*;
 use tokio::runtime::Builder;
 
-use tui_majo::engine::phase::Phase;
 use tui_majo::domain::meld::{MeldKind, Seat};
+use tui_majo::engine::phase::Phase;
 use tui_majo::net::protocol::{GameStateView, RoomLifecycle, ServerMsg};
 
 use common::{TestRoom, TestRoomBuilder};
