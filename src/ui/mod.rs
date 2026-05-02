@@ -113,7 +113,7 @@ impl App {
             running: true,
             last_config: GameConfig::default(),
             last_seed_choice: SeedChoice::Random,
-            local_prefs: LocalPrefs::default(),
+            local_prefs: LocalPrefs::load(),
             runtime,
             host_dial_addr: None,
             host_listener: None,
@@ -261,6 +261,9 @@ impl App {
     fn cycle_theme(&mut self) {
         let next = self.local_prefs.theme.next();
         self.local_prefs.theme = next;
+        if let Err(e) = self.local_prefs.save() {
+            tracing::warn!("保存 prefs 失败: {e}");
+        }
         // 同步到当前屏幕 (各屏自己缓存了 theme_kind).
         match &mut self.screen {
             Screen::InGame(s) => s.set_theme(next),

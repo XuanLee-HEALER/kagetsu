@@ -29,6 +29,8 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-width = "0.2"
+dirs = "5"
+toml = "0.8"
 # 多人对战 (P2P) 相关.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 futures-util = "0.3"
