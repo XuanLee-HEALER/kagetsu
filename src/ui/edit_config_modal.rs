@@ -1,6 +1,6 @@
 //! 房主在 OnlineRoom 内修改 GameRules 的 modal.
 //!
-//! 6 字段: 赛制 / 思考时长 / 食断 / 赤宝牌 / 一发 / 里宝牌.
+//! 7 字段: 赛制 / 思考时长 / 鸣牌窗口 / 食断 / 赤宝牌 / 一发 / 里宝牌.
 //! Enter 保存 → ClientMsg::UpdateRules, Esc 取消.
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -13,8 +13,9 @@ use crate::engine::rules::{GameRules, LengthRule};
 use crate::ui::paint::{paint_double_box, paint_fill, paint_str};
 use crate::ui::theme::Theme;
 
-const FIELDS: usize = 6;
+const FIELDS: usize = 7;
 const THINKING_OPTIONS: &[Option<u32>] = &[Some(10), Some(20), Some(30), Some(60), None];
+const CALL_WINDOW_OPTIONS: &[u8] = &[3, 5, 8];
 
 #[derive(Debug, Clone)]
 pub enum EditOutcome {
@@ -89,18 +90,28 @@ impl EditConfigModal {
                 let new_idx = (cur_idx as i32 + dir).rem_euclid(len) as usize;
                 self.config.thinking_time_secs = THINKING_OPTIONS[new_idx];
             }
-            2 => self.config.kuitan = !self.config.kuitan,
-            3 => self.config.aka_dora = !self.config.aka_dora,
-            4 => self.config.ippatsu = !self.config.ippatsu,
-            5 => self.config.ura_dora = !self.config.ura_dora,
+            2 => {
+                // 鸣牌窗口
+                let cur_idx = CALL_WINDOW_OPTIONS
+                    .iter()
+                    .position(|&t| t == self.config.call_window_secs)
+                    .unwrap_or(1);
+                let len = CALL_WINDOW_OPTIONS.len() as i32;
+                let new_idx = (cur_idx as i32 + dir).rem_euclid(len) as usize;
+                self.config.call_window_secs = CALL_WINDOW_OPTIONS[new_idx];
+            }
+            3 => self.config.kuitan = !self.config.kuitan,
+            4 => self.config.aka_dora = !self.config.aka_dora,
+            5 => self.config.ippatsu = !self.config.ippatsu,
+            6 => self.config.ura_dora = !self.config.ura_dora,
             _ => {}
         }
     }
 
     pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
         let w: u16 = 56;
-        // 6 字段每字段 2 行 = 12 行内容 + 边框 + 内边距 + hint 行 = 16 行.
-        let h: u16 = 16;
+        // 7 字段每字段 2 行 = 14 行内容 + 边框 + 内边距 + hint 行 = 18 行.
+        let h: u16 = 18;
         if area.width < w || area.height < h {
             return;
         }
@@ -182,10 +193,11 @@ impl EditConfigModal {
                     .map(|s| format!("{} 秒", s))
                     .unwrap_or_else(|| "不限时".into()),
             ),
-            2 => ("食断", bool_label(self.config.kuitan)),
-            3 => ("赤宝牌", bool_label(self.config.aka_dora)),
-            4 => ("一发", bool_label(self.config.ippatsu)),
-            5 => ("里宝牌", bool_label(self.config.ura_dora)),
+            2 => ("鸣牌窗口", format!("{} 秒", self.config.call_window_secs)),
+            3 => ("食断", bool_label(self.config.kuitan)),
+            4 => ("赤宝牌", bool_label(self.config.aka_dora)),
+            5 => ("一发", bool_label(self.config.ippatsu)),
+            6 => ("里宝牌", bool_label(self.config.ura_dora)),
             _ => ("?", "?".into()),
         }
     }
@@ -255,12 +267,29 @@ mod tests {
     #[test]
     fn space_toggles_bool_fields() {
         let mut m = EditConfigModal::new(default_config());
-        // 转到食断 (idx 2)
-        m.handle_key(key(KeyCode::Down));
-        m.handle_key(key(KeyCode::Down));
+        // 转到食断 (idx 3, 在赛制/思考时长/鸣牌窗口之后)
+        for _ in 0..3 {
+            m.handle_key(key(KeyCode::Down));
+        }
         let initial = m.config.kuitan;
         m.handle_key(key(KeyCode::Char(' ')));
         assert_ne!(m.config.kuitan, initial);
+    }
+
+    #[test]
+    fn right_cycles_call_window() {
+        let mut m = EditConfigModal::new(default_config());
+        // 跳到鸣牌窗口 (idx 2)
+        m.handle_key(key(KeyCode::Down));
+        m.handle_key(key(KeyCode::Down));
+        let initial = m.config.call_window_secs;
+        m.handle_key(key(KeyCode::Right));
+        assert_ne!(m.config.call_window_secs, initial);
+        // 3 次循环回到原值 (CALL_WINDOW_OPTIONS 长度 3)
+        for _ in 0..2 {
+            m.handle_key(key(KeyCode::Right));
+        }
+        assert_eq!(m.config.call_window_secs, initial);
     }
 
     #[test]

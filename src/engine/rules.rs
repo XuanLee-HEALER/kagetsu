@@ -70,6 +70,14 @@ pub struct GameRules {
     pub uma: [i32; 4],
     /// 玩家单步思考时长(秒). None = 不限时.
     pub thinking_time_secs: Option<u32>,
+    /// 鸣牌响应窗口(秒). 切牌后等他家碰/吃/杠/荣的时间, 超时视为 Pass.
+    /// 取值 3-10 秒, 默认 5. 不允许 None (会卡住整桌).
+    #[serde(default = "default_call_window")]
+    pub call_window_secs: u8,
+}
+
+fn default_call_window() -> u8 {
+    5
 }
 
 impl Default for GameRules {
@@ -97,6 +105,7 @@ impl Default for GameRules {
             target_score: 30_000,
             uma: [15, 5, -5, -15],
             thinking_time_secs: Some(30),
+            call_window_secs: 5,
         }
     }
 }

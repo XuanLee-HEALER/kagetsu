@@ -27,6 +27,7 @@ const UMA_PRESETS: &[[i32; 4]] = &[
 ];
 
 const THINKING_PRESETS: &[Option<u32>] = &[Some(10), Some(20), Some(30), Some(60), None];
+const CALL_WINDOW_PRESETS: &[u8] = &[3, 5, 8];
 
 #[derive(Debug, Clone)]
 pub struct ConfigState {
@@ -321,7 +322,7 @@ const ROWS: &[Row] = &[
             s.config.uma = UMA_PRESETS[cycle_idx(cur, UMA_PRESETS.len(), d)];
         },
     },
-    // 21 (主题不再绑房间, 改为本地偏好, 用全局 T 键切换. 此行保留索引但显示提示文字.)
+    // 21
     Row {
         label: "思考时长",
         format: |s| match s.config.thinking_time_secs {
@@ -335,6 +336,19 @@ const ROWS: &[Row] = &[
                 .unwrap_or(0);
             s.config.thinking_time_secs =
                 THINKING_PRESETS[cycle_idx(cur, THINKING_PRESETS.len(), d)];
+        },
+    },
+    // 22
+    Row {
+        label: "鸣牌窗口",
+        format: |s| format!("{} 秒", s.config.call_window_secs),
+        adjust: |s, d| {
+            let cur = CALL_WINDOW_PRESETS
+                .iter()
+                .position(|x| *x == s.config.call_window_secs)
+                .unwrap_or(1);
+            s.config.call_window_secs =
+                CALL_WINDOW_PRESETS[cycle_idx(cur, CALL_WINDOW_PRESETS.len(), d)];
         },
     },
     // 23

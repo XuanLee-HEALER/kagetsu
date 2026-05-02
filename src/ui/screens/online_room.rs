@@ -205,9 +205,11 @@ impl OnlineRoomState {
             .thinking_time_secs
             .map(|s| format!("{} 秒", s))
             .unwrap_or_else(|| "不限时".into());
-        let entries: [(&str, String, bool); 6] = [
+        let call_window_label = format!("{} 秒", cfg.call_window_secs);
+        let entries: [(&str, String, bool); 7] = [
             ("赛制", len_label.to_string(), true),
             ("思考时长", thinking_label, true),
+            ("鸣牌窗口", call_window_label, true),
             ("食断", bool_label(cfg.kuitan), cfg.kuitan),
             ("赤宝牌", bool_label(cfg.aka_dora), cfg.aka_dora),
             ("一发", bool_label(cfg.ippatsu), cfg.ippatsu),
@@ -215,7 +217,7 @@ impl OnlineRoomState {
         ];
         for (key, val, on) in &entries {
             let val_color = match *key {
-                "赛制" | "思考时长" => Color::Yellow,
+                "赛制" | "思考时长" | "鸣牌窗口" => Color::Yellow,
                 _ => {
                     if *on {
                         Color::Green

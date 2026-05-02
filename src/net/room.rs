@@ -148,8 +148,6 @@ impl SlotEntry {
 // ============================================================================
 
 const MAX_PLAYERS: usize = 4;
-/// 鸣牌窗口超时 (ms). 真人玩家在此时间内未按 P/A/M/C 视为 Pass.
-const CALL_WINDOW_MS: u64 = 2500;
 
 /// 当前 unix 毫秒. 失败时返回 0.
 fn chrono_now_unix_ms() -> i64 {
@@ -181,7 +179,7 @@ struct RoomActor {
     pending_calls: Option<HashMap<u32, Option<NetAction>>>,
     /// 鸣牌窗口 generation, 每次 setup 自增, timer 触发时校验避免过期影响.
     call_window_gen: u64,
-    /// 鸣牌窗口超时 ms. 默认 [`CALL_WINDOW_MS`], 测试可缩短.
+    /// 鸣牌窗口超时 ms. 派生自 GameRules.call_window_secs, 测试可 override.
     call_window_ms: u64,
     /// 测试注入的 seed; None 时 start_game 用真 RNG.
     seed_override: Option<u64>,
@@ -197,6 +195,7 @@ impl RoomActor {
     ) -> Self {
         let mut rng = rand::rng();
         let room_id = format!("{:04x}-{:04x}", rng.random::<u16>(), rng.random::<u16>());
+        let call_window_ms = config.call_window_secs as u64 * 1000;
         Self {
             room_id,
             config,
@@ -211,7 +210,7 @@ impl RoomActor {
             pending_host_nickname: Some(host_nickname),
             pending_calls: None,
             call_window_gen: 0,
-            call_window_ms: CALL_WINDOW_MS,
+            call_window_ms,
             seed_override,
         }
     }
