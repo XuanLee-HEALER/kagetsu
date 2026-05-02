@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use libp2p::{
-    Multiaddr, PeerId, Swarm, autonat, multiaddr::Protocol, request_response, swarm::SwarmEvent,
+    Multiaddr, PeerId, Swarm, autonat, identify, multiaddr::Protocol, request_response,
+    swarm::SwarmEvent,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -57,27 +58,34 @@ pub async fn spawn_p2p_listener(
         .listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap())
         .map_err(|e| ListenerError::Listen(format!("TCP: {e}")))?;
 
-    // 主动 dial 每个 bootstrap relay; 失败仅 warn 不致命.
+    // 解析 bootstrap relay 的 peer-id, 存为 pending listen on circuit 表.
+    // 不能立即 swarm.listen_on(<relay>/p2p-circuit) — libp2p 0.56 在 connection
+    // 还没建立 + identify 还没交换前调 listen on circuit 会立刻 ListenerClosed.
+    // 必须等 identify::Received from bootstrap peer 后再 listen.
+    // 见 https://github.com/libp2p/rust-libp2p/tree/master/examples/relay-server
+    let mut pending_circuit_listens: HashMap<PeerId, Multiaddr> = HashMap::new();
+    for relay_addr in &bootstrap_relays {
+        let Some(pid) = relay_addr.iter().find_map(|p| match p {
+            Protocol::P2p(id) => Some(id),
+            _ => None,
+        }) else {
+            tracing::warn!("bootstrap multiaddr 缺 /p2p/<peer-id>: {relay_addr}");
+            continue;
+        };
+        pending_circuit_listens.insert(pid, relay_addr.clone());
+    }
+
+    // 主动 dial 每个 bootstrap relay 让 identify 协议交换启动; 失败仅 warn 不致命.
     for relay_addr in &bootstrap_relays {
         if let Err(e) = swarm.dial(relay_addr.clone()) {
             tracing::warn!("dial bootstrap relay {} 失败: {e}", relay_addr);
         }
     }
 
-    // listen on <relay>/p2p-circuit 触发 reservation 请求 (libp2p 自动协商).
-    // 即使 dial 还没建立, listen 会 pending; 连上后 reservation 自动开始.
-    let mut relay_listen_count = 0usize;
-    for relay_addr in &bootstrap_relays {
-        let circuit = relay_addr.clone().with(Protocol::P2pCircuit);
-        match swarm.listen_on(circuit) {
-            Ok(_) => relay_listen_count += 1,
-            Err(e) => tracing::warn!("listen on {} 的 circuit 失败: {e}", relay_addr),
-        }
-    }
     tracing::info!(
-        "host swarm started: bootstrap_relays={}, circuit_listens={}",
+        "host swarm started: bootstrap_relays={}, pending circuit listens={} (会在 identify 后触发)",
         bootstrap_relays.len(),
-        relay_listen_count
+        pending_circuit_listens.len()
     );
 
     // 等到第一批 listen 地址 (尽量拿到 QUIC, 否则 fallback 任意).
@@ -105,7 +113,13 @@ pub async fn spawn_p2p_listener(
     let (event_tx, event_rx) = mpsc::unbounded_channel::<HostEvent>();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
-    tokio::spawn(host_swarm_task(swarm, handle, event_tx, shutdown_rx));
+    tokio::spawn(host_swarm_task(
+        swarm,
+        handle,
+        event_tx,
+        shutdown_rx,
+        pending_circuit_listens,
+    ));
 
     Ok(HostHandle {
         dial_addr,
@@ -171,6 +185,7 @@ async fn host_swarm_task(
     room_handle: RoomHandle,
     event_tx: mpsc::UnboundedSender<HostEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
+    mut pending_circuit_listens: HashMap<PeerId, Multiaddr>,
 ) {
     let mut peers: HashMap<PeerId, PeerSlot> = HashMap::new();
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<(PeerId, ServerMsg)>();
@@ -197,6 +212,7 @@ async fn host_swarm_task(
                     &room_handle,
                     &outbox_tx,
                     &event_tx,
+                    &mut pending_circuit_listens,
                 ).await;
             }
         }
@@ -210,6 +226,7 @@ async fn handle_swarm_event(
     room_handle: &RoomHandle,
     outbox_tx: &mpsc::UnboundedSender<(PeerId, ServerMsg)>,
     event_tx: &mpsc::UnboundedSender<HostEvent>,
+    pending_circuit_listens: &mut HashMap<PeerId, Multiaddr>,
 ) {
     match event {
         SwarmEvent::Behaviour(P2pBehaviourEvent::RrC2s(rr_event)) => {
@@ -229,6 +246,36 @@ async fn handle_swarm_event(
                 });
                 let _ = event_tx.send(HostEvent::PeerLeft { peer_id });
             }
+        }
+        SwarmEvent::Behaviour(P2pBehaviourEvent::Identify(identify::Event::Received {
+            peer_id,
+            info,
+            ..
+        })) => {
+            // bootstrap relay 完成 identify 后, 此时 connection 稳定, 协议谈判完毕,
+            // 才能 listen on /p2p-circuit 触发 reservation 请求.
+            if let Some(relay_addr) = pending_circuit_listens.remove(&peer_id) {
+                let supports_hop = info
+                    .protocols
+                    .iter()
+                    .any(|p| p.as_ref().contains("/libp2p/circuit/relay/0.2.0/hop"));
+                if !supports_hop {
+                    tracing::warn!(
+                        "bootstrap peer {peer_id} 不支持 relay hop 协议, 跳过 reservation"
+                    );
+                    return;
+                }
+                let circuit = relay_addr.clone().with(Protocol::P2pCircuit);
+                match swarm.listen_on(circuit.clone()) {
+                    Ok(_) => {
+                        tracing::info!("listening on circuit via relay {peer_id} (addr={circuit})")
+                    }
+                    Err(e) => tracing::warn!("listen on circuit {circuit} 失败: {e}"),
+                }
+            }
+        }
+        SwarmEvent::Behaviour(P2pBehaviourEvent::RelayClient(relay_event)) => {
+            tracing::info!("relay-client event: {relay_event:?}");
         }
         SwarmEvent::Behaviour(P2pBehaviourEvent::Autonat(autonat::Event::StatusChanged {
             new,
@@ -258,8 +305,7 @@ async fn handle_swarm_event(
         SwarmEvent::Behaviour(P2pBehaviourEvent::Mdns(_))
         | SwarmEvent::Behaviour(P2pBehaviourEvent::Identify(_))
         | SwarmEvent::Behaviour(P2pBehaviourEvent::Autonat(_))
-        | SwarmEvent::Behaviour(P2pBehaviourEvent::RelayServer(_))
-        | SwarmEvent::Behaviour(P2pBehaviourEvent::RelayClient(_)) => {
+        | SwarmEvent::Behaviour(P2pBehaviourEvent::RelayServer(_)) => {
             // 其它细节事件不消费, M2 后期可加 logging.
         }
         _ => {}

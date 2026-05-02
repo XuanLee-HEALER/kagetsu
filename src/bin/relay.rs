@@ -5,12 +5,20 @@
 //!
 //! 用法:
 //! ```text
-//! tui-majo-relay [PORT] [KEY_FILE]              # 位置参数
-//! tui-majo-relay                                # 默认 PORT=4001 KEY_FILE=tui-majo-relay.key
-//! tui-majo-relay 12345                          # 改 port, key 默认
-//! tui-majo-relay 4001 /etc/tui-majo/relay.key   # 都自定
-//! RUST_LOG=debug tui-majo-relay                 # 详细日志
+//! tui-majo-relay [PORT] [KEY_FILE] [EXTERNAL_IP]
+//! tui-majo-relay                                  # 默认 PORT=4001 KEY=tui-majo-relay.key
+//! tui-majo-relay 4001 ./relay.key 47.84.49.170    # 都自定
+//! RUST_LOG=debug tui-majo-relay                   # 详细日志
 //! ```
+//!
+//! ## EXTERNAL_IP (重要 — 阿里云 / AWS / GCP 等 NAT 类云需要)
+//!
+//! 云 ECS 通常 listen 在内网网卡 (172.x / 10.x), 公网 IP 由 NAT 转发. relay
+//! 自己 enumerate listen_addrs 拿到的是内网 addr, reservation reply 给 client
+//! 的 addrs 列表里没用 (client 报 NoAddressesInReservation). 需 explicit 告知
+//! relay 它的公网 IP, 通过 swarm.add_external_address() 加进 external 列表.
+//!
+//! 如不提供, relay 仍能跑 + 接受 reservation, 但 NAT 后 client 拿不到 dial-back addr.
 //!
 //! ## PeerId 持久化
 //!
@@ -31,7 +39,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use libp2p::{
-    PeerId, SwarmBuilder, identify, identity, multiaddr::Protocol, ping, relay,
+    Multiaddr, PeerId, SwarmBuilder, identify, identity, multiaddr::Protocol, ping, relay,
     swarm::NetworkBehaviour, swarm::SwarmEvent,
 };
 
@@ -57,6 +65,7 @@ async fn main() -> Result<()> {
         .nth(2)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_KEY_FILE));
+    let external_ip: Option<String> = std::env::args().nth(3);
 
     let keypair = load_or_create_keypair(&key_file)?;
     let local_peer_id = PeerId::from(&keypair.public());
@@ -82,6 +91,29 @@ async fn main() -> Result<()> {
 
     swarm.listen_on(format!("/ip4/0.0.0.0/udp/{port}/quic-v1").parse()?)?;
     swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{port}").parse()?)?;
+
+    // 加公网 external addr (NAT 类云必需, 否则 reservation reply 没 addrs)
+    if let Some(ip) = &external_ip {
+        for addr_str in &[
+            format!("/ip4/{ip}/udp/{port}/quic-v1"),
+            format!("/ip4/{ip}/tcp/{port}"),
+        ] {
+            match addr_str.parse::<Multiaddr>() {
+                Ok(addr) => {
+                    swarm.add_external_address(addr.clone());
+                    println!("[external] add_external_address {addr}");
+                    tracing::info!("declared external addr: {addr}");
+                }
+                Err(e) => tracing::warn!("external addr 解析失败 {addr_str}: {e}"),
+            }
+        }
+    } else {
+        tracing::warn!(
+            "未提供 EXTERNAL_IP — NAT 类云 (阿里云/AWS) 上 client 会报 NoAddressesInReservation. \
+             启动加第三个参数 e.g. tui-majo-relay {port} {} <your-public-ip>",
+            key_file.display()
+        );
+    }
 
     println!("=========================================================");
     println!("tui-majo-relay 启动");
