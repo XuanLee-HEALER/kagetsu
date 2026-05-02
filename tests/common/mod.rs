@@ -24,12 +24,13 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use tui_majo::config::GameConfig;
-use tui_majo::game::{GameEvent, Phase};
-use tui_majo::meld::Seat;
+use tui_majo::engine::rules::GameRules;
+use tui_majo::engine::event::GameEvent;
+use tui_majo::engine::phase::Phase;
+use tui_majo::domain::meld::Seat;
 use tui_majo::net::protocol::{ClientMsg, GameStateView, NetAction, RoomView, ServerMsg};
 use tui_majo::net::room::{RoomCmd, RoomHandle, spawn_room_advanced};
-use tui_majo::tile::{Tile, TileIndex};
+use tui_majo::domain::tile::{Tile, TileIndex};
 use tui_majo::ui::screens::game::TileSpec;
 
 /// 默认测试 seed; 改这里影响所有未指定 seed 的用例.
@@ -44,7 +45,7 @@ pub const DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct TestRoomBuilder {
     nicks: Vec<String>,
-    config: GameConfig,
+    config: GameRules,
     seed: u64,
     /// drain 时检测到 AwaitCalls 鸣牌窗口的 ActionRequired 自动发 Pass.
     /// 默认 true. calls 场景需主动响应时设 false.
@@ -63,7 +64,7 @@ impl TestRoomBuilder {
     pub fn new() -> Self {
         Self {
             nicks: vec!["Host".into()],
-            config: GameConfig::default(),
+            config: GameRules::default(),
             seed: DEFAULT_SEED,
             auto_pass_calls: true,
             call_window_ms: None,
@@ -96,7 +97,7 @@ impl TestRoomBuilder {
         self
     }
 
-    pub fn config(mut self, c: GameConfig) -> Self {
+    pub fn config(mut self, c: GameRules) -> Self {
         self.config = c;
         self
     }

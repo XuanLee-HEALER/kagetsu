@@ -20,12 +20,12 @@
 
 use std::collections::HashMap;
 
-use tui_majo::config::GameConfig;
-use tui_majo::decompose::{Decomposition, decompose};
-use tui_majo::game::RoundWind;
-use tui_majo::meld::{Meld, MeldKind, Seat};
-use tui_majo::tile::{Tile, TileIndex, count_by_kind};
-use tui_majo::yaku::WinContext;
+use tui_majo::engine::rules::GameRules;
+use tui_majo::domain::decompose::{Decomposition, decompose};
+use tui_majo::engine::state::RoundWind;
+use tui_majo::domain::meld::{Meld, MeldKind, Seat};
+use tui_majo::domain::tile::{Tile, TileIndex, count_by_kind};
+use tui_majo::domain::yaku::WinContext;
 
 use super::replay_log::{KyokuEvent, KyokuLog, KyokuResult};
 
@@ -261,11 +261,11 @@ impl ReplayState {
 
 pub struct ReplayDriver<'a> {
     pub log: &'a KyokuLog,
-    pub config: &'a GameConfig,
+    pub config: &'a GameRules,
 }
 
 impl<'a> ReplayDriver<'a> {
-    pub fn new(log: &'a KyokuLog, config: &'a GameConfig) -> Self {
+    pub fn new(log: &'a KyokuLog, config: &'a GameRules) -> Self {
         Self { log, config }
     }
 
@@ -304,7 +304,7 @@ impl<'a> ReplayDriver<'a> {
 // Hora 验证: 用 winner 的 hand+melds 调 evaluate
 // ============================================================================
 
-fn verify_hora(state: &ReplayState, log: &KyokuLog, config: &GameConfig) -> Vec<ReplayDiff> {
+fn verify_hora(state: &ReplayState, log: &KyokuLog, config: &GameRules) -> Vec<ReplayDiff> {
     let mut diffs = Vec::new();
     let (
         winner,
@@ -365,7 +365,7 @@ fn verify_hora(state: &ReplayState, log: &KyokuLog, config: &GameConfig) -> Vec<
     }
 
     // 取分数最高的分解
-    let mut best: Option<tui_majo::score::ScoreResult> = None;
+    let mut best: Option<tui_majo::engine::score::ScoreResult> = None;
     for decomp in &decomps {
         let ctx = build_ctx(
             decomp,
@@ -377,7 +377,7 @@ fn verify_hora(state: &ReplayState, log: &KyokuLog, config: &GameConfig) -> Vec<
             winning_tile,
             &ura_markers,
         );
-        if let Some(res) = tui_majo::score::evaluate(&ctx, &state.melds[widx])
+        if let Some(res) = tui_majo::engine::score::evaluate(&ctx, &state.melds[widx])
             && best
                 .as_ref()
                 .map(|b| res.han > b.han || (res.han == b.han && res.fu > b.fu))
@@ -461,7 +461,7 @@ fn build_ctx<'a>(
     decomp: &'a Decomposition,
     state: &'a ReplayState,
     _log: &'a KyokuLog,
-    config: &'a GameConfig,
+    config: &'a GameRules,
     winner: Seat,
     from: Seat,
     winning_tile: Tile,
@@ -522,7 +522,7 @@ fn build_ctx<'a>(
         dora_count,
         aka_count,
         ura_dora_count,
-        config,
+        rules: config,
     }
 }
 
@@ -630,7 +630,7 @@ mod tests {
 {"type":"end_kyoku"}"#;
         let evs = parse_mjai_log(log).unwrap();
         let replay = build_replay_log(evs).unwrap();
-        let cfg = GameConfig::default();
+        let cfg = GameRules::default();
         let driver = ReplayDriver::new(&replay.kyokus[0], &cfg);
         let diffs = driver.replay();
         assert!(diffs.is_empty(), "应无差异, 实际: {diffs:#?}");
@@ -645,7 +645,7 @@ mod tests {
 {"type":"end_kyoku"}"#;
         let evs = parse_mjai_log(log).unwrap();
         let replay = build_replay_log(evs).unwrap();
-        let cfg = GameConfig::default();
+        let cfg = GameRules::default();
         let driver = ReplayDriver::new(&replay.kyokus[0], &cfg);
         let diffs = driver.replay();
         assert!(!diffs.is_empty());

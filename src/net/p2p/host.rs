@@ -315,7 +315,7 @@ async fn process_pending_join(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::GameConfig;
+    use crate::engine::rules::GameRules;
     use crate::net::p2p::join::join_remote;
     use crate::net::room::spawn_room;
     use std::time::Duration;
@@ -331,7 +331,7 @@ mod tests {
             )
             .try_init();
 
-        let handle = spawn_room("Host".into(), GameConfig::default());
+        let handle = spawn_room("Host".into(), GameRules::default());
         let host = spawn_p2p_listener(handle.clone(), "host_nick=Host;players=1;lifecycle=lobby;room_id=t".into())
             .await
             .expect("listener");

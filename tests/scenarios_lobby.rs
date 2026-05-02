@@ -4,7 +4,7 @@ mod common;
 
 use std::time::Duration;
 
-use tui_majo::config::{GameConfig, LengthRule};
+use tui_majo::engine::rules::{GameRules, LengthRule};
 use tui_majo::net::protocol::{ClientMsg, RoomLifecycle, ServerMsg};
 
 use common::TestRoomBuilder;
@@ -76,18 +76,18 @@ async fn non_host_start_game_ignored() {
     );
 }
 
-/// 房主 UpdateConfig 应生效, 非房主忽略.
+/// 房主 UpdateRules 应生效, 非房主忽略.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn host_can_update_config_others_cannot() {
     let mut room = TestRoomBuilder::new().humans(2).build_lobby().await;
-    let new_cfg = GameConfig {
+    let new_cfg = GameRules {
         length: LengthRule::Tonpuusen,
-        ..GameConfig::default()
+        ..GameRules::default()
     };
 
     // 非 host 改 → 忽略
     room.client(1)
-        .send(ClientMsg::UpdateConfig(new_cfg.clone()));
+        .send(ClientMsg::UpdateRules(new_cfg.clone()));
     room.drain_all().await;
     let r = room.clients[0].latest_room.as_ref().unwrap();
     assert!(
@@ -96,7 +96,7 @@ async fn host_can_update_config_others_cannot() {
     );
 
     // host 改 → 生效
-    room.host().send(ClientMsg::UpdateConfig(new_cfg));
+    room.host().send(ClientMsg::UpdateRules(new_cfg));
     room.drain_all().await;
     let r = room.clients[0].latest_room.as_ref().unwrap();
     assert!(

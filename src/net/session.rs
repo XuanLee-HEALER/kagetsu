@@ -114,13 +114,13 @@ pub async fn spawn_local_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::GameConfig;
+    use crate::engine::rules::GameRules;
     use crate::net::protocol::{ClientMsg, RoomLifecycle, ServerMsg};
     use crate::net::room::spawn_room;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_session_round_trip() {
-        let handle = spawn_room("Host".into(), GameConfig::default());
+        let handle = spawn_room("Host".into(), GameRules::default());
         let mut sess = spawn_local_session(handle.clone(), "Host".into())
             .await
             .expect("join");

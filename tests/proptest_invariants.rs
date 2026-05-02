@@ -31,8 +31,8 @@ use std::time::Duration;
 use proptest::prelude::*;
 use tokio::runtime::Builder;
 
-use tui_majo::game::Phase;
-use tui_majo::meld::{MeldKind, Seat};
+use tui_majo::engine::phase::Phase;
+use tui_majo::domain::meld::{MeldKind, Seat};
 use tui_majo::net::protocol::{GameStateView, RoomLifecycle, ServerMsg};
 
 use common::{TestRoom, TestRoomBuilder};
@@ -179,7 +179,7 @@ fn check_view_invariants(view: &GameStateView, seed: u64) -> Result<(), TestCase
     Ok(())
 }
 
-fn meld_tile_count(m: &tui_majo::meld::Meld) -> usize {
+fn meld_tile_count(m: &tui_majo::domain::meld::Meld) -> usize {
     match &m.kind {
         MeldKind::Chi { tiles } | MeldKind::Pon { tiles } => tiles.len(),
         MeldKind::Minkan { tiles } | MeldKind::Shouminkan { tiles } | MeldKind::Ankan { tiles } => {

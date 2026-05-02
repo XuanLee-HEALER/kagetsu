@@ -16,7 +16,7 @@
 //! - 27: 东, 28: 南, 29: 西, 30: 北
 //! - 31: 白, 32: 发, 33: 中
 
-use tui_majo::tile::{Tile, TileIndex};
+use tui_majo::domain::tile::{Tile, TileIndex};
 
 /// 解析 mjai pai 字符串 → Tile (id 自动分配, 不保证全局唯一).
 ///

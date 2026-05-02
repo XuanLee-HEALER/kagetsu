@@ -26,7 +26,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
-use crate::game::{GameEvent, Phase};
+use crate::engine::event::GameEvent;
+use crate::engine::phase::Phase;
 use crate::domain::meld::{MeldKind, Seat};
 use crate::net::protocol::{
     ClientMsg, GameStateView, NetAction, PlayerView, RoomLifecycle, ServerMsg,
@@ -126,7 +127,7 @@ impl OnlineGameState {
                     self.selected = max - 1;
                 }
                 // 收到新 state, 旧 hints 失效 (新一轮才会再发 ActionRequired)
-                if !matches!(new_view.phase, crate::game::Phase::AwaitCalls) {
+                if !matches!(new_view.phase, crate::engine::phase::Phase::AwaitCalls) {
                     self.current_hints = None;
                     self.current_deadline_ms = 0;
                 }

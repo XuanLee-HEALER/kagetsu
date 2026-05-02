@@ -14,10 +14,12 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::config::GameConfig;
-use crate::game::{GameEvent, Phase, RoundWind};
+use crate::engine::rules::GameRules;
+use crate::engine::event::GameEvent;
+use crate::engine::phase::Phase;
+use crate::engine::state::RoundWind;
 use crate::domain::meld::{Meld, Seat};
-use crate::score::Ranking;
+use crate::engine::score::Ranking;
 use crate::domain::tile::{Tile, TileIndex};
 use crate::ui::screens::game::TileSpec;
 
@@ -39,7 +41,7 @@ pub enum ClientMsg {
     /// 房主开始游戏.
     StartGame,
     /// 房主修改房间配置 (仅 lobby 阶段生效).
-    UpdateConfig(GameConfig),
+    UpdateRules(GameRules),
     /// 游戏中提交动作.
     Action(NetAction),
     /// RoundEnd 选择回房间 (改配置).
@@ -127,7 +129,7 @@ pub enum RoomLifecycle {
 pub struct RoomView {
     pub room_id: String,
     pub host_id: u32,
-    pub config: GameConfig,
+    pub config: GameRules,
     pub players: Vec<PlayerSlot>,
     pub state: RoomLifecycle,
 }
@@ -218,7 +220,7 @@ pub struct GameOverView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GameConfig, LengthRule};
+    use crate::engine::rules::{GameRules, LengthRule};
 
     fn round_trip<T>(value: &T) -> T
     where
@@ -249,7 +251,7 @@ mod tests {
 
     #[test]
     fn server_msg_welcome_round_trip() {
-        let config = GameConfig {
+        let config = GameRules {
             length: LengthRule::Tonpuusen,
             ..Default::default()
         };

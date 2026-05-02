@@ -18,8 +18,8 @@ use crate::replay::tenhou_meld::{DecodedMeld, relative_to_seat};
 use crate::replay::tenhou_pai::tenhou_id_to_tile;
 use crate::replay::tenhou_parser::TenhouEvent;
 use crate::replay::tenhou_yaku::tenhou_yaku_id_to_mjai;
-use tui_majo::meld::{MeldKind, Seat};
-use tui_majo::tile::Tile;
+use tui_majo::domain::meld::{MeldKind, Seat};
+use tui_majo::domain::tile::Tile;
 
 /// 转换器: 状态机, 吃 TenhouEvent, 吐 MjaiEvent.
 pub fn tenhou_to_mjai(events: &[TenhouEvent]) -> Result<Vec<MjaiEvent>, String> {
@@ -461,17 +461,17 @@ mod tests {
             tiles: [
                 Tile {
                     id: 0,
-                    kind: tui_majo::tile::TileIndex(0),
+                    kind: tui_majo::domain::tile::TileIndex(0),
                     red: false,
                 },
                 Tile {
                     id: 0,
-                    kind: tui_majo::tile::TileIndex(0),
+                    kind: tui_majo::domain::tile::TileIndex(0),
                     red: false,
                 },
                 Tile {
                     id: 0,
-                    kind: tui_majo::tile::TileIndex(0),
+                    kind: tui_majo::domain::tile::TileIndex(0),
                     red: false,
                 },
             ],

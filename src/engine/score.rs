@@ -2,9 +2,9 @@
 //!
 //! 详见 docs/spec/scoring.md
 
-use crate::config::GameConfig;
+use crate::engine::rules::GameRules;
 use crate::domain::decompose::{Decomposition, Mentsu, WaitKind};
-use crate::game::PlayerState;
+use crate::engine::state::PlayerState;
 use crate::domain::meld::{Meld, MeldKind, Seat};
 use crate::domain::yaku::{WinContext, Yaku, detect_yaku};
 
@@ -217,7 +217,7 @@ pub fn evaluate(ctx: &WinContext, melds: &[Meld]) -> Option<ScoreResult> {
             8000 * yakuman_count as u32,
             ScoreLevel::Yakuman(yakuman_count),
         )
-    } else if han >= 13 && ctx.config.kazoe_yakuman {
+    } else if han >= 13 && ctx.rules.kazoe_yakuman {
         (8000, ScoreLevel::KazoeYakuman)
     } else if han >= 11 {
         (6000, ScoreLevel::Sanbaiman)
@@ -334,7 +334,7 @@ pub struct Ranking {
 /// - uma 按位次发放 config.uma[i].
 /// - oka 给 1 位: (target_score - starting_score) * 4 / 1000 (K).
 /// - 单位统一为 K(千点), 现实社团报点常用单位.
-pub fn final_ranking(players: &[PlayerState; 4], config: &GameConfig) -> [Ranking; 4] {
+pub fn final_ranking(players: &[PlayerState; 4], config: &GameRules) -> [Ranking; 4] {
     let mut indices = [0usize, 1, 2, 3];
     // 降序排; 同分按 Seat 顺序(index 小的在前).
     indices.sort_by(|&a, &b| {
@@ -455,7 +455,7 @@ mod tests {
             ps(Seat::West, 20000),
             ps(Seat::North, 10000),
         ];
-        let cfg = GameConfig::default();
+        let cfg = GameRules::default();
         let r = final_ranking(&players, &cfg);
         assert_eq!(r[0].seat, Seat::South);
         assert_eq!(r[1].seat, Seat::East);
@@ -476,7 +476,7 @@ mod tests {
             ps(Seat::West, 15000),  // 3位
             ps(Seat::North, 5000),  // 4位
         ];
-        let cfg = GameConfig::default();
+        let cfg = GameRules::default();
         let r = final_ranking(&players, &cfg);
 
         // 1 位: (50000-30000)/1000 + 15 + 20 = 20 + 15 + 20 = 55
@@ -501,7 +501,7 @@ mod tests {
             ps(Seat::West, 25000),
             ps(Seat::North, 25000),
         ];
-        let cfg = GameConfig::default();
+        let cfg = GameRules::default();
         let r = final_ranking(&players, &cfg);
         assert_eq!(r[0].seat, Seat::East);
         assert_eq!(r[1].seat, Seat::South);

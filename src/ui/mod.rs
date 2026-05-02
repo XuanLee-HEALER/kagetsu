@@ -20,8 +20,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::time::{Duration, Instant};
 
-use crate::config::{GameConfig, LocalPrefs};
-use crate::score::Ranking;
+use crate::config::LocalPrefs;
+use crate::engine::rules::GameRules;
+use crate::engine::score::Ranking;
 use crate::ui::confirm::{ConfirmChoice, ConfirmModal};
 
 pub use screens::config::{ConfigState, SeedChoice};
@@ -92,7 +93,7 @@ pub enum Screen {
 pub struct App {
     pub screen: Screen,
     pub running: bool,
-    pub last_config: GameConfig,
+    pub last_config: GameRules,
     pub last_seed_choice: SeedChoice,
     /// 本地 UI 偏好 (主题等), 不绑房间.
     pub local_prefs: LocalPrefs,
@@ -111,7 +112,7 @@ impl App {
         Self {
             screen: Screen::MainMenu(MainMenuState::new()),
             running: true,
-            last_config: GameConfig::default(),
+            last_config: GameRules::default(),
             last_seed_choice: SeedChoice::Random,
             local_prefs: LocalPrefs::load(),
             runtime,
@@ -396,7 +397,7 @@ impl App {
                 let placeholder_view = crate::net::protocol::RoomView {
                     room_id: format!("远程 @ {addr}"),
                     host_id: 0,
-                    config: GameConfig::default(),
+                    config: GameRules::default(),
                     players: vec![],
                     state: crate::net::protocol::RoomLifecycle::Lobby,
                 };

@@ -4,8 +4,9 @@ mod common;
 
 use std::time::Duration;
 
-use tui_majo::config::{GameConfig, LengthRule};
-use tui_majo::game::{GameEvent, Phase};
+use tui_majo::engine::rules::{GameRules, LengthRule};
+use tui_majo::engine::event::GameEvent;
+use tui_majo::engine::phase::Phase;
 use tui_majo::net::protocol::{RoomLifecycle, ServerMsg};
 
 use common::TestRoomBuilder;
@@ -120,9 +121,9 @@ async fn next_round_advances_kyoku() {
 /// (实际上几局可能流局亲连庄, kyoku 不变. 我们只验证 GameEnd 必然到达.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tonpuusen_eventually_ends() {
-    let cfg = GameConfig {
+    let cfg = GameRules {
         length: LengthRule::Tonpuusen,
-        ..GameConfig::default()
+        ..GameRules::default()
     };
     let mut room = TestRoomBuilder::new()
         .humans(1)

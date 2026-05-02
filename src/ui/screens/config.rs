@@ -1,4 +1,4 @@
-//! 配置屏幕: 编辑 GameConfig 全部字段 + 思考时长 + 种子.
+//! 配置屏幕: 编辑 GameRules 全部字段 + 思考时长 + 种子.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::config::{GameConfig, LengthRule, MultiRonRule};
+use crate::engine::rules::{GameRules, LengthRule, MultiRonRule};
 use crate::ui::Transition;
 
 /// 庄 seed 的选择. `Fixed(n)` 用于复盘.
@@ -30,13 +30,13 @@ const THINKING_PRESETS: &[Option<u32>] = &[Some(10), Some(20), Some(30), Some(60
 
 #[derive(Debug, Clone)]
 pub struct ConfigState {
-    pub config: GameConfig,
+    pub config: GameRules,
     pub seed_choice: SeedChoice,
     pub selected: usize,
 }
 
 impl ConfigState {
-    pub fn from(config: &GameConfig, seed_choice: &SeedChoice) -> Self {
+    pub fn from(config: &GameRules, seed_choice: &SeedChoice) -> Self {
         Self {
             config: config.clone(),
             seed_choice: *seed_choice,

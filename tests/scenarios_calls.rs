@@ -8,7 +8,7 @@ mod common;
 
 use std::time::Duration;
 
-use tui_majo::game::Phase;
+use tui_majo::engine::phase::Phase;
 use tui_majo::net::protocol::{ClientMsg, NetAction, ServerMsg};
 
 use common::TestRoomBuilder;

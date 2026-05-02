@@ -83,7 +83,7 @@ impl OnlineRoomState {
         if let Some(modal) = self.editing_config.as_mut() {
             match modal.handle_key(key) {
                 EditOutcome::Save(cfg) => {
-                    self.session.send(ClientMsg::UpdateConfig(cfg));
+                    self.session.send(ClientMsg::UpdateRules(cfg));
                     self.editing_config = None;
                     self.message = "已提交配置更新.".into();
                 }
@@ -199,8 +199,8 @@ impl OnlineRoomState {
         )));
         let cfg = &self.room_view.config;
         let len_label = match cfg.length {
-            crate::config::LengthRule::Hanchan => "半庄战",
-            crate::config::LengthRule::Tonpuusen => "东风战",
+            crate::engine::rules::LengthRule::Hanchan => "半庄战",
+            crate::engine::rules::LengthRule::Tonpuusen => "东风战",
         };
         let thinking_label = cfg
             .thinking_time_secs
@@ -215,7 +215,7 @@ impl OnlineRoomState {
             ("里宝牌", bool_label(cfg.ura_dora), cfg.ura_dora),
         ];
         for (key, val, on) in &entries {
-            let val_color = match key.as_ref() {
+            let val_color = match *key {
                 "赛制" | "思考时长" => Color::Yellow,
                 _ => {
                     if *on {

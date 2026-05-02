@@ -7,7 +7,8 @@
 //! 后续可替换为更复杂的策略(牌效率/防守/听牌选择等).
 
 use crate::domain::action::Action;
-use crate::game::{GameState, Phase};
+use crate::engine::phase::Phase;
+use crate::engine::state::GameState;
 use crate::domain::meld::Seat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,11 +67,11 @@ pub fn default_action_on_timeout(state: &GameState) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::GameConfig;
+    use crate::engine::rules::GameRules;
 
     #[test]
     fn timeout_default_discards_last_drawn() {
-        let mut g = GameState::new(GameConfig::default());
+        let mut g = GameState::new(GameRules::default());
         g.start_round(42);
         let drawn = g.do_draw().unwrap();
         let action = default_action_on_timeout(&g);
@@ -82,7 +83,7 @@ mod tests {
 
     #[test]
     fn timeout_default_pass_outside_discard_phase() {
-        let g = GameState::new(GameConfig::default());
+        let g = GameState::new(GameRules::default());
         // Phase::Deal
         assert!(matches!(default_action_on_timeout(&g), Action::Pass));
     }

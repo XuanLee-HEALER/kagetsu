@@ -10,7 +10,7 @@
 //! - [`replay_log`]  — 中性 IR (`ReplayLog` / `KyokuLog` / `KyokuEvent`)
 //! - [`driver`]      — 用 `GameState` replay 一局 + 对比 expected
 //!
-//! [`Tile`]: tui_majo::tile::Tile
+//! [`Tile`]: tui_majo::domain::tile::Tile
 
 #![allow(dead_code)]
 

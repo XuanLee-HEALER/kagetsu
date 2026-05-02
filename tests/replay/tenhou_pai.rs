@@ -17,7 +17,7 @@
 //! 天凤约定: 5m 赤是 id 16, 5p 赤是 id 52, 5s 赤是 id 88
 //! (即 5 这种 kind 的 4 张中 id 最小的那张).
 
-use tui_majo::tile::{Tile, TileIndex};
+use tui_majo::domain::tile::{Tile, TileIndex};
 
 /// 天凤 tile id (0-135) → Tile.
 pub fn tenhou_id_to_tile(id: u16) -> Result<Tile, String> {

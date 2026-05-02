@@ -25,14 +25,15 @@ use tokio::sync::{
 };
 use uuid::Uuid;
 
-use crate::config::GameConfig;
-use crate::game::{GameState, Phase, RoundResult, RyuukyokuKind};
+use crate::engine::rules::GameRules;
+use crate::engine::phase::Phase;
+use crate::engine::state::{GameState, RoundResult, RyuukyokuKind};
 use crate::domain::meld::Seat;
 use crate::net::protocol::{
     ClientMsg, GameOverView, GameStateView, NetAction, PlayerSlot, PlayerView, RoomLifecycle,
     RoomView, RoundResultView, ServerMsg,
 };
-use crate::score::final_ranking;
+use crate::engine::score::final_ranking;
 use crate::domain::tile::Tile;
 
 // ============================================================================
@@ -41,7 +42,7 @@ use crate::domain::tile::Tile;
 
 /// 创建一个新 RoomActor 并 spawn 到当前 tokio runtime.
 /// 返回的 [`RoomHandle`] 可发 [`RoomCmd`] 给 actor.
-pub fn spawn_room(host_nickname: String, config: GameConfig) -> RoomHandle {
+pub fn spawn_room(host_nickname: String, config: GameRules) -> RoomHandle {
     spawn_room_with_seed(host_nickname, config, None)
 }
 
@@ -52,7 +53,7 @@ pub fn spawn_room(host_nickname: String, config: GameConfig) -> RoomHandle {
 /// - 局内随机 (洗牌) 决定性可复现
 pub fn spawn_room_with_seed(
     host_nickname: String,
-    config: GameConfig,
+    config: GameRules,
     seed: Option<u64>,
 ) -> RoomHandle {
     spawn_room_advanced(host_nickname, config, seed, None)
@@ -61,7 +62,7 @@ pub fn spawn_room_with_seed(
 /// 全选项版 spawn, 测试用. `call_window_ms_override` 缩短鸣牌窗口加快测试.
 pub fn spawn_room_advanced(
     host_nickname: String,
-    config: GameConfig,
+    config: GameRules,
     seed: Option<u64>,
     call_window_ms_override: Option<u64>,
 ) -> RoomHandle {
@@ -160,7 +161,7 @@ fn chrono_now_unix_ms() -> i64 {
 
 struct RoomActor {
     room_id: String,
-    config: GameConfig,
+    config: GameRules,
     state: RoomLifecycle,
     slots: Vec<SlotEntry>,
     rx: UnboundedReceiver<RoomCmd>,
@@ -189,7 +190,7 @@ struct RoomActor {
 impl RoomActor {
     fn new_with_rx(
         host_nickname: String,
-        config: GameConfig,
+        config: GameRules,
         rx: UnboundedReceiver<RoomCmd>,
         self_tx: UnboundedSender<RoomCmd>,
         seed_override: Option<u64>,
@@ -343,7 +344,7 @@ impl RoomActor {
         match msg {
             ClientMsg::Ready { ready } => self.handle_ready(player_id, ready),
             ClientMsg::StartGame => self.handle_start_game(player_id),
-            ClientMsg::UpdateConfig(cfg) => self.handle_update_config(player_id, cfg),
+            ClientMsg::UpdateRules(cfg) => self.handle_update_config(player_id, cfg),
             ClientMsg::Action(action) => self.handle_action(player_id, action),
             ClientMsg::BackToRoom => self.handle_back_to_room(player_id),
             ClientMsg::ContinueGame => self.handle_continue_game(player_id),
@@ -367,7 +368,7 @@ impl RoomActor {
         self.broadcast_room_update();
     }
 
-    fn handle_update_config(&mut self, player_id: u32, cfg: GameConfig) {
+    fn handle_update_config(&mut self, player_id: u32, cfg: GameRules) {
         if self.state != RoomLifecycle::Lobby {
             return;
         }
@@ -901,7 +902,7 @@ impl RoomActor {
             return;
         };
         game.phase = Phase::GameEnd;
-        let rankings = final_ranking(&game.players, &game.config);
+        let rankings = final_ranking(&game.players, &game.rules);
         self.broadcast_state_view();
         self.broadcast_to_all(ServerMsg::GameEnd(GameOverView { rankings }));
         self.state = RoomLifecycle::GameEnd;
@@ -1072,7 +1073,7 @@ fn _api_silence_warnings(_x: HashMap<Uuid, u32>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::GameConfig;
+    use crate::engine::rules::GameRules;
     use std::time::Duration;
 
     /// 模拟一个 client 连到 RoomActor, 拿到 (player_id, token, recv_rx).
@@ -1105,7 +1106,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn host_join_alone() {
-        let handle = spawn_room("host".into(), GameConfig::default());
+        let handle = spawn_room("host".into(), GameRules::default());
         let (id, _token, mut rx) = join_player(&handle, "host").await;
         assert_eq!(id, 1);
         // 应收到 Welcome
@@ -1115,7 +1116,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn second_player_not_host() {
-        let handle = spawn_room("h".into(), GameConfig::default());
+        let handle = spawn_room("h".into(), GameRules::default());
         let (host_id, _, _) = join_player(&handle, "host").await;
         let (other_id, _, _) = join_player(&handle, "other").await;
         assert_eq!(host_id, 1);
@@ -1124,7 +1125,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn start_game_with_one_human_three_ai() {
-        let handle = spawn_room("h".into(), GameConfig::default());
+        let handle = spawn_room("h".into(), GameRules::default());
         let (host_id, _, mut host_rx) = join_player(&handle, "host").await;
         // host 自动 ready, 直接 start
         handle
@@ -1148,7 +1149,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn host_leaves_room_dissolves() {
-        let handle = spawn_room("h".into(), GameConfig::default());
+        let handle = spawn_room("h".into(), GameRules::default());
         let (host_id, _, mut host_rx) = join_player(&handle, "host").await;
         let (_other_id, _, mut other_rx) = join_player(&handle, "other").await;
         handle
@@ -1174,12 +1175,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn config_update_only_by_host() {
-        let handle = spawn_room("h".into(), GameConfig::default());
+        let handle = spawn_room("h".into(), GameRules::default());
         let (host_id, _, _) = join_player(&handle, "host").await;
         let (other_id, _, _) = join_player(&handle, "other").await;
 
-        let cfg = GameConfig {
-            length: crate::config::LengthRule::Tonpuusen,
+        let cfg = GameRules {
+            length: crate::engine::rules::LengthRule::Tonpuusen,
             ..Default::default()
         };
 
@@ -1188,7 +1189,7 @@ mod tests {
             .tx
             .send(RoomCmd::PlayerMsg {
                 player_id: other_id,
-                msg: ClientMsg::UpdateConfig(cfg.clone()),
+                msg: ClientMsg::UpdateRules(cfg.clone()),
             })
             .unwrap();
         yield_actor().await;
@@ -1198,7 +1199,7 @@ mod tests {
             .tx
             .send(RoomCmd::PlayerMsg {
                 player_id: host_id,
-                msg: ClientMsg::UpdateConfig(cfg),
+                msg: ClientMsg::UpdateRules(cfg),
             })
             .unwrap();
         yield_actor().await;
@@ -1234,7 +1235,7 @@ mod tests {
     /// 立即收到 GameStateView (如果游戏中).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reconnect_with_token_resumes_seat() {
-        let handle = spawn_room("h".into(), GameConfig::default());
+        let handle = spawn_room("h".into(), GameRules::default());
         let (host_id, _, _) = join_player(&handle, "host").await;
         let (_, alice_token, alice_rx) = join_player(&handle, "alice").await;
 
@@ -1270,7 +1271,7 @@ mod tests {
     /// 然后 host 切牌, AI 应继续接管直到下一次 host turn.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ai_drives_when_seat_is_ai() {
-        let handle = spawn_room("h".into(), GameConfig::default());
+        let handle = spawn_room("h".into(), GameRules::default());
         let (host_id, _, mut host_rx) = join_player(&handle, "host").await;
         handle
             .tx
@@ -1317,7 +1318,7 @@ mod tests {
                     && v.phase == Phase::AwaitDiscard
                     && v.events
                         .iter()
-                        .filter(|e| matches!(e, crate::game::GameEvent::Discard { .. }))
+                        .filter(|e| matches!(e, crate::engine::event::GameEvent::Discard { .. }))
                         .count()
                         >= 4
             },
@@ -1347,7 +1348,7 @@ mod tests {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let mut actor = RoomActor::new_with_rx(
             "host".into(),
-            GameConfig::default(),
+            GameRules::default(),
             cmd_rx,
             cmd_tx,
             Some(0xC0DE_C0DE),
@@ -1373,7 +1374,7 @@ mod tests {
         }
         actor.next_player_id = 5;
 
-        let mut game = GameState::new(GameConfig::default());
+        let mut game = GameState::new(GameRules::default());
         game.start_round(0xC0DE_C0DE);
         actor.game = Some(game);
         actor.state = RoomLifecycle::InGame;

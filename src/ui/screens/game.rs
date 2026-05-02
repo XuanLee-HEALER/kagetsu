@@ -23,11 +23,13 @@ use ratatui::style::{Modifier, Style};
 use std::time::{Duration, Instant};
 
 use crate::domain::action::Action;
-use crate::config::GameConfig;
-use crate::game::{CallOptions, GameEvent, GameState, Phase, RoundResult, RyuukyokuKind};
+use crate::engine::rules::GameRules;
+use crate::engine::event::GameEvent;
+use crate::engine::phase::Phase;
+use crate::engine::state::{CallOptions, GameState, RoundResult, RyuukyokuKind};
 use crate::domain::meld::{MeldKind, Seat};
 use crate::player::{ai_choose_discard, default_action_on_timeout};
-use crate::score::final_ranking;
+use crate::engine::score::final_ranking;
 use crate::domain::tile::{Tile, TileIndex};
 use crate::ui::Transition;
 use crate::ui::paint::{
@@ -77,13 +79,13 @@ pub struct GameScreenState {
     pub modal_selected: usize,
     /// 进入 RoundEnd 的时刻, 用于流局后 N 秒自动推进.
     pub round_end_at: Option<Instant>,
-    /// 当前主题 (本地偏好, 不绑 GameConfig).
+    /// 当前主题 (本地偏好, 不绑 GameRules).
     pub theme_kind: crate::ui::theme::ThemeKind,
 }
 
 impl GameScreenState {
     pub fn new(
-        config: GameConfig,
+        config: GameRules,
         game_seed: u64,
         theme_kind: crate::ui::theme::ThemeKind,
     ) -> Self {
@@ -268,7 +270,7 @@ impl GameScreenState {
                 // 流局/和牌都等用户按 N 主动推进 (next_round).
             }
             Phase::GameEnd => {
-                let rankings = final_ranking(&self.game.players, &self.game.config);
+                let rankings = final_ranking(&self.game.players, &self.game.rules);
                 return Some(Transition::EnterGameOver { rankings });
             }
         }
@@ -662,7 +664,7 @@ impl GameScreenState {
         if self.decision_deadline.is_some() {
             return;
         }
-        if let Some(secs) = self.game.config.thinking_time_secs {
+        if let Some(secs) = self.game.rules.thinking_time_secs {
             self.decision_deadline = Some(Instant::now() + Duration::from_secs(secs as u64));
         }
     }
@@ -696,7 +698,7 @@ impl GameScreenState {
         self.game.turn == PLAYER_SEAT
     }
 
-    fn player(&self) -> &crate::game::PlayerState {
+    fn player(&self) -> &crate::engine::state::PlayerState {
         &self.game.players[PLAYER_SEAT.index()]
     }
 
@@ -1865,7 +1867,7 @@ impl GameScreenState {
 }
 
 /// 找到玩家立直时弃出的牌在 river 里的索引. 简化: 当 player.riichi 时找最早的弃牌索引.
-fn riichi_index_in_river(p: &crate::game::PlayerState) -> Option<usize> {
+fn riichi_index_in_river(p: &crate::engine::state::PlayerState) -> Option<usize> {
     if p.riichi && !p.river.is_empty() {
         // MVP: 立直牌 = 立直时切的那张, 但当前 PlayerState 没存. 用 None 暂不标记.
         // 后续 task 可加 riichi_river_idx 字段.
@@ -2255,7 +2257,7 @@ mod tests {
     #[test]
     fn app_can_complete_a_round_without_panic() {
         let mut app = GameScreenState::new(
-            GameConfig::default(),
+            GameRules::default(),
             0xC0FFEE,
             crate::ui::theme::ThemeKind::Dark,
         );
@@ -2287,7 +2289,7 @@ mod tests {
     #[test]
     fn app_can_advance_through_multiple_rounds() {
         let mut app = GameScreenState::new(
-            GameConfig::default(),
+            GameRules::default(),
             0xC0FFEE,
             crate::ui::theme::ThemeKind::Dark,
         );
@@ -2393,7 +2395,7 @@ mod tests {
     #[test]
     fn modal_actions_in_await_discard() {
         let mut app = GameScreenState::new(
-            GameConfig::default(),
+            GameRules::default(),
             0xC0FFEE,
             crate::ui::theme::ThemeKind::Dark,
         );

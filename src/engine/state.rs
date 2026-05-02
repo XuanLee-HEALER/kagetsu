@@ -8,47 +8,16 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::GameConfig;
 use crate::domain::decompose::decompose;
 use crate::domain::hand::Hand;
 use crate::domain::meld::{Meld, MeldKind, Seat};
-use crate::score::{PaymentDistribution, ScoreResult, distribute, evaluate};
 use crate::domain::tile::{Tile, TileIndex, count_by_kind};
-use crate::wall::Wall;
 use crate::domain::yaku::WinContext;
-
-/// 局内动作事件, 给 UI 渲染最近动作日志使用.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GameEvent {
-    Draw { who: Seat, tile: Tile },
-    Discard { who: Seat, tile: Tile },
-    Pon { who: Seat, tile: Tile },
-    Chi { who: Seat, tile: Tile },
-    Minkan { who: Seat, tile: Tile },
-    Ankan { who: Seat, kind: TileIndex },
-    Shouminkan { who: Seat, kind: TileIndex },
-    Riichi { who: Seat, tile: Tile },
-    Tsumo { who: Seat },
-    Ron { who: Seat, from: Seat },
-}
-
-const MAX_EVENTS: usize = 32;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Phase {
-    /// 配牌中.
-    Deal,
-    /// 等当前家摸牌.
-    Draw,
-    /// 当前家已摸,等切牌(玩家由 UI 选择, AI 自动决定).
-    AwaitDiscard,
-    /// 切牌后,等他家(非自家)是否荣和.
-    AwaitCalls,
-    /// 一局结算,展示结果.
-    RoundEnd,
-    /// 整场终局.
-    GameEnd,
-}
+use crate::engine::event::{GameEvent, MAX_EVENTS};
+use crate::engine::phase::Phase;
+use crate::engine::rules::{GameRules, LengthRule};
+use crate::engine::score::{PaymentDistribution, ScoreResult, distribute, evaluate};
+use crate::engine::wall::Wall;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RoundWind {
@@ -165,7 +134,7 @@ pub struct SelfOptions {
 }
 
 pub struct GameState {
-    pub config: GameConfig,
+    pub rules: GameRules,
     pub round_wind: RoundWind,
     pub kyoku: u8, // 1..=4
     pub honba: u8,
@@ -186,10 +155,10 @@ pub struct GameState {
 }
 
 impl GameState {
-    pub fn new(config: GameConfig) -> Self {
-        let starting = config.starting_score;
+    pub fn new(rules: GameRules) -> Self {
+        let starting = rules.starting_score;
         Self {
-            config,
+            rules,
             round_wind: RoundWind::East,
             kyoku: 1,
             honba: 0,
@@ -230,7 +199,7 @@ impl GameState {
             p.reset_round();
         }
 
-        let mut wall = Wall::shuffled(seed, self.config.aka_dora);
+        let mut wall = Wall::shuffled(seed, self.rules.aka_dora);
         // 配牌: 每家 13 张.
         for _ in 0..13 {
             for seat in Seat::ALL {
@@ -321,7 +290,6 @@ impl GameState {
         if r.is_empty() {
             return None;
         }
-        // 选第一个拆解,后续可优化为选最高分.
         let menzen = p.hand.is_menzen();
         let fully = p.hand.is_fully_concealed();
         let ctx = WinContext {
@@ -345,7 +313,7 @@ impl GameState {
             dora_count: 0,
             aka_count: 0,
             ura_dora_count: 0,
-            config: &self.config,
+            rules: &self.rules,
         };
         evaluate(&ctx, &p.hand.melds)
     }
@@ -387,7 +355,7 @@ impl GameState {
             dora_count: 0,
             aka_count: 0,
             ura_dora_count: 0,
-            config: &self.config,
+            rules: &self.rules,
         };
         evaluate(&ctx, &p.hand.melds)
     }
@@ -539,7 +507,7 @@ impl GameState {
             self.round_wind = match self.round_wind {
                 RoundWind::East => {
                     // 东风战: 东 4 完即结束; 半庄战: 东 4 完进南风.
-                    if matches!(self.config.length, crate::config::LengthRule::Tonpuusen) {
+                    if matches!(self.rules.length, LengthRule::Tonpuusen) {
                         self.phase = Phase::GameEnd;
                         return;
                     }
@@ -992,7 +960,7 @@ mod tests {
 
     #[test]
     fn start_round_deals_correctly() {
-        let mut g = GameState::new(GameConfig::default());
+        let mut g = GameState::new(GameRules::default());
         g.start_round(42);
         for p in &g.players {
             assert_eq!(p.hand.closed.len(), 13);
@@ -1002,7 +970,7 @@ mod tests {
 
     #[test]
     fn draw_then_discard() {
-        let mut g = GameState::new(GameConfig::default());
+        let mut g = GameState::new(GameRules::default());
         g.start_round(42);
         let drawn = g.do_draw().unwrap();
         assert_eq!(g.players[0].hand.closed.len(), 14);
@@ -1014,9 +982,8 @@ mod tests {
 
     #[test]
     fn full_round_no_one_wins_eventually_ends() {
-        let mut g = GameState::new(GameConfig::default());
+        let mut g = GameState::new(GameRules::default());
         g.start_round(42);
-        // 70 张山, 每摸切循环 3 步状态转换, 留充足兜底.
         let mut steps = 0;
         loop {
             steps += 1;

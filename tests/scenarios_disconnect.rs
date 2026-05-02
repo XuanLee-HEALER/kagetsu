@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 
-use tui_majo::game::Phase;
+use tui_majo::engine::phase::Phase;
 use tui_majo::net::protocol::{ClientMsg, RoomLifecycle, ServerMsg};
 use tui_majo::net::room::RoomCmd;
 

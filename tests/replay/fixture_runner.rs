@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use tui_majo::config::GameConfig;
+use tui_majo::engine::rules::GameRules;
 
 use super::driver::{ReplayDiff, ReplayDriver};
 use super::replay_log::build_replay_log;
@@ -62,13 +62,13 @@ pub fn run_fixture(path: impl AsRef<Path>) -> Result<FixtureResult, String> {
 }
 
 /// 天凤凤凰房默认配置 (按 mjx-project tests_py 假设): 半庄, kuitan, ippatsu, ura, aka.
-pub fn tenhou_default_config() -> GameConfig {
-    GameConfig {
+pub fn tenhou_default_config() -> GameRules {
+    GameRules {
         kuitan: true,
         aka_dora: true,
         ippatsu: true,
         ura_dora: true,
-        ..GameConfig::default()
+        ..GameRules::default()
     }
 }
 

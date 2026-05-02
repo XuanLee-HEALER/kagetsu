@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::score::Ranking;
+use crate::engine::score::Ranking;
 use crate::ui::Transition;
 use crate::ui::widgets::seat_label;
 

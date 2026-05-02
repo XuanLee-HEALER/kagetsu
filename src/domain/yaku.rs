@@ -7,7 +7,7 @@
 //! - 全部役满完整实现
 //! - 古役: 类型完整, 实现按需逐个补 (默认关闭)
 
-use crate::config::GameConfig;
+use crate::engine::rules::GameRules;
 use crate::domain::decompose::{Decomposition, Mentsu, WaitKind};
 use crate::domain::meld::Meld;
 use crate::domain::tile::TileIndex;
@@ -203,7 +203,7 @@ pub struct WinContext<'a> {
     pub aka_count: u32,
     pub ura_dora_count: u32,
 
-    pub config: &'a GameConfig,
+    pub rules: &'a GameRules,
 }
 
 /// 返回所有命中的役及其番数.
@@ -218,13 +218,13 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
     if ctx.is_chiihou {
         yakuman.push((Yaku::Chiihou, 13));
     }
-    if ctx.config.kotekisai && ctx.config.kotekisai_renhou && ctx.is_renhou {
+    if ctx.rules.kotekisai && ctx.rules.kotekisai_renhou && ctx.is_renhou {
         yakuman.push((Yaku::Renhou, 13));
     }
 
     // 国士
     if let Decomposition::Kokushi { thirteen_wait, .. } = ctx.decomposition {
-        let mult = if *thirteen_wait && ctx.config.double_yakuman {
+        let mult = if *thirteen_wait && ctx.rules.double_yakuman {
             2
         } else {
             1
@@ -246,7 +246,7 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
                     ..
                 }
             );
-            let mult = if tanki && ctx.config.double_yakuman {
+            let mult = if tanki && ctx.rules.double_yakuman {
                 2
             } else {
                 1
@@ -258,7 +258,7 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
         }
         let (sho, dai) = sushii_check(ctx, melds);
         if dai {
-            let mult = if ctx.config.double_yakuman { 2 } else { 1 };
+            let mult = if ctx.rules.double_yakuman { 2 } else { 1 };
             yakuman.push((Yaku::Daisuushii, 13 * mult));
         } else if sho {
             yakuman.push((Yaku::Shousuushii, 13));
@@ -276,7 +276,7 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
             yakuman.push((Yaku::Suukantsu, 13));
         }
         if let Some(nine_wait) = chuurenpoutou_check(ctx) {
-            let mult = if nine_wait && ctx.config.double_yakuman {
+            let mult = if nine_wait && ctx.rules.double_yakuman {
                 2
             } else {
                 1
@@ -410,7 +410,7 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
     }
 
     // 断幺九
-    if is_tanyao(ctx.decomposition, melds) && (ctx.menzen || ctx.config.kuitan) {
+    if is_tanyao(ctx.decomposition, melds) && (ctx.menzen || ctx.rules.kuitan) {
         out.push((Yaku::Tanyao, 1));
     }
 
@@ -986,13 +986,13 @@ fn single_suit(d: &Decomposition, melds: &[Meld]) -> Option<Option<()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::GameConfig;
+    use crate::engine::rules::GameRules;
     use crate::domain::decompose::decompose;
 
     fn ctx_for(d: &Decomposition, menzen: bool) -> WinContext<'_> {
         // 预先构造一个临时上下文.config 必须是引用,但我们这里返回 owned,
         // 用 Box::leak 简化测试.
-        let cfg: &'static GameConfig = Box::leak(Box::new(GameConfig::default()));
+        let cfg: &'static GameRules = Box::leak(Box::new(GameRules::default()));
         WinContext {
             decomposition: d,
             seat_wind: TileIndex::EAST,
@@ -1018,7 +1018,7 @@ mod tests {
             dora_count: 0,
             aka_count: 0,
             ura_dora_count: 0,
-            config: cfg,
+            rules: cfg,
         }
     }
 

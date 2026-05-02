@@ -3,8 +3,8 @@
 //! Port from mjx-project/mjx (C++): include/mjx/internal/open.cpp
 //! 参考: <https://m77.hatenablog.com/entry/2017/05/21/214529>
 
-use tui_majo::meld::{Meld, MeldKind, Seat};
-use tui_majo::tile::Tile;
+use tui_majo::domain::meld::{Meld, MeldKind, Seat};
+use tui_majo::domain::tile::Tile;
 
 use super::tenhou_pai::tenhou_id_to_tile;
 
@@ -60,7 +60,7 @@ fn decode_chi(m: u16) -> Result<DecodedMeld, String> {
 
     let mut tiles = [Tile {
         id: 0,
-        kind: tui_majo::tile::TileIndex(0),
+        kind: tui_majo::domain::tile::TileIndex(0),
         red: false,
     }; 3];
     for (i, slot) in tiles.iter_mut().enumerate() {
@@ -88,7 +88,7 @@ fn decode_pon(m: u16) -> Result<DecodedMeld, String> {
     // 4 张中跳过 unused_offset 那张
     let mut tiles = [Tile {
         id: 0,
-        kind: tui_majo::tile::TileIndex(0),
+        kind: tui_majo::domain::tile::TileIndex(0),
         red: false,
     }; 3];
     let mut copy_idx = 0u16;
@@ -114,7 +114,7 @@ fn decode_kakan(m: u16) -> Result<DecodedMeld, String> {
     let kind = ((m >> 9) / 3) as u8;
     let mut tiles = [Tile {
         id: 0,
-        kind: tui_majo::tile::TileIndex(0),
+        kind: tui_majo::domain::tile::TileIndex(0),
         red: false,
     }; 4];
     for (i, slot) in tiles.iter_mut().enumerate() {
@@ -136,7 +136,7 @@ fn decode_kan(m: u16) -> Result<DecodedMeld, String> {
     let kind = ((m >> 8) / 4) as u8;
     let mut tiles = [Tile {
         id: 0,
-        kind: tui_majo::tile::TileIndex(0),
+        kind: tui_majo::domain::tile::TileIndex(0),
         red: false,
     }; 4];
     for (i, slot) in tiles.iter_mut().enumerate() {
@@ -178,7 +178,7 @@ pub fn relative_to_seat(who: Seat, rel: u8) -> Seat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tui_majo::tile::TileIndex;
+    use tui_majo::domain::tile::TileIndex;
 
     /// real-world m 例子 (从 fetched mjlog 中抽出): 14411 (鸣牌方=3, who=3 这条不在我们手册上,
     /// 但可以验证解码不崩溃).

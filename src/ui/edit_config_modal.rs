@@ -1,7 +1,7 @@
-//! 房主在 OnlineRoom 内修改 GameConfig 的 modal.
+//! 房主在 OnlineRoom 内修改 GameRules 的 modal.
 //!
 //! 6 字段: 赛制 / 思考时长 / 食断 / 赤宝牌 / 一发 / 里宝牌.
-//! Enter 保存 → ClientMsg::UpdateConfig, Esc 取消.
+//! Enter 保存 → ClientMsg::UpdateRules, Esc 取消.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::buffer::Buffer;
@@ -9,7 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
-use crate::config::{GameConfig, LengthRule};
+use crate::engine::rules::{GameRules, LengthRule};
 use crate::ui::paint::{paint_double_box, paint_fill, paint_str};
 use crate::ui::theme::Theme;
 
@@ -18,19 +18,19 @@ const THINKING_OPTIONS: &[Option<u32>] = &[Some(10), Some(20), Some(30), Some(60
 
 #[derive(Debug, Clone)]
 pub enum EditOutcome {
-    Save(GameConfig),
+    Save(GameRules),
     Cancel,
     Pending,
 }
 
 #[derive(Debug, Clone)]
 pub struct EditConfigModal {
-    pub config: GameConfig,
+    pub config: GameRules,
     pub selected: usize,
 }
 
 impl EditConfigModal {
-    pub fn new(current: GameConfig) -> Self {
+    pub fn new(current: GameRules) -> Self {
         Self {
             config: current,
             selected: 0,
@@ -204,8 +204,8 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn default_config() -> GameConfig {
-        GameConfig::default()
+    fn default_config() -> GameRules {
+        GameRules::default()
     }
 
     #[test]
