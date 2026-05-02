@@ -361,4 +361,160 @@ mod tests {
         assert!(dt_prove.as_secs() < 30);
         assert!(dt_verify.as_secs() < 30);
     }
+
+    // ====== M4.C.4 4 玩家 e2e 测试 (协议 1 端到端) ======
+
+    use crate::mental_poker::elgamal::{unmask_with_sk, SecretKey};
+    use crate::mental_poker::joint_key::{aggregate, JointPublicKey};
+    use crate::mental_poker::schnorr;
+    use std::collections::HashSet;
+
+    /// 构造 4 玩家 + 联合公钥 setup, 返回 (sk_vec, jpk, peer_ids).
+    fn setup_4_players() -> (Vec<SecretKey>, JointPublicKey, Vec<Vec<u8>>) {
+        let rng = &mut test_rng();
+        let mut sks = Vec::with_capacity(4);
+        let mut peer_ids = Vec::with_capacity(4);
+        let mut members = Vec::with_capacity(4);
+        for i in 0..4 {
+            let peer_id = format!("player_{i}").into_bytes();
+            let (sk, pk) = crate::mental_poker::elgamal::keygen(rng);
+            let proof = schnorr::prove(rng, &sk, &pk, &peer_id);
+            sks.push(sk);
+            peer_ids.push(peer_id.clone());
+            members.push((peer_id, pk, proof));
+        }
+        let jpk = aggregate(&members).expect("4 honest aggregate");
+        (sks, jpk, peer_ids)
+    }
+
+    /// 加密 N 张随机牌, 返回 (plaintexts, ciphertexts).
+    fn encrypt_initial_deck(
+        pk: &PublicKey,
+        n: usize,
+    ) -> (Vec<Curve>, Vec<Ciphertext>) {
+        let rng = &mut test_rng();
+        let plaintexts: Vec<Curve> = (0..n).map(|_| Curve::rand(rng)).collect();
+        let cts: Vec<Ciphertext> = plaintexts.iter().map(|m| mask(rng, pk, m).0).collect();
+        (plaintexts, cts)
+    }
+
+    /// 协议 1 端到端: 4 玩家 keygen + 联合 PK + 加密初始 deck + 每方 shuffle 带
+    /// cut-and-choose proof + 其他人 verify + 最终用 sum(sk) 解密 (注: 实际
+    /// 协议 2 走 threshold ElGamal, 这里用 sum 简化测试).
+    #[test]
+    fn protocol_1_four_player_shuffle_e2e() {
+        let rng = &mut test_rng();
+        let (sks, jpk, _peer_ids) = setup_4_players();
+        let pk = jpk.as_pk();
+
+        let n = 16usize;
+        let k_rounds = 20usize; // 加速测试
+        let (plaintexts, mut deck) = encrypt_initial_deck(&pk, n);
+
+        // 4 玩家轮流 shuffle, 每方生成 proof, 其他 3 方 verify.
+        for player_idx in 0..4 {
+            let (out_deck, pi, r) = shuffle_and_remask(rng, &pk, &deck);
+            let proof = prove(rng, &pk, &deck, &out_deck, &pi, &r, k_rounds);
+            // 其他 3 玩家验证
+            assert!(
+                verify(&pk, &deck, &out_deck, &proof),
+                "玩家 {player_idx} 的 shuffle proof verify 失败"
+            );
+            deck = out_deck;
+        }
+
+        // 解密 (用 sum(sk) 简化, 实际协议 2 是 threshold).
+        let total_sk = SecretKey(sks.iter().map(|sk| sk.0).sum());
+        let recovered: HashSet<String> = deck
+            .iter()
+            .map(|c| format!("{}", unmask_with_sk(&total_sk, c)))
+            .collect();
+        let original: HashSet<String> = plaintexts.iter().map(|p| format!("{p}")).collect();
+        assert_eq!(recovered, original, "4 轮 shuffle 后 plaintext 集合应保持");
+        assert_eq!(recovered.len(), n);
+    }
+
+    /// 作弊玩家用 bogus 输出 (跟真 shuffle 无关) → 其他人 verify 失败.
+    #[test]
+    fn protocol_1_cheating_player_detected() {
+        let rng = &mut test_rng();
+        let (_sks, jpk, _) = setup_4_players();
+        let pk = jpk.as_pk();
+        let n = 8usize;
+        let k_rounds = 20;
+        let (_, deck) = encrypt_initial_deck(&pk, n);
+
+        // 作弊: 完全跟 deck 无关的 bogus 输出
+        let bogus_out: Vec<Ciphertext> = (0..n)
+            .map(|_| {
+                let m = Curve::rand(rng);
+                mask(rng, &pk, &m).0
+            })
+            .collect();
+
+        // 用真 (π, r) 但 c_out=bogus 跑 prove, verify 应失败 (cut-and-choose
+        // 概率 1 - 2^{-K} 检测到不一致, K=20 时 ~99.9999%)
+        let pi = Permutation::random(rng, n);
+        let r: Vec<Scalar> = (0..n).map(|_| Scalar::rand(rng)).collect();
+        let proof = prove(rng, &pk, &deck, &bogus_out, &pi, &r, k_rounds);
+        assert!(
+            !verify(&pk, &deck, &bogus_out, &proof),
+            "bogus 输出应被检测到"
+        );
+    }
+
+    /// 4 轮 shuffle 后 deck 顺序变 (不等于初始 — sanity, 不是密码学不可预知性).
+    #[test]
+    fn protocol_1_four_player_shuffle_changes_order() {
+        let rng = &mut test_rng();
+        let (_, jpk, _) = setup_4_players();
+        let pk = jpk.as_pk();
+        let n = 16;
+        let k_rounds = 20;
+        let (_, initial_deck) = encrypt_initial_deck(&pk, n);
+        let mut deck = initial_deck.clone();
+
+        for _ in 0..4 {
+            let (out_deck, pi, r) = shuffle_and_remask(rng, &pk, &deck);
+            let proof = prove(rng, &pk, &deck, &out_deck, &pi, &r, k_rounds);
+            assert!(verify(&pk, &deck, &out_deck, &proof));
+            deck = out_deck;
+        }
+
+        // 至少有一个位置的密文跟初始不同 (实际上几乎 100% 都不同, 因为 remask 都换 r).
+        let any_different = initial_deck
+            .iter()
+            .zip(deck.iter())
+            .any(|(a, b)| a != b);
+        assert!(any_different, "4 轮 shuffle 后 deck 应跟初始不同");
+    }
+
+    /// 单方 sk 不足以解密 4 轮 shuffle 后的 deck (核心安全性: 联合 PK 加密).
+    #[test]
+    fn protocol_1_single_sk_cannot_decrypt_after_shuffle() {
+        let rng = &mut test_rng();
+        let (sks, jpk, _) = setup_4_players();
+        let pk = jpk.as_pk();
+        let n = 8;
+        let k_rounds = 20;
+        let (plaintexts, mut deck) = encrypt_initial_deck(&pk, n);
+
+        for _ in 0..4 {
+            let (out_deck, pi, r) = shuffle_and_remask(rng, &pk, &deck);
+            let proof = prove(rng, &pk, &deck, &out_deck, &pi, &r, k_rounds);
+            assert!(verify(&pk, &deck, &out_deck, &proof));
+            deck = out_deck;
+        }
+
+        // 单方 sk_0 解密不出来 plaintext 集合.
+        let recovered_single: HashSet<String> = deck
+            .iter()
+            .map(|c| format!("{}", unmask_with_sk(&sks[0], c)))
+            .collect();
+        let original: HashSet<String> = plaintexts.iter().map(|p| format!("{p}")).collect();
+        assert_ne!(
+            recovered_single, original,
+            "单方 sk 不应能解密联合 PK 加密的 deck"
+        );
+    }
 }
