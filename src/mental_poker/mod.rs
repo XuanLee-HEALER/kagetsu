@@ -39,6 +39,7 @@ pub mod elgamal;
 pub mod ipa;
 pub mod joint_key;
 pub mod pedersen;
+pub mod protocol_draw;
 pub mod schnorr;
 pub mod shuffle;
 pub mod transcript;
