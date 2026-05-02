@@ -36,7 +36,9 @@
 pub mod dleq;
 pub mod elgamal;
 pub mod joint_key;
+pub mod pedersen;
 pub mod schnorr;
+pub mod shuffle;
 pub mod transcript;
 
 /// 椭圆曲线群类型: BLS12-381 G1 (作普通 ECC 群, 不用 pairing).
