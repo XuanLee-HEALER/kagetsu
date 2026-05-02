@@ -6,7 +6,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::style::{Modifier, Style};
 
-use crate::tile::{Tile, TileIndex};
+use crate::tile::Tile;
 use crate::ui::theme::Theme;
 
 /// 牌张视觉状态.
@@ -58,32 +58,103 @@ pub fn paint_fill(buf: &mut Buffer, x: u16, y: u16, w: u16, h: u16, style: Style
     }
 }
 
-/// 单张 wide 牌的文本 (4 cells = 2 全角字符).
-fn tile_text_wide(kind: TileIndex) -> String {
-    let n = kind.0;
-    match n {
-        0..=8 => format!("{}{}", NUMERALS[(n + 1) as usize], SUIT_CN[0]),
-        9..=17 => format!("{}{}", NUMERALS[(n - 9 + 1) as usize], SUIT_CN[1]),
-        18..=26 => format!("{}{}", NUMERALS[(n - 18 + 1) as usize], SUIT_CN[2]),
-        27..=33 => format!("{}  ", HONORS[(n - 27) as usize]),
-        _ => "??  ".into(),
+/// 牌的两段文本 + 颜色.
+/// - 数牌: (数字段, 花色段)
+/// - 字牌: (单字段, 空 padding)
+struct TileSegments<'a> {
+    seg1: &'a str,
+    seg2: &'a str,
+    seg1_color: ratatui::style::Color,
+    seg2_color: ratatui::style::Color,
+}
+
+/// 拆解 wide 牌成两段 (各 2 cells = 1 全角中文).
+fn tile_segments_wide(t: &Tile, theme: &Theme) -> TileSegments<'static> {
+    let n = t.kind.0;
+    if n <= 26 {
+        let suit_idx = (n / 9) as usize;
+        let num_idx = (n % 9 + 1) as usize;
+        let num_color = if t.red {
+            theme.tile_red
+        } else {
+            [theme.tile_man_num, theme.tile_pin_num, theme.tile_sou_num][suit_idx]
+        };
+        let suit_color = [theme.tile_man_suit, theme.tile_pin_suit, theme.tile_sou_suit][suit_idx];
+        TileSegments {
+            seg1: NUMERALS[num_idx],
+            seg2: SUIT_CN[suit_idx],
+            seg1_color: num_color,
+            seg2_color: suit_color,
+        }
+    } else if n <= 33 {
+        let honor_idx = (n - 27) as usize;
+        let fg = match n {
+            33 => theme.tile_chun,
+            32 => theme.tile_hatsu,
+            31 => theme.tile_haku,
+            _ => theme.tile_wind,
+        };
+        TileSegments {
+            seg1: HONORS[honor_idx],
+            seg2: "  ", // 字牌只占 2 cells, 后 2 cells 留空
+            seg1_color: fg,
+            seg2_color: theme.tile_fg,
+        }
+    } else {
+        TileSegments {
+            seg1: "??",
+            seg2: "  ",
+            seg1_color: theme.tile_fg,
+            seg2_color: theme.tile_fg,
+        }
     }
 }
 
-/// 单张 tight 牌的文本 (3 cells: 1 半角数字 + 1 全角花色 / 1 全角字牌 + 1 空格).
-fn tile_text_tight(kind: TileIndex) -> String {
-    let n = kind.0;
-    match n {
-        0..=8 => format!("{}{}", NUMERALS_ASCII[(n + 1) as usize], SUIT_CN[0]),
-        9..=17 => format!("{}{}", NUMERALS_ASCII[(n - 9 + 1) as usize], SUIT_CN[1]),
-        18..=26 => format!("{}{}", NUMERALS_ASCII[(n - 18 + 1) as usize], SUIT_CN[2]),
-        27..=33 => format!("{} ", HONORS[(n - 27) as usize]),
-        _ => "?? ".into(),
+/// 拆解 tight 牌成两段 (1 cell ASCII 数字 + 2 cells 全角花色 / 字牌单字 + 1 cell 空格).
+fn tile_segments_tight(t: &Tile, theme: &Theme) -> TileSegments<'static> {
+    let n = t.kind.0;
+    if n <= 26 {
+        let suit_idx = (n / 9) as usize;
+        let num_idx = (n % 9 + 1) as usize;
+        let num_color = if t.red {
+            theme.tile_red
+        } else {
+            [theme.tile_man_num, theme.tile_pin_num, theme.tile_sou_num][suit_idx]
+        };
+        let suit_color = [theme.tile_man_suit, theme.tile_pin_suit, theme.tile_sou_suit][suit_idx];
+        TileSegments {
+            seg1: NUMERALS_ASCII[num_idx],
+            seg2: SUIT_CN[suit_idx],
+            seg1_color: num_color,
+            seg2_color: suit_color,
+        }
+    } else if n <= 33 {
+        let honor_idx = (n - 27) as usize;
+        let fg = match n {
+            33 => theme.tile_chun,
+            32 => theme.tile_hatsu,
+            31 => theme.tile_haku,
+            _ => theme.tile_wind,
+        };
+        TileSegments {
+            seg1: HONORS[honor_idx],
+            seg2: " ", // tight 字牌: 全角占 2 cells + 1 空 = 3 cells
+            seg1_color: fg,
+            seg2_color: theme.tile_fg,
+        }
+    } else {
+        TileSegments {
+            seg1: "??",
+            seg2: " ",
+            seg1_color: theme.tile_fg,
+            seg2_color: theme.tile_fg,
+        }
     }
 }
 
-/// 单张 wide 牌渲染到 (x, y). 占 4 cells, 1 行. 含边框 (左右 │, 上下 ─).
-/// 实际占用 4 cells 宽 × 1 行高.  牌内容居中.
+/// 单张 wide 牌渲染到 (x, y). 占 4 cells, 1 行.
+/// 数牌分两段绘制: 数字 (前 2 cells) + 花色 (后 2 cells), 各自独立 fg.
+/// 字牌单字 + 后 2 cells 空白 padding.
 pub fn paint_tile_wide(
     buf: &mut Buffer,
     x: u16,
@@ -92,31 +163,40 @@ pub fn paint_tile_wide(
     theme: &Theme,
     state: TileState,
 ) {
-    let (text, fg, bg) = match state {
-        TileState::Back => ("▒▒▒▒".to_string(), theme.tile_back_pattern, theme.tile_back),
-        _ => match tile {
-            Some(t) => {
-                let mut fg = theme.tile_fg;
-                if t.red {
-                    fg = theme.tile_red;
-                }
-                (tile_text_wide(t.kind), fg, theme.tile_bg)
-            }
-            None => ("    ".into(), theme.tile_fg, theme.tile_bg),
-        },
+    if state == TileState::Back {
+        let style = Style::default()
+            .fg(theme.tile_back_pattern)
+            .bg(theme.tile_back);
+        paint_str(buf, x, y, "▒▒▒▒", style);
+        return;
+    }
+    let Some(t) = tile else {
+        let style = Style::default().fg(theme.tile_fg).bg(theme.tile_bg);
+        paint_str(buf, x, y, "    ", style);
+        return;
     };
-
-    let mut style = Style::default().fg(fg).bg(bg);
-    if state == TileState::Riichi {
-        style = style.fg(theme.danger);
-    }
+    let segs = tile_segments_wide(t, theme);
+    // Riichi: 整张换 danger 色 (盖 num+suit 双色).
+    let (seg1_color, seg2_color) = if state == TileState::Riichi {
+        (theme.danger, theme.danger)
+    } else {
+        (segs.seg1_color, segs.seg2_color)
+    };
+    let mut s1 = Style::default().fg(seg1_color).bg(theme.tile_bg);
+    let mut s2 = Style::default().fg(seg2_color).bg(theme.tile_bg);
     if state == TileState::Dimmed {
-        style = style.add_modifier(Modifier::DIM);
+        s1 = s1.add_modifier(Modifier::DIM);
+        s2 = s2.add_modifier(Modifier::DIM);
     }
-    paint_str(buf, x, y, &text, style);
+    if t.red {
+        // 赤 5: 数字段加粗
+        s1 = s1.add_modifier(Modifier::BOLD);
+    }
+    paint_str(buf, x, y, segs.seg1, s1);
+    paint_str(buf, x + 2, y, segs.seg2, s2);
 }
 
-/// 单张 tight 牌 (3 cells, 1 行).
+/// 单张 tight 牌 (3 cells, 1 行). 数字 (1 cell ASCII) + 花色 (2 cells 全角).
 pub fn paint_tile_tight(
     buf: &mut Buffer,
     x: u16,
@@ -125,24 +205,37 @@ pub fn paint_tile_tight(
     theme: &Theme,
     state: TileState,
 ) {
-    let (text, fg, bg) = match state {
-        TileState::Back => ("▒▒▒".to_string(), theme.tile_back_pattern, theme.tile_back),
-        _ => match tile {
-            Some(t) => {
-                let fg = if t.red { theme.tile_red } else { theme.tile_fg };
-                (tile_text_tight(t.kind), fg, theme.tile_bg)
-            }
-            None => ("   ".into(), theme.tile_fg, theme.tile_bg),
-        },
+    if state == TileState::Back {
+        let style = Style::default()
+            .fg(theme.tile_back_pattern)
+            .bg(theme.tile_back);
+        paint_str(buf, x, y, "▒▒▒", style);
+        return;
+    }
+    let Some(t) = tile else {
+        let style = Style::default().fg(theme.tile_fg).bg(theme.tile_bg);
+        paint_str(buf, x, y, "   ", style);
+        return;
     };
-    let mut style = Style::default().fg(fg).bg(bg);
-    if state == TileState::Riichi {
-        style = style.fg(theme.danger);
-    }
+    let segs = tile_segments_tight(t, theme);
+    let (seg1_color, seg2_color) = if state == TileState::Riichi {
+        (theme.danger, theme.danger)
+    } else {
+        (segs.seg1_color, segs.seg2_color)
+    };
+    let mut s1 = Style::default().fg(seg1_color).bg(theme.tile_bg);
+    let mut s2 = Style::default().fg(seg2_color).bg(theme.tile_bg);
     if state == TileState::Dimmed {
-        style = style.add_modifier(Modifier::DIM);
+        s1 = s1.add_modifier(Modifier::DIM);
+        s2 = s2.add_modifier(Modifier::DIM);
     }
-    paint_str(buf, x, y, &text, style);
+    if t.red {
+        s1 = s1.add_modifier(Modifier::BOLD);
+    }
+    // 数牌: seg1 是 1 cell ASCII, seg2 在 x+1; 字牌: seg1 是 2 cells 全角, seg2 在 x+2.
+    let seg2_x = if t.kind.0 <= 26 { x + 1 } else { x + 2 };
+    paint_str(buf, x, y, segs.seg1, s1);
+    paint_str(buf, seg2_x, y, segs.seg2, s2);
 }
 
 /// 自家手牌行: 13 张 (或更少) BoxedTile 共边盒子, 4 cells × 3 行.
@@ -239,17 +332,22 @@ pub fn paint_boxed_row(
         };
         paint_str(buf, cx, y + 1, "│", left_color);
 
-        // 内容
-        let content = tile_text_wide(t.kind);
-        let (fg, bg) = if is_drawn {
-            (theme.bg, theme.accent)
-        } else if t.red {
-            (theme.tile_red, theme.tile_bg)
+        // 内容: 两段绘制 (数字 + 花色 / 字牌单字).
+        let segs = tile_segments_wide(t, theme);
+        let bg = if is_drawn { theme.accent } else { theme.tile_bg };
+        // is_drawn 时整张换 accent 反色, 失去花色区分 — 用 theme.bg 一致写两段.
+        let (fg1, fg2) = if is_drawn {
+            (theme.bg, theme.bg)
         } else {
-            (theme.tile_fg, theme.tile_bg)
+            (segs.seg1_color, segs.seg2_color)
         };
-        let style = Style::default().fg(fg).bg(bg);
-        paint_str(buf, cx + 1, y + 1, &content, style);
+        let mut s1 = Style::default().fg(fg1).bg(bg);
+        let s2 = Style::default().fg(fg2).bg(bg);
+        if t.red {
+            s1 = s1.add_modifier(Modifier::BOLD);
+        }
+        paint_str(buf, cx + 1, y + 1, segs.seg1, s1);
+        paint_str(buf, cx + 3, y + 1, segs.seg2, s2);
     }
     // 末尾右边框
     if let Some(&last_x) = positions.last() {
