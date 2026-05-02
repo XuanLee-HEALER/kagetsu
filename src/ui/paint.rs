@@ -171,6 +171,20 @@ pub fn paint_tile_wide(
     theme: &Theme,
     state: TileState,
 ) {
+    paint_tile_wide_hl(buf, x, y, tile, theme, state, false);
+}
+
+/// 同 [`paint_tile_wide`], 多一个 `highlight` 参数: true 时背景换 accent_soft
+/// (用于 "同 kind 牌联动高亮" 视觉, 不影响选中/摸到的优先级更高的状态).
+pub fn paint_tile_wide_hl(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    tile: Option<&Tile>,
+    theme: &Theme,
+    state: TileState,
+    highlight: bool,
+) {
     if state == TileState::Back {
         let style = Style::default()
             .fg(theme.tile_back_pattern)
@@ -190,8 +204,13 @@ pub fn paint_tile_wide(
     } else {
         (segs.seg1_color, segs.seg2_color)
     };
-    let mut s1 = Style::default().fg(seg1_color).bg(theme.tile_bg);
-    let mut s2 = Style::default().fg(seg2_color).bg(theme.tile_bg);
+    let bg = if highlight {
+        theme.accent_soft
+    } else {
+        theme.tile_bg
+    };
+    let mut s1 = Style::default().fg(seg1_color).bg(bg);
+    let mut s2 = Style::default().fg(seg2_color).bg(bg);
     if state == TileState::Dimmed {
         s1 = s1.add_modifier(Modifier::DIM);
         s2 = s2.add_modifier(Modifier::DIM);
@@ -213,6 +232,19 @@ pub fn paint_tile_tight(
     theme: &Theme,
     state: TileState,
 ) {
+    paint_tile_tight_hl(buf, x, y, tile, theme, state, false);
+}
+
+/// 同 [`paint_tile_tight`], 多 `highlight` 参数 — 同 kind 联动高亮.
+pub fn paint_tile_tight_hl(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    tile: Option<&Tile>,
+    theme: &Theme,
+    state: TileState,
+    highlight: bool,
+) {
     if state == TileState::Back {
         let style = Style::default()
             .fg(theme.tile_back_pattern)
@@ -231,8 +263,13 @@ pub fn paint_tile_tight(
     } else {
         (segs.seg1_color, segs.seg2_color)
     };
-    let mut s1 = Style::default().fg(seg1_color).bg(theme.tile_bg);
-    let mut s2 = Style::default().fg(seg2_color).bg(theme.tile_bg);
+    let bg = if highlight {
+        theme.accent_soft
+    } else {
+        theme.tile_bg
+    };
+    let mut s1 = Style::default().fg(seg1_color).bg(bg);
+    let mut s2 = Style::default().fg(seg2_color).bg(bg);
     if state == TileState::Dimmed {
         s1 = s1.add_modifier(Modifier::DIM);
         s2 = s2.add_modifier(Modifier::DIM);
@@ -262,6 +299,21 @@ pub fn paint_boxed_row(
     theme: &Theme,
     selected: Option<usize>,
     drawn_idx: Option<usize>,
+) {
+    paint_boxed_row_hl(buf, x, y, tiles, theme, selected, drawn_idx, None);
+}
+
+/// 同 [`paint_boxed_row`], 多 `highlight_kind` 参数: 同 kind 的牌背景换 accent_soft.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_boxed_row_hl(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    tiles: &[Tile],
+    theme: &Theme,
+    selected: Option<usize>,
+    drawn_idx: Option<usize>,
+    highlight_kind: Option<crate::domain::tile::TileIndex>,
 ) {
     if tiles.is_empty() {
         return;
@@ -341,9 +393,12 @@ pub fn paint_boxed_row(
         paint_str(buf, cx, y + 1, "│", left_color);
 
         // 内容: 两段绘制 (数字 + 花色 / 字牌单字).
+        let is_hl = highlight_kind == Some(t.kind) && !is_drawn;
         let segs = tile_segments_wide(t, theme);
         let bg = if is_drawn {
             theme.accent
+        } else if is_hl {
+            theme.accent_soft
         } else {
             theme.tile_bg
         };
@@ -414,6 +469,19 @@ pub fn paint_discard_grid_wide(
     theme: &Theme,
     riichi_at: Option<usize>,
 ) {
+    paint_discard_grid_wide_hl(buf, x, y, river, theme, riichi_at, None);
+}
+
+/// 同 [`paint_discard_grid_wide`], 多 `highlight_kind` — 同 kind 的牌背景换 accent_soft.
+pub fn paint_discard_grid_wide_hl(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    river: &[Tile],
+    theme: &Theme,
+    riichi_at: Option<usize>,
+    highlight_kind: Option<crate::domain::tile::TileIndex>,
+) {
     const COLS: usize = 6;
     const ROWS: usize = 4;
     let border = Style::default().fg(theme.tile_border).bg(theme.bg);
@@ -432,7 +500,8 @@ pub fn paint_discard_grid_wide(
                 } else {
                     TileState::Normal
                 };
-                paint_tile_wide(buf, cx, cy, Some(&river[i]), theme, state);
+                let hl = highlight_kind == Some(river[i].kind);
+                paint_tile_wide_hl(buf, cx, cy, Some(&river[i]), theme, state, hl);
             } else {
                 paint_str(buf, cx, cy, "    ", empty);
             }
@@ -457,9 +526,22 @@ pub fn paint_back_column_wide(buf: &mut Buffer, x: u16, y: u16, count: usize, th
 
 /// 副露 inline (一行多个), tight 模式紧凑展示.
 pub fn paint_meld_row_tight(buf: &mut Buffer, x: u16, y: u16, tiles: &[Tile], theme: &Theme) {
+    paint_meld_row_tight_hl(buf, x, y, tiles, theme, None);
+}
+
+/// 同 [`paint_meld_row_tight`], 多 `highlight_kind` — 同 kind 高亮.
+pub fn paint_meld_row_tight_hl(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    tiles: &[Tile],
+    theme: &Theme,
+    highlight_kind: Option<crate::domain::tile::TileIndex>,
+) {
     for (i, t) in tiles.iter().enumerate() {
         let cx = x + (i as u16) * 3;
-        paint_tile_tight(buf, cx, y, Some(t), theme, TileState::Normal);
+        let hl = highlight_kind == Some(t.kind);
+        paint_tile_tight_hl(buf, cx, y, Some(t), theme, TileState::Normal, hl);
     }
 }
 

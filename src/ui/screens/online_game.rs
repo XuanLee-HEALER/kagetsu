@@ -36,8 +36,8 @@ use crate::net::protocol::{
 use crate::net::session::NetSession;
 use crate::ui::Transition;
 use crate::ui::paint::{
-    TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row,
-    paint_discard_grid_wide, paint_fill, paint_hr, paint_hr_accent, paint_meld_row_tight,
+    TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row_hl,
+    paint_discard_grid_wide_hl, paint_fill, paint_hr, paint_hr_accent, paint_meld_row_tight_hl,
     paint_str, paint_tile_tight, paint_tile_wide,
 };
 use crate::ui::screens::game::TileSpec;
@@ -87,6 +87,8 @@ pub struct OnlineGameState {
     pub current_hints: Option<Vec<NetAction>>,
     /// 当前动作 deadline (unix ms). 0 表示无限期.
     pub current_deadline_ms: i64,
+    /// 多选吃法时弹的 picker. 非 None 时优先吃所有按键.
+    pub chi_picker: Option<crate::ui::chi_picker::ChiPicker>,
 }
 
 impl OnlineGameState {
@@ -99,7 +101,49 @@ impl OnlineGameState {
             theme_kind,
             current_hints: None,
             current_deadline_ms: 0,
+            chi_picker: None,
         }
+    }
+
+    /// 从 my_hand + target tile 枚举可能的吃法 (本家 2 张组合).
+    /// 算法与 server-side `engine::state::legal_calls` 对齐.
+    fn enumerate_chi_options(my_hand: &[Tile], target: Tile) -> Vec<[Tile; 2]> {
+        let kind = target.kind;
+        if !kind.is_suupai() {
+            return Vec::new();
+        }
+        let r = (kind.0 % 9) as i32;
+        let suit_base = (kind.0 / 9) as i32 * 9;
+        let mut counts = [0u8; 34];
+        for t in my_hand {
+            counts[t.kind.0 as usize] += 1;
+        }
+        let mut out = Vec::new();
+        for (a, b) in [(-2i32, -1i32), (-1, 1), (1, 2)] {
+            let na = r + a;
+            let nb = r + b;
+            if !(0..=8).contains(&na) || !(0..=8).contains(&nb) {
+                continue;
+            }
+            let ka = (suit_base + na) as usize;
+            let kb = (suit_base + nb) as usize;
+            if counts[ka] > 0 && counts[kb] > 0 {
+                let ta = *my_hand.iter().find(|t| t.kind.0 as usize == ka).unwrap();
+                let tb = *my_hand.iter().find(|t| t.kind.0 as usize == kb).unwrap();
+                out.push([ta, tb]);
+            }
+        }
+        out
+    }
+
+    /// 找 events 里最近一条 Discard 事件的 tile (用于 chi target).
+    fn last_discard_tile(view: &GameStateView) -> Option<Tile> {
+        for ev in view.events.iter().rev() {
+            if let GameEvent::Discard { tile, .. } = ev {
+                return Some(*tile);
+            }
+        }
+        None
     }
 
     pub fn my_player_id(&self) -> u32 {
@@ -166,6 +210,22 @@ impl OnlineGameState {
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
+        // ChiPicker 打开时优先吃所有按键.
+        if let Some(picker) = self.chi_picker.as_mut() {
+            use crate::ui::chi_picker::ChiOutcome;
+            match picker.handle_key(key) {
+                ChiOutcome::Pick(idx) => {
+                    self.chi_picker = None;
+                    self.session.send(ClientMsg::Action(NetAction::Chi(idx)));
+                }
+                ChiOutcome::Cancel => {
+                    self.chi_picker = None;
+                    self.message = "取消吃.".into();
+                }
+                ChiOutcome::Pending => {}
+            }
+            return None;
+        }
         match key.code {
             KeyCode::Left | KeyCode::Char('h') => self.move_select(-1),
             KeyCode::Right | KeyCode::Char('l') if !key.modifiers.is_empty() => self.move_select(1),
@@ -209,7 +269,7 @@ impl OnlineGameState {
                 self.session.send(ClientMsg::Action(NetAction::Pon));
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
-                self.session.send(ClientMsg::Action(NetAction::Chi(0)));
+                self.do_chi();
             }
             KeyCode::Char('m') | KeyCode::Char('M') => {
                 self.session.send(ClientMsg::Action(NetAction::Minkan));
@@ -260,6 +320,16 @@ impl OnlineGameState {
     }
 
     /// 自家可选牌数 = 手牌中除 last_drawn 之外的张数.
+    /// 当前 selected 手牌的 kind (用于河/副露/手牌联动高亮).
+    /// 仅自家 AwaitDiscard 阶段返回 Some, 其它阶段返回 None.
+    fn highlight_kind(&self, view: &GameStateView) -> Option<TileIndex> {
+        if view.turn != view.my_seat || view.phase != Phase::AwaitDiscard {
+            return None;
+        }
+        let (sel, _) = Self::split_hand(view);
+        sel.get(self.selected).map(|t| t.kind)
+    }
+
     fn selectable_count(&self, view: &GameStateView) -> usize {
         if let Some(d) = view.my_last_drawn {
             // 找一张匹配 d 的位置, 那一张就是 last_drawn (不可选).
@@ -348,6 +418,29 @@ impl OnlineGameState {
 
     /// 暗杠: 简化版, 选自家手牌中第一种数量 ≥ 4 的牌种发上去.
     /// (server 端会校验, 不合法回 Error.)
+    fn do_chi(&mut self) {
+        let Some(view) = self.state_view.as_ref() else {
+            return;
+        };
+        let Some(target) = Self::last_discard_tile(view) else {
+            self.message = "找不到弃牌目标.".into();
+            return;
+        };
+        let options = Self::enumerate_chi_options(&view.my_hand, target);
+        match options.len() {
+            0 => {
+                self.message = "不能吃.".into();
+            }
+            1 => {
+                self.session.send(ClientMsg::Action(NetAction::Chi(0)));
+            }
+            _ => {
+                self.chi_picker =
+                    Some(crate::ui::chi_picker::ChiPicker::new(options, target));
+            }
+        }
+    }
+
     fn do_ankan(&mut self) {
         let Some(view) = self.state_view.as_ref() else {
             return;
@@ -404,6 +497,9 @@ impl OnlineGameState {
         self.paint_my_message_and_melds(buf, ox, oy, &theme, view, layout.bottom);
         self.paint_my_hand(buf, ox, oy, &theme, view);
         self.paint_bottom(buf, ox, oy, &theme, view);
+        if let Some(picker) = &self.chi_picker {
+            picker.render(buf, area, &theme);
+        }
     }
 
     fn paint_top_status(
@@ -589,11 +685,11 @@ impl OnlineGameState {
             let mut col = ox + 48;
             for meld in &p.melds {
                 let tiles: Vec<Tile> = meld_tiles(meld);
-                paint_meld_row_tight(buf, col, oy + 5, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, oy + 5, &tiles, theme, self.highlight_kind(view));
                 col += (tiles.len() as u16) * 3 + 1;
             }
         }
-        paint_discard_grid_wide(buf, ox + 54, oy + 6, &p.river, theme, p.riichi_river_idx);
+        paint_discard_grid_wide_hl(buf, ox + 54, oy + 6, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
     }
 
     /// 上家 (left).
@@ -651,7 +747,7 @@ impl OnlineGameState {
             let mut row = oy + 10;
             for meld in &p.melds {
                 let tiles: Vec<Tile> = meld_tiles(meld);
-                paint_meld_row_tight(buf, col, row, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, row, &tiles, theme, self.highlight_kind(view));
                 col += (tiles.len() as u16) * 3 + 1;
                 if col > ox + 14 {
                     col = ox + 2;
@@ -660,7 +756,7 @@ impl OnlineGameState {
             }
         }
         paint_back_column_wide(buf, ox + 14, oy + 6, p.hand_count.min(13), theme);
-        paint_discard_grid_wide(buf, ox + 20, oy + 12, &p.river, theme, p.riichi_river_idx);
+        paint_discard_grid_wide_hl(buf, ox + 20, oy + 12, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
     }
 
     /// 下家 (right).
@@ -718,7 +814,7 @@ impl OnlineGameState {
             let mut row = oy + 10;
             for meld in &p.melds {
                 let tiles: Vec<Tile> = meld_tiles(meld);
-                paint_meld_row_tight(buf, col, row, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, row, &tiles, theme, self.highlight_kind(view));
                 col += (tiles.len() as u16) * 3 + 1;
                 if col > ox + 138 {
                     col = ox + 126;
@@ -727,7 +823,7 @@ impl OnlineGameState {
             }
         }
         paint_back_column_wide(buf, ox + 120, oy + 6, p.hand_count.min(13), theme);
-        paint_discard_grid_wide(buf, ox + 92, oy + 12, &p.river, theme, p.riichi_river_idx);
+        paint_discard_grid_wide_hl(buf, ox + 92, oy + 12, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
     }
 
     fn paint_center_info(
@@ -767,7 +863,7 @@ impl OnlineGameState {
         my: Seat,
     ) {
         let p = player_at(view, my);
-        paint_discard_grid_wide(buf, ox + 54, oy + 23, &p.river, theme, p.riichi_river_idx);
+        paint_discard_grid_wide_hl(buf, ox + 54, oy + 23, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
     }
 
     fn paint_my_status(
@@ -968,7 +1064,16 @@ impl OnlineGameState {
         } else {
             None
         };
-        paint_boxed_row(buf, ox + 4, oy + 31, &display, theme, selected, drawn_idx);
+        paint_boxed_row_hl(
+            buf,
+            ox + 4,
+            oy + 31,
+            &display,
+            theme,
+            selected,
+            drawn_idx,
+            self.highlight_kind(view),
+        );
         let drawn_gap = 3u16;
         let mut cx = ox + 4 + 1;
         for i in 0..display.len() {

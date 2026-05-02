@@ -34,9 +34,9 @@ use crate::engine::score::final_ranking;
 use crate::engine::state::{CallOptions, GameState, RoundResult, RyuukyokuKind};
 use crate::ui::Transition;
 use crate::ui::paint::{
-    TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row,
-    paint_discard_grid_wide, paint_double_box, paint_fill, paint_hr, paint_hr_accent,
-    paint_meld_row_tight, paint_str, paint_tile_tight, paint_tile_wide,
+    TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row_hl,
+    paint_discard_grid_wide_hl, paint_double_box, paint_fill, paint_hr, paint_hr_accent,
+    paint_meld_row_tight_hl, paint_str, paint_tile_tight, paint_tile_wide,
 };
 use crate::ui::theme::Theme;
 use crate::ui::widgets::seat_label;
@@ -46,11 +46,6 @@ const PLAYER_SEAT: Seat = Seat::East;
 /// AI 操作的节流时间, 让玩家看清.
 const AI_STEP_DELAY_MS: u64 = 350;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputMode {
-    Normal,
-    Command,
-}
 
 pub struct GameScreenState {
     pub game: GameState,
@@ -70,10 +65,6 @@ pub struct GameScreenState {
     pub message: String,
     /// 当前等待玩家决策的截止时刻 (None = AI 回合或不限时).
     pub decision_deadline: Option<Instant>,
-    /// vim 风格输入模式.
-    pub input_mode: InputMode,
-    /// COMMAND 模式下的命令缓冲区.
-    pub command_buffer: String,
     /// Action Modal 是否打开.
     pub modal_open: bool,
     /// Modal 当前选中项.
@@ -82,6 +73,8 @@ pub struct GameScreenState {
     pub round_end_at: Option<Instant>,
     /// 当前主题 (本地偏好, 不绑 GameRules).
     pub theme_kind: crate::ui::theme::ThemeKind,
+    /// 多选吃法时弹出的 picker. 非 None 时优先吃所有按键.
+    pub chi_picker: Option<crate::ui::chi_picker::ChiPicker>,
 }
 
 impl GameScreenState {
@@ -98,12 +91,11 @@ impl GameScreenState {
             last_step_at: Instant::now(),
             message: String::from("东 1 局开始. 你是东家(亲)."),
             decision_deadline: None,
-            input_mode: InputMode::Normal,
-            command_buffer: String::new(),
             modal_open: false,
             modal_selected: 0,
             round_end_at: None,
             theme_kind,
+            chi_picker: None,
         }
     }
 
@@ -275,20 +267,27 @@ impl GameScreenState {
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
-        // COMMAND 模式: 字符进 buffer.
-        if self.input_mode == InputMode::Command {
-            return self.handle_command_key(key);
+        // ChiPicker 打开: 优先吃所有按键.
+        if let Some(picker) = self.chi_picker.as_mut() {
+            use crate::ui::chi_picker::ChiOutcome;
+            match picker.handle_key(key) {
+                ChiOutcome::Pick(idx) => {
+                    self.chi_picker = None;
+                    self.do_chi_at(idx);
+                }
+                ChiOutcome::Cancel => {
+                    self.chi_picker = None;
+                    self.message = "取消吃.".into();
+                }
+                ChiOutcome::Pending => {}
+            }
+            return None;
         }
         // Modal 打开: 优先处理 modal 键.
         if self.modal_open {
             return self.handle_modal_key(key);
         }
-        // NORMAL 模式.
         match key.code {
-            KeyCode::Char(':') => {
-                self.input_mode = InputMode::Command;
-                self.command_buffer.clear();
-            }
             KeyCode::Char('m') | KeyCode::Char('M') => {
                 // 注意: AwaitCalls 时 m 是明杠键, 这里改用 modal 唤起.
                 // 若有 player_calls 且包含 minkan, 仍保留旧行为.
@@ -379,60 +378,6 @@ impl GameScreenState {
         None
     }
 
-    fn handle_command_key(&mut self, key: KeyEvent) -> Option<Transition> {
-        match key.code {
-            KeyCode::Esc => {
-                self.input_mode = InputMode::Normal;
-                self.command_buffer.clear();
-            }
-            KeyCode::Enter => {
-                let cmd = self.command_buffer.clone();
-                self.command_buffer.clear();
-                self.input_mode = InputMode::Normal;
-                self.execute_command(&cmd);
-            }
-            KeyCode::Backspace => {
-                self.command_buffer.pop();
-            }
-            KeyCode::Tab => {
-                self.try_complete_command();
-            }
-            KeyCode::Char(c) => {
-                if self.command_buffer.chars().count() < 32 {
-                    self.command_buffer.push(c);
-                }
-            }
-            _ => {}
-        }
-        None
-    }
-
-    /// Tab 补全: 取 buffer 第一个 token 的候选命令, 补到最长公共前缀.
-    /// 唯一匹配则补全到完整名 + 1 空格 (方便接参数).
-    fn try_complete_command(&mut self) {
-        // 只补头一个 token (空格前). 已有空格则不补.
-        if self.command_buffer.contains(' ') {
-            return;
-        }
-        let cands = command_candidates(&self.command_buffer);
-        match cands.len() {
-            0 => {}
-            1 => {
-                self.command_buffer = cands[0].to_string();
-                // 接受参数的命令补完后加空格
-                if matches!(cands[0], "discard" | "riichi") {
-                    self.command_buffer.push(' ');
-                }
-            }
-            _ => {
-                let prefix = longest_common_prefix(&cands);
-                if prefix.len() > self.command_buffer.len() {
-                    self.command_buffer = prefix;
-                }
-            }
-        }
-    }
-
     fn handle_modal_key(&mut self, key: KeyEvent) -> Option<Transition> {
         let actions = self.collect_modal_actions();
         match key.code {
@@ -521,75 +466,6 @@ impl GameScreenState {
         }
     }
 
-    fn execute_command(&mut self, cmd: &str) {
-        let parsed = parse_command(cmd);
-        match parsed {
-            ParsedCommand::Discard(spec) => {
-                if let Some(idx) = self.find_tile_in_hand(&spec) {
-                    let p = self.player();
-                    if let Some(&t) = p.hand.closed.get(idx)
-                        && self.game.do_discard(t).is_ok()
-                    {
-                        self.calls_resolved = false;
-                        self.player_calls = None;
-                        self.last_step_at = Instant::now();
-                        self.clear_deadline();
-                    }
-                } else {
-                    self.message = format!(":discard 失败: 手中无 {}", cmd);
-                }
-            }
-            ParsedCommand::Riichi(spec) => {
-                if let Some(idx) = self.find_tile_in_hand(&spec) {
-                    let p = self.player();
-                    if let Some(&t) = p.hand.closed.get(idx) {
-                        match self.game.do_riichi(t) {
-                            Ok(()) => {
-                                self.message = "立直成立!".into();
-                                self.calls_resolved = false;
-                                self.last_step_at = Instant::now();
-                                self.clear_deadline();
-                            }
-                            Err(e) => self.message = format!("立直失败: {}", e),
-                        }
-                    }
-                } else {
-                    self.message = format!(":riichi 失败: 手中无 {}", cmd);
-                }
-            }
-            ParsedCommand::Tsumo => self.try_player_win(),
-            ParsedCommand::Pon => self.try_player_pon(),
-            ParsedCommand::Kan => self.try_player_kan(),
-            ParsedCommand::Chi => self.try_player_chi(),
-            ParsedCommand::Pass => {
-                if self.player_calls.is_some() {
-                    self.player_calls = None;
-                    self.message = "已跳过.".into();
-                    self.last_step_at = Instant::now();
-                    self.clear_deadline();
-                } else {
-                    self.message = "无可跳过的响应.".into();
-                }
-            }
-            ParsedCommand::Menu => {
-                self.modal_open = true;
-                self.modal_selected = 0;
-            }
-            ParsedCommand::Resign => {
-                // MVP: 不实际投降, 仅清息.
-                self.message = "(暂未支持 :resign)".into();
-            }
-            ParsedCommand::Unknown(s) => {
-                self.message = format!("未知命令: {}", s);
-            }
-        }
-    }
-
-    fn find_tile_in_hand(&self, spec: &TileSpec) -> Option<usize> {
-        let p = self.player();
-        p.hand.closed.iter().position(|t| spec.matches(t.kind))
-    }
-
     fn update_self_message(&mut self) {
         let opts = self.game.legal_self_options();
         let mut hints = vec!["←/→ 选".to_string(), "Enter 切".to_string()];
@@ -670,11 +546,6 @@ impl GameScreenState {
         self.decision_deadline = None;
     }
 
-    /// 是否在 vim COMMAND 模式 (task 10 后会真正切换状态).
-    pub fn is_command_mode(&self) -> bool {
-        self.input_mode == InputMode::Command
-    }
-
     /// 切换主题 (供全局 T 键调用).
     pub fn set_theme(&mut self, kind: crate::ui::theme::ThemeKind) {
         self.theme_kind = kind;
@@ -721,6 +592,15 @@ impl GameScreenState {
             .iter()
             .filter(|t| Some(t.id) != drawn_id)
             .count()
+    }
+
+    /// 当前 selected 手牌的 kind (用于河/副露/手牌联动高亮).
+    /// 仅自家 AwaitDiscard 阶段返回 Some, 其它阶段返回 None.
+    fn highlight_kind(&self) -> Option<crate::domain::tile::TileIndex> {
+        if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
+            return None;
+        }
+        self.selectable_tiles().get(self.selected).map(|t| t.kind)
     }
 
     /// 切牌等导致 selectable 长度变化后, 钳 selected 到合法范围.
@@ -852,8 +732,31 @@ impl GameScreenState {
         let Some(opts) = self.player_calls.clone() else {
             return;
         };
-        let Some(&two) = opts.chi.first() else {
+        if opts.chi.is_empty() {
             self.message = "不能吃.".into();
+            return;
+        }
+        if opts.chi.len() == 1 {
+            self.do_chi_at(0);
+            return;
+        }
+        // ≥ 2 种吃法 → 弹 picker. target = 别人切的牌.
+        let Some((_, target)) = self.game.last_discard else {
+            self.message = "找不到弃牌目标.".into();
+            return;
+        };
+        self.chi_picker = Some(crate::ui::chi_picker::ChiPicker::new(
+            opts.chi.clone(),
+            target,
+        ));
+    }
+
+    fn do_chi_at(&mut self, idx: usize) {
+        let Some(opts) = self.player_calls.clone() else {
+            return;
+        };
+        let Some(&two) = opts.chi.get(idx) else {
+            self.message = "无效吃法 idx.".into();
             return;
         };
         if let Err(e) = self.game.do_chi(PLAYER_SEAT, two) {
@@ -916,6 +819,9 @@ impl GameScreenState {
 
         if self.modal_open {
             self.paint_modal(buf, ox, oy, &theme);
+        }
+        if let Some(picker) = &self.chi_picker {
+            picker.render(buf, area, &theme);
         }
     }
 
@@ -1039,11 +945,12 @@ impl GameScreenState {
             "─── 对家",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
+        let wind = self.game.seat_wind_of(Seat::West).short();
         paint_str(
             buf,
             ox + 75,
             oy + 3,
-            "西",
+            &wind,
             Style::default()
                 .fg(theme.info)
                 .bg(theme.bg)
@@ -1087,13 +994,13 @@ impl GameScreenState {
             let mut col = ox + 48;
             for meld in &p.hand.melds {
                 let tiles: Vec<Tile> = meld.tiles().to_vec();
-                paint_meld_row_tight(buf, col, oy + 5, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, oy + 5, &tiles, theme, self.highlight_kind());
                 col += (tiles.len() as u16) * 3 + 1;
             }
         }
         // 牌河 row 6-9
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide(buf, ox + 54, oy + 6, &p.river, theme, riichi_at);
+        paint_discard_grid_wide_hl(buf, ox + 54, oy + 6, &p.river, theme, riichi_at, self.highlight_kind());
     }
 
     /// row 6-19 左侧: 上家 (North).
@@ -1106,10 +1013,11 @@ impl GameScreenState {
             "上家",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
+        let wind = self.game.seat_wind_of(Seat::North).short();
         let label = if p.riichi {
-            format!("北 {}★", p.score)
+            format!("{} {}★", wind, p.score)
         } else {
-            format!("北 {}", p.score)
+            format!("{} {}", wind, p.score)
         };
         let style = if p.riichi {
             Style::default()
@@ -1135,7 +1043,7 @@ impl GameScreenState {
             let mut row = oy + 10;
             for meld in &p.hand.melds {
                 let tiles: Vec<Tile> = meld.tiles().to_vec();
-                paint_meld_row_tight(buf, col, row, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, row, &tiles, theme, self.highlight_kind());
                 col += (tiles.len() as u16) * 3 + 1;
                 if col > ox + 14 {
                     col = ox + 2;
@@ -1148,7 +1056,7 @@ impl GameScreenState {
         paint_back_column_wide(buf, ox + 14, oy + 6, hand_count.min(13), theme);
         // 牌河 6 列 wide, col 20
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide(buf, ox + 20, oy + 12, &p.river, theme, riichi_at);
+        paint_discard_grid_wide_hl(buf, ox + 20, oy + 12, &p.river, theme, riichi_at, self.highlight_kind());
     }
 
     /// row 6-19 右侧: 下家 (South).
@@ -1161,10 +1069,11 @@ impl GameScreenState {
             "下家",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
+        let wind = self.game.seat_wind_of(Seat::South).short();
         let label = if p.riichi {
-            format!("南 {}★", p.score)
+            format!("{} {}★", wind, p.score)
         } else {
-            format!("南 {}", p.score)
+            format!("{} {}", wind, p.score)
         };
         let style = if p.riichi {
             Style::default()
@@ -1190,7 +1099,7 @@ impl GameScreenState {
             let mut row = oy + 10;
             for meld in &p.hand.melds {
                 let tiles: Vec<Tile> = meld.tiles().to_vec();
-                paint_meld_row_tight(buf, col, row, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, row, &tiles, theme, self.highlight_kind());
                 col += (tiles.len() as u16) * 3 + 1;
                 if col > ox + 138 {
                     col = ox + 126;
@@ -1201,7 +1110,7 @@ impl GameScreenState {
         let hand_count = p.hand.closed.len();
         paint_back_column_wide(buf, ox + 120, oy + 6, hand_count.min(13), theme);
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide(buf, ox + 92, oy + 12, &p.river, theme, riichi_at);
+        paint_discard_grid_wide_hl(buf, ox + 92, oy + 12, &p.river, theme, riichi_at, self.highlight_kind());
     }
 
     /// row 17-18: 中央 dora + 山数提示.
@@ -1233,7 +1142,7 @@ impl GameScreenState {
     fn paint_my_river(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
         let p = &self.game.players[PLAYER_SEAT.index()];
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide(buf, ox + 54, oy + 23, &p.river, theme, riichi_at);
+        paint_discard_grid_wide_hl(buf, ox + 54, oy + 23, &p.river, theme, riichi_at, self.highlight_kind());
     }
 
     /// row 28-29: 自家分割线 + 状态行.
@@ -1425,7 +1334,16 @@ impl GameScreenState {
         } else {
             None
         };
-        paint_boxed_row(buf, ox + 4, oy + 31, &display, theme, selected, drawn_idx);
+        paint_boxed_row_hl(
+            buf,
+            ox + 4,
+            oy + 31,
+            &display,
+            theme,
+            selected,
+            drawn_idx,
+            self.highlight_kind(),
+        );
         // 编号 row 35 (与 paint_boxed_row 同样的间隙规则: drawn 前留 3 cells)
         let drawn_gap = 3u16;
         let mut cx = ox + 4 + 1;
@@ -1493,145 +1411,67 @@ impl GameScreenState {
             1,
             Style::default().bg(theme.panel).fg(theme.fg),
         );
-        if self.input_mode == InputMode::Command {
-            paint_str(
-                buf,
-                ox + 2,
-                oy + 38,
-                ":",
-                Style::default()
-                    .fg(theme.accent)
-                    .bg(theme.panel)
-                    .add_modifier(Modifier::BOLD),
-            );
-            paint_str(
-                buf,
-                ox + 3,
-                oy + 38,
-                &self.command_buffer,
-                Style::default().fg(theme.fg).bg(theme.panel),
-            );
-            // ghost text (唯一前缀时灰显补全建议)
-            let buf_w = self.command_buffer.chars().count() as u16;
-            let cur_x = ox + 3 + buf_w;
-            let mut painted_ghost = false;
-            if !self.command_buffer.contains(' ') && !self.command_buffer.is_empty() {
-                let cands = command_candidates(&self.command_buffer);
-                if cands.len() == 1 && cands[0] != self.command_buffer {
-                    let suggestion = &cands[0][self.command_buffer.len()..];
-                    paint_str(
-                        buf,
-                        cur_x,
-                        oy + 38,
-                        suggestion,
-                        Style::default().fg(theme.dim).bg(theme.panel),
-                    );
-                    painted_ghost = true;
-                }
-            }
-            // 光标: 没 ghost 时画 "_" 提示位置
-            if !painted_ghost {
-                paint_str(
-                    buf,
-                    cur_x,
-                    oy + 38,
-                    "_",
-                    Style::default()
-                        .fg(theme.accent)
-                        .bg(theme.panel)
-                        .add_modifier(Modifier::BOLD),
-                );
-            }
-        } else {
-            paint_str(
-                buf,
-                ox + 2,
-                oy + 38,
-                "提示  按",
-                Style::default().fg(theme.dim).bg(theme.panel),
-            );
-            self.paint_key_hint(buf, ox + 11, oy + 38, ":", theme.line, theme.fg);
-            paint_str(
-                buf,
-                ox + 14,
-                oy + 38,
-                "命令模式 ·",
-                Style::default().fg(theme.dim).bg(theme.panel),
-            );
-            self.paint_key_hint(buf, ox + 30, oy + 38, "m", theme.line, theme.fg);
-            paint_str(
-                buf,
-                ox + 33,
-                oy + 38,
-                "菜单 ·",
-                Style::default().fg(theme.dim).bg(theme.panel),
-            );
-            paint_str(
-                buf,
-                ox + 45,
-                oy + 38,
-                "[1-9]",
-                Style::default().fg(theme.ok).bg(theme.panel),
-            );
-            paint_str(
-                buf,
-                ox + 51,
-                oy + 38,
-                "选牌 ·",
-                Style::default().fg(theme.dim).bg(theme.panel),
-            );
-            self.paint_key_hint(buf, ox + 59, oy + 38, "d", theme.line, theme.fg);
-            paint_str(
-                buf,
-                ox + 62,
-                oy + 38,
-                "切 ·",
-                Style::default().fg(theme.dim).bg(theme.panel),
-            );
-            self.paint_key_hint(buf, ox + 68, oy + 38, "t", theme.line, theme.fg);
-            paint_str(
-                buf,
-                ox + 71,
-                oy + 38,
-                "摸切 ·",
-                Style::default().fg(theme.dim).bg(theme.panel),
-            );
-            self.paint_key_hint(buf, ox + 79, oy + 38, "R", theme.danger, theme.danger);
-            paint_str(
-                buf,
-                ox + 82,
-                oy + 38,
-                "立直",
-                Style::default().fg(theme.danger).bg(theme.panel),
-            );
-            self.paint_key_hint(buf, ox + 88, oy + 38, "W", theme.ok, theme.ok);
-            paint_str(
-                buf,
-                ox + 91,
-                oy + 38,
-                "自摸",
-                Style::default().fg(theme.ok).bg(theme.panel),
-            );
-        }
-        // 模式徽章 (col 120)
-        let badge_label = match self.input_mode {
-            InputMode::Normal => " NORMAL ",
-            InputMode::Command => " COMMAND ",
-        };
-        let badge_bg = if self.input_mode == InputMode::Command {
-            theme.accent
-        } else {
-            theme.ok
-        };
+        // row 38: 主操作快捷键 hint
         paint_str(
             buf,
-            ox + 120,
+            ox + 2,
             oy + 38,
-            badge_label,
-            Style::default()
-                .fg(theme.bg)
-                .bg(badge_bg)
-                .add_modifier(Modifier::BOLD),
+            "提示",
+            Style::default().fg(theme.dim).bg(theme.panel),
+        );
+        self.paint_key_hint(buf, ox + 8, oy + 38, "m", theme.line, theme.fg);
+        paint_str(
+            buf,
+            ox + 11,
+            oy + 38,
+            "菜单 ·",
+            Style::default().fg(theme.dim).bg(theme.panel),
+        );
+        paint_str(
+            buf,
+            ox + 23,
+            oy + 38,
+            "[1-9]",
+            Style::default().fg(theme.ok).bg(theme.panel),
+        );
+        paint_str(
+            buf,
+            ox + 29,
+            oy + 38,
+            "选牌 ·",
+            Style::default().fg(theme.dim).bg(theme.panel),
+        );
+        self.paint_key_hint(buf, ox + 37, oy + 38, "d", theme.line, theme.fg);
+        paint_str(
+            buf,
+            ox + 40,
+            oy + 38,
+            "切 ·",
+            Style::default().fg(theme.dim).bg(theme.panel),
+        );
+        self.paint_key_hint(buf, ox + 46, oy + 38, "t", theme.line, theme.fg);
+        paint_str(
+            buf,
+            ox + 49,
+            oy + 38,
+            "摸切 ·",
+            Style::default().fg(theme.dim).bg(theme.panel),
+        );
+        self.paint_key_hint(buf, ox + 57, oy + 38, "R", theme.danger, theme.danger);
+        paint_str(
+            buf,
+            ox + 60,
+            oy + 38,
+            "立直",
+            Style::default().fg(theme.danger).bg(theme.panel),
+        );
+        self.paint_key_hint(buf, ox + 66, oy + 38, "W", theme.ok, theme.ok);
+        paint_str(
+            buf,
+            ox + 69,
+            oy + 38,
+            "自摸",
+            Style::default().fg(theme.ok).bg(theme.panel),
         );
         paint_str(
             buf,
@@ -1641,85 +1481,38 @@ impl GameScreenState {
             Style::default().fg(theme.dim).bg(theme.panel),
         );
 
-        // row 39:
-        // - COMMAND 模式 → 显示候选命令 (Tab 补全)
-        // - NORMAL  模式 → 命令速查
-        if self.input_mode == InputMode::Command {
-            paint_str(
-                buf,
-                ox + 2,
-                oy + 39,
-                "候选",
-                Style::default().fg(theme.dim).bg(theme.bg),
-            );
-            let cands = command_candidates(&self.command_buffer);
-            let mut col = ox + 7;
-            if cands.is_empty() {
-                paint_str(
-                    buf,
-                    col,
-                    oy + 39,
-                    "(无匹配)",
-                    Style::default().fg(theme.danger).bg(theme.bg),
-                );
-            } else {
-                for (i, name) in cands.iter().enumerate() {
-                    if col + (name.len() as u16) + 2 >= ox + 130 {
-                        break;
-                    }
-                    let style = if i == 0 {
-                        Style::default()
-                            .fg(theme.accent)
-                            .bg(theme.bg)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.fg).bg(theme.bg)
-                    };
-                    paint_str(buf, col, oy + 39, name, style);
-                    col += (name.chars().count() as u16) + 2;
-                }
+        // row 39: 鸣牌响应 + 全局
+        paint_str(
+            buf,
+            ox + 2,
+            oy + 39,
+            "响应",
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
+        let pairs: &[(&str, &str)] = &[
+            ("P", "碰"),
+            ("A", "吃"),
+            ("M", "明杠"),
+            ("K", "暗杠"),
+            ("C", "跳过"),
+            ("N", "下一局"),
+            ("L", "离开"),
+            ("Esc", "回主菜单"),
+            ("Q", "退出"),
+        ];
+        let mut col = ox + 9;
+        let cmd_style = Style::default().fg(theme.fg).bg(theme.bg);
+        let hint_style = Style::default().fg(theme.dim).bg(theme.bg);
+        for (key, label) in pairs {
+            let key_w = UnicodeWidthStr::width(*key) as u16;
+            let lbl_text = format!(" {} ·", label);
+            let lbl_w = UnicodeWidthStr::width(lbl_text.as_str()) as u16;
+            if col + key_w + lbl_w + 1 >= ox + 144 {
+                break;
             }
-            paint_str(
-                buf,
-                ox + 130,
-                oy + 39,
-                "Tab 补全",
-                Style::default().fg(theme.dim).bg(theme.bg),
-            );
-        } else {
-            paint_str(
-                buf,
-                ox + 2,
-                oy + 39,
-                "使い方",
-                Style::default().fg(theme.dim).bg(theme.bg),
-            );
-            // 命令 + 中文注释 (动态计算 col, 避免 wide-char 错位)
-            let cmds: &[(&str, &str)] = &[
-                (":discard", "切"),
-                (":riichi", "立直"),
-                (":tsumo", "自摸"),
-                (":pon", "碰"),
-                (":kan", "杠"),
-                (":chi", "吃"),
-                (":pass", "跳过"),
-                (":menu", "菜单"),
-                (":resign", "退出"),
-            ];
-            let cmd_style = Style::default().fg(theme.fg).bg(theme.bg);
-            let hint_style = Style::default().fg(theme.dim).bg(theme.bg);
-            let mut col = ox + 11;
-            for (cmd, hint) in cmds {
-                let cmd_w = UnicodeWidthStr::width(*cmd) as u16;
-                let hint_text = format!(" ({})", hint);
-                let hint_w = UnicodeWidthStr::width(hint_text.as_str()) as u16;
-                if col + cmd_w + hint_w + 1 >= ox + 144 {
-                    break;
-                }
-                paint_str(buf, col, oy + 39, cmd, cmd_style);
-                paint_str(buf, col + cmd_w, oy + 39, &hint_text, hint_style);
-                col += cmd_w + hint_w + 1;
-            }
+            paint_str(buf, col, oy + 39, key, cmd_style);
+            paint_str(buf, col + key_w, oy + 39, &lbl_text, hint_style);
+            col += key_w + lbl_w + 1;
         }
     }
 
@@ -2066,29 +1859,9 @@ fn ron_check_order(from: Seat) -> [Seat; 4] {
     out
 }
 
-// ============== vim 命令解析 ==============
+// ============== TileSpec ==============
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParsedCommand {
-    Discard(TileSpec),
-    Riichi(TileSpec),
-    Tsumo,
-    Pon,
-    Kan,
-    Chi,
-    /// 跳过响应他家弃牌(碰/吃/杠/和).
-    Pass,
-    Menu,
-    Resign,
-    Unknown(String),
-}
-
-/// 全部主命令名 (顺序固定, 用于 Tab 补全和速查).
-pub const COMMAND_NAMES: &[&str] = &[
-    "discard", "riichi", "tsumo", "pon", "kan", "chi", "pass", "menu", "resign",
-];
-
-/// 牌种说明符: 接受 "5p" / "p5" / "五筒" / "東" 等.
+/// 牌种说明符: 接受 "5p" / "p5" / "五筒" / "東" 等. 由 NetAction::Discard/Riichi 协议使用.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TileSpec {
     pub kind: TileIndex,
@@ -2098,63 +1871,6 @@ impl TileSpec {
     pub fn matches(&self, k: TileIndex) -> bool {
         self.kind == k
     }
-}
-
-pub fn parse_command(s: &str) -> ParsedCommand {
-    let s = s.trim();
-    if s.is_empty() {
-        return ParsedCommand::Unknown(String::new());
-    }
-    let mut parts = s.splitn(2, ' ');
-    let head = parts.next().unwrap_or("").to_lowercase();
-    let arg = parts.next().unwrap_or("").trim();
-    match head.as_str() {
-        "discard" | "d" => match parse_tile_spec(arg) {
-            Some(spec) => ParsedCommand::Discard(spec),
-            None => ParsedCommand::Unknown(s.to_string()),
-        },
-        "riichi" | "r" => match parse_tile_spec(arg) {
-            Some(spec) => ParsedCommand::Riichi(spec),
-            None => ParsedCommand::Unknown(s.to_string()),
-        },
-        "tsumo" | "t" => ParsedCommand::Tsumo,
-        "pon" | "p" => ParsedCommand::Pon,
-        "kan" | "k" => ParsedCommand::Kan,
-        "chi" | "a" => ParsedCommand::Chi,
-        "pass" | "skip" | "c" => ParsedCommand::Pass,
-        "menu" | "m" => ParsedCommand::Menu,
-        "resign" => ParsedCommand::Resign,
-        _ => ParsedCommand::Unknown(s.to_string()),
-    }
-}
-
-/// 找出所有以 prefix 开头的命令名 (按 [`COMMAND_NAMES`] 顺序).
-pub fn command_candidates(prefix: &str) -> Vec<&'static str> {
-    let p = prefix.to_lowercase();
-    COMMAND_NAMES
-        .iter()
-        .filter(|n| n.starts_with(&p))
-        .copied()
-        .collect()
-}
-
-/// 多个候选的最长公共前缀.
-pub fn longest_common_prefix(strs: &[&str]) -> String {
-    if strs.is_empty() {
-        return String::new();
-    }
-    let first = strs[0];
-    let mut end = first.len();
-    for s in &strs[1..] {
-        let common = first
-            .chars()
-            .zip(s.chars())
-            .take_while(|(a, b)| a == b)
-            .count();
-        // count 是 char 数, 但我们要 byte 长度. 因为这里全是 ASCII, char count == byte count.
-        end = end.min(common);
-    }
-    first[..end].to_string()
 }
 
 /// 接受的牌输入:
@@ -2321,60 +2037,6 @@ mod tests {
             }
         }
         assert!(rounds >= 3 || app.game.phase == Phase::GameEnd);
-    }
-
-    #[test]
-    fn parse_command_basic() {
-        assert!(matches!(parse_command("tsumo"), ParsedCommand::Tsumo));
-        assert!(matches!(parse_command("t"), ParsedCommand::Tsumo));
-        assert!(matches!(parse_command("pon"), ParsedCommand::Pon));
-        assert!(matches!(parse_command("kan"), ParsedCommand::Kan));
-        assert!(matches!(parse_command("menu"), ParsedCommand::Menu));
-        assert!(matches!(parse_command("resign"), ParsedCommand::Resign));
-        assert!(matches!(parse_command("pass"), ParsedCommand::Pass));
-        assert!(matches!(parse_command("skip"), ParsedCommand::Pass));
-        assert!(matches!(parse_command("c"), ParsedCommand::Pass));
-        assert!(matches!(parse_command("nope"), ParsedCommand::Unknown(_)));
-    }
-
-    #[test]
-    fn command_completion() {
-        // 唯一前缀
-        assert_eq!(command_candidates("ts"), vec!["tsumo"]);
-        assert_eq!(command_candidates("res"), vec!["resign"]);
-        // 多候选 + 共同前缀
-        let p_cands = command_candidates("p");
-        assert!(p_cands.contains(&"pon"));
-        assert!(p_cands.contains(&"pass"));
-        assert_eq!(longest_common_prefix(&p_cands), "p");
-        // 无匹配
-        assert!(command_candidates("xyz").is_empty());
-        // 空 → 全部
-        assert_eq!(command_candidates("").len(), COMMAND_NAMES.len());
-    }
-
-    #[test]
-    fn parse_command_discard_riichi() {
-        // 5p
-        let p5 = TileIndex(13);
-        match parse_command("discard 5p") {
-            ParsedCommand::Discard(spec) => assert_eq!(spec.kind, p5),
-            other => panic!("期望 Discard, 得到 {:?}", other),
-        }
-        match parse_command("d p5") {
-            ParsedCommand::Discard(spec) => assert_eq!(spec.kind, p5),
-            other => panic!("期望 Discard, 得到 {:?}", other),
-        }
-        // 中文
-        match parse_command("discard 五筒") {
-            ParsedCommand::Discard(spec) => assert_eq!(spec.kind, p5),
-            other => panic!("期望 Discard, 得到 {:?}", other),
-        }
-        // 字牌
-        match parse_command("riichi 東") {
-            ParsedCommand::Riichi(spec) => assert_eq!(spec.kind, TileIndex::EAST),
-            other => panic!("期望 Riichi, 得到 {:?}", other),
-        }
     }
 
     #[test]
