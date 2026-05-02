@@ -136,7 +136,12 @@ impl OnlineRoomState {
         None
     }
 
-    pub fn render(&self, f: &mut Frame, area: Rect) {
+    pub fn render(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        nat: Option<&crate::net::p2p::host::NatReachability>,
+    ) {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(" 房间 {} ", self.room_view.room_id))
@@ -150,6 +155,27 @@ impl OnlineRoomState {
             format!("房间 ID: {}", self.room_view.room_id),
             Style::default().fg(Color::Yellow),
         )));
+
+        // 房主端额外显示 NAT 状态.
+        if self.is_host()
+            && let Some(reach) = nat
+        {
+            let (label, color) = match reach {
+                crate::net::p2p::host::NatReachability::Public(_) => {
+                    ("Public (公网可达, 加入者可直连)", Color::Green)
+                }
+                crate::net::p2p::host::NatReachability::Private => {
+                    ("Private (NAT 后, 加入者通过 relay 中转)", Color::Yellow)
+                }
+                crate::net::p2p::host::NatReachability::Unknown => {
+                    ("Unknown (探测中, 等几秒)", Color::DarkGray)
+                }
+            };
+            lines.push(Line::from(vec![
+                Span::raw("NAT 状态: "),
+                Span::styled(label, Style::default().fg(color)),
+            ]));
+        }
         lines.push(Line::from(""));
 
         lines.push(Line::from(Span::styled(

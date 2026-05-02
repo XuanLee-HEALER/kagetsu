@@ -31,6 +31,7 @@
 //! - [`discovery`] 房间发现: RoomEntry / RoomBrowser / RoomAdvertiser
 
 pub mod behaviour;
+pub mod bootstrap;
 pub mod discovery;
 pub mod host;
 pub mod join;

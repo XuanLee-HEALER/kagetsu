@@ -36,10 +36,20 @@ const MAX_PREFS_SIZE: u64 = 1_048_576;
 #[serde(default)]
 pub struct LocalPrefs {
     pub theme: ThemeKind,
+    pub network: NetworkPrefs,
     // 占位扩展点 (未来加字段时, 旧 prefs.toml 因 #[serde(default)] 仍可解析):
     // pub locale: Locale,        // zh-CN / en-US / ja-JP ...
     // pub keymap: KeymapPreset,   // default / vim ...
     // pub sound: SoundPrefs,
+}
+
+/// P2P 网络偏好.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct NetworkPrefs {
+    /// 用户自定义 bootstrap relay 列表 (multiaddr 字符串).
+    /// 非空时覆盖 [`crate::net::p2p::bootstrap::DEFAULT_BOOTSTRAP_RELAYS`].
+    pub bootstrap_relays: Vec<String>,
 }
 
 /// 启动加载结果.
@@ -284,6 +294,7 @@ mod tests {
     fn local_prefs_round_trip_toml() {
         let p = LocalPrefs {
             theme: ThemeKind::Light,
+            network: NetworkPrefs::default(),
         };
         let s = toml::to_string_pretty(&p).unwrap();
         let back: LocalPrefs = toml::from_str(&s).unwrap();

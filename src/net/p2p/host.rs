@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use libp2p::{Multiaddr, PeerId, Swarm, multiaddr::Protocol, request_response, swarm::SwarmEvent};
+use libp2p::{
+    Multiaddr, PeerId, Swarm, autonat, multiaddr::Protocol, request_response, swarm::SwarmEvent,
+};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
@@ -32,10 +34,15 @@ pub enum ListenerError {
 ///
 /// `room_metadata` 写入 identify agent_version (见 [`crate::net::p2p::discovery::encode_metadata`]).
 ///
-/// 返回 [`HostHandle`], drop 时关闭 swarm + 撤销 mDNS 广告.
+/// `bootstrap_relays` 是 [`crate::net::p2p::bootstrap`] 提供的 Tier 1 relay 列表.
+/// 启动时主动 dial + listen on `<relay>/p2p-circuit`, 让 NAT 后房主获得 reservation,
+/// 加入者通过 relay 连过来. 公网房主也连 bootstrap 让 AutoNAT 探测自己 Public.
+///
+/// 返回 [`HostHandle`], drop 时关闭 swarm + 撤销 mDNS 广告 + 释放 reservation.
 pub async fn spawn_p2p_listener(
     handle: RoomHandle,
     room_metadata: String,
+    bootstrap_relays: Vec<Multiaddr>,
 ) -> Result<HostHandle, ListenerError> {
     let kp = new_keypair();
     let local_peer_id = PeerId::from(&kp.public());
@@ -49,6 +56,29 @@ pub async fn spawn_p2p_listener(
     swarm
         .listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap())
         .map_err(|e| ListenerError::Listen(format!("TCP: {e}")))?;
+
+    // 主动 dial 每个 bootstrap relay; 失败仅 warn 不致命.
+    for relay_addr in &bootstrap_relays {
+        if let Err(e) = swarm.dial(relay_addr.clone()) {
+            tracing::warn!("dial bootstrap relay {} 失败: {e}", relay_addr);
+        }
+    }
+
+    // listen on <relay>/p2p-circuit 触发 reservation 请求 (libp2p 自动协商).
+    // 即使 dial 还没建立, listen 会 pending; 连上后 reservation 自动开始.
+    let mut relay_listen_count = 0usize;
+    for relay_addr in &bootstrap_relays {
+        let circuit = relay_addr.clone().with(Protocol::P2pCircuit);
+        match swarm.listen_on(circuit) {
+            Ok(_) => relay_listen_count += 1,
+            Err(e) => tracing::warn!("listen on {} 的 circuit 失败: {e}", relay_addr),
+        }
+    }
+    tracing::info!(
+        "host swarm started: bootstrap_relays={}, circuit_listens={}",
+        bootstrap_relays.len(),
+        relay_listen_count
+    );
 
     // 等到第一批 listen 地址 (尽量拿到 QUIC, 否则 fallback 任意).
     let mut listen_addrs: Vec<Multiaddr> = Vec::new();
@@ -98,8 +128,33 @@ pub struct HostHandle {
 /// 房主 swarm 向 UI 推送的事件.
 #[derive(Debug)]
 pub enum HostEvent {
-    PeerJoined { peer_id: PeerId, player_id: u32 },
-    PeerLeft { peer_id: PeerId },
+    PeerJoined {
+        peer_id: PeerId,
+        player_id: u32,
+    },
+    PeerLeft {
+        peer_id: PeerId,
+    },
+    /// AutoNAT 探测结果变化. UI 用它显示 "你是公网可达 / NAT 后 / 探测中".
+    NatStatusChanged {
+        reachability: NatReachability,
+    },
+    /// DCUtR 升级直连成功 / 失败 (relay 中转 → 直接). UI 显示连接质量提示.
+    DcutrResult {
+        peer_id: PeerId,
+        upgraded: bool,
+    },
+}
+
+/// 简化的 NAT 可达性状态 (从 libp2p::autonat::NatStatus 投影).
+#[derive(Debug, Clone)]
+pub enum NatReachability {
+    /// 公网可达, 含 AutoNAT 探测确认的外部 multiaddr.
+    Public(Multiaddr),
+    /// NAT 后, 必须通过 relay 才能被加入者连上.
+    Private,
+    /// 还没探测出结果 (未连 AutoNAT server / 数据不足).
+    Unknown,
 }
 
 // ============================================================================
@@ -175,13 +230,37 @@ async fn handle_swarm_event(
                 let _ = event_tx.send(HostEvent::PeerLeft { peer_id });
             }
         }
+        SwarmEvent::Behaviour(P2pBehaviourEvent::Autonat(autonat::Event::StatusChanged {
+            new,
+            ..
+        })) => {
+            let reachability = match new {
+                autonat::NatStatus::Public(addr) => NatReachability::Public(addr),
+                autonat::NatStatus::Private => NatReachability::Private,
+                autonat::NatStatus::Unknown => NatReachability::Unknown,
+            };
+            tracing::info!("autonat status changed: {reachability:?}");
+            let _ = event_tx.send(HostEvent::NatStatusChanged { reachability });
+        }
+        SwarmEvent::Behaviour(P2pBehaviourEvent::Dcutr(dcutr_event)) => {
+            // 0.56 dcutr::Event 是 struct 含 remote_peer_id + result.
+            let upgraded = dcutr_event.result.is_ok();
+            tracing::info!(
+                "dcutr peer={} upgraded={upgraded} ({:?})",
+                dcutr_event.remote_peer_id,
+                dcutr_event.result
+            );
+            let _ = event_tx.send(HostEvent::DcutrResult {
+                peer_id: dcutr_event.remote_peer_id,
+                upgraded,
+            });
+        }
         SwarmEvent::Behaviour(P2pBehaviourEvent::Mdns(_))
         | SwarmEvent::Behaviour(P2pBehaviourEvent::Identify(_))
         | SwarmEvent::Behaviour(P2pBehaviourEvent::Autonat(_))
         | SwarmEvent::Behaviour(P2pBehaviourEvent::RelayServer(_))
-        | SwarmEvent::Behaviour(P2pBehaviourEvent::RelayClient(_))
-        | SwarmEvent::Behaviour(P2pBehaviourEvent::Dcutr(_)) => {
-            // M1 阶段不消费这些, M2 加 NAT 处理时再细化.
+        | SwarmEvent::Behaviour(P2pBehaviourEvent::RelayClient(_)) => {
+            // 其它细节事件不消费, M2 后期可加 logging.
         }
         _ => {}
     }
@@ -328,6 +407,7 @@ mod tests {
         let host = spawn_p2p_listener(
             handle.clone(),
             "host_nick=Host;players=1;lifecycle=lobby;room_id=t".into(),
+            vec![], // 单元测试不连 bootstrap relay
         )
         .await
         .expect("listener");

@@ -104,6 +104,8 @@ pub struct App {
     pub host_dial_addr: Option<libp2p::Multiaddr>,
     /// 房主 mode: P2P listener 句柄. drop = 关闭 swarm + mDNS 广告.
     pub host_listener: Option<crate::net::p2p::host::HostHandle>,
+    /// 房主 AutoNAT 探测出的可达性状态 (None = 还没探测).
+    pub host_nat: Option<crate::net::p2p::host::NatReachability>,
     /// 当前正在显示的 ConfirmModal (含待执行 action). 拦截一切按键直到关闭.
     pub pending_confirm: Option<(ConfirmModal, ConfirmAction)>,
     /// 启动时 prefs 加载状态产生的一次性 banner (主菜单显示).
@@ -124,6 +126,7 @@ impl App {
             runtime,
             host_dial_addr: None,
             host_listener: None,
+            host_nat: None,
             pending_confirm: None,
             startup_banner,
         }
@@ -141,8 +144,35 @@ impl App {
         Ok(())
     }
 
+    /// 拉空 host_listener.event_rx, 把 NAT/DCUtR 状态更新到 self.host_nat.
+    fn drain_host_events(&mut self) {
+        use crate::net::p2p::host::HostEvent;
+        let Some(listener) = self.host_listener.as_mut() else {
+            return;
+        };
+        while let Ok(ev) = listener.event_rx.try_recv() {
+            match ev {
+                HostEvent::NatStatusChanged { reachability } => {
+                    self.host_nat = Some(reachability);
+                }
+                HostEvent::DcutrResult { peer_id, upgraded } => {
+                    tracing::info!("dcutr peer={peer_id} upgraded={upgraded}");
+                }
+                HostEvent::PeerJoined {
+                    peer_id, player_id, ..
+                } => {
+                    tracing::debug!("peer joined: {peer_id} as player {player_id}");
+                }
+                HostEvent::PeerLeft { peer_id } => {
+                    tracing::debug!("peer left: {peer_id}");
+                }
+            }
+        }
+    }
+
     /// 单步: poll 事件 → 全局/屏处理 → InGame advance → 应用 transition.
     fn tick(&mut self) -> Result<()> {
+        self.drain_host_events();
         let timeout = self.poll_timeout();
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
@@ -293,6 +323,7 @@ impl App {
                 // RoomHandle 会随 OnlineRoomState drop.
                 self.host_listener.take();
                 self.host_dial_addr = None;
+                self.host_nat = None;
                 self.screen = Screen::MainMenu(MainMenuState::new());
             }
             Transition::EnterConfig => {
@@ -335,6 +366,7 @@ impl App {
     /// 创建本地 RoomActor (房主), 同时启动 P2P listener 让远程玩家可加入,
     /// 自己用 LocalSession 直连 RoomActor. listener 内部跑 mDNS 广告 + libp2p swarm.
     fn create_online_room(&mut self, nickname: String) {
+        use crate::net::p2p::bootstrap::effective_bootstrap_relays;
         use crate::net::p2p::discovery::encode_metadata;
         use crate::net::p2p::host::spawn_p2p_listener;
         use crate::net::room::spawn_room;
@@ -342,11 +374,12 @@ impl App {
 
         let room_id = format!("{}", uuid::Uuid::new_v4());
         let metadata = encode_metadata(&nickname, 1, "lobby", &room_id);
+        let bootstrap = effective_bootstrap_relays(&self.local_prefs.network.bootstrap_relays);
 
         // spawn_room 内部用 tokio::spawn, 必须在 runtime context 中调用.
         let setup_result = self.runtime.block_on(async {
             let handle = spawn_room(nickname.clone(), self.last_config.clone());
-            let listener = spawn_p2p_listener(handle.clone(), metadata)
+            let listener = spawn_p2p_listener(handle.clone(), metadata, bootstrap)
                 .await
                 .map_err(|e| format!("P2P listener 启动失败: {e}"))?;
             let session = spawn_local_session(handle.clone(), nickname.clone())
@@ -497,7 +530,7 @@ impl App {
             Screen::InGame(s) => s.render(f, area),
             Screen::GameOver(s) => s.render(f, area),
             Screen::OnlineLobby(s) => s.render(f, area),
-            Screen::OnlineRoom(s) => s.render(f, area),
+            Screen::OnlineRoom(s) => s.render(f, area, self.host_nat.as_ref()),
             Screen::OnlineGame(s) => s.render(f, area),
         }
     }
