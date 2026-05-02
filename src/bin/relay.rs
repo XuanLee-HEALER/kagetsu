@@ -5,20 +5,30 @@
 //!
 //! 用法:
 //! ```text
-//! tui-majo-relay [PORT]            # 默认 4001
-//! tui-majo-relay 12345
-//! RUST_LOG=debug tui-majo-relay    # 看详细日志
+//! tui-majo-relay [PORT] [KEY_FILE]              # 位置参数
+//! tui-majo-relay                                # 默认 PORT=4001 KEY_FILE=tui-majo-relay.key
+//! tui-majo-relay 12345                          # 改 port, key 默认
+//! tui-majo-relay 4001 /etc/tui-majo/relay.key   # 都自定
+//! RUST_LOG=debug tui-majo-relay                 # 详细日志
 //! ```
 //!
-//! 启动后输出自己的完整 multiaddr (含 /p2p/<peer-id>), 把它加进
-//! `src/net/p2p/bootstrap.rs::BOOTSTRAP_RELAYS` 或客户端 prefs.toml 即可.
+//! ## PeerId 持久化
 //!
-//! 长跑进程, 用 systemd / pm2 等管理. 重启会换 PeerId, 客户端列表得跟着更新.
-//! TODO: 持久化 keypair 到磁盘文件, 重启后保持同 PeerId.
+//! KEY_FILE 不存在时生成新 ed25519 keypair 写入, 存在时加载. 重启保持同 PeerId,
+//! 客户端 bootstrap_relays 配置只填一次即可.
+//!
+//! ## 部署
+//!
+//! 启动后输出完整 multiaddr (含 /p2p/<peer-id>), 把它加进
+//! `src/net/p2p/bootstrap.rs::DEFAULT_BOOTSTRAP_RELAYS` 或客户端 prefs.toml 的
+//! `[network] bootstrap_relays = [...]`.
+//!
+//! 长跑进程, 用 systemd / pm2 等管理.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use libp2p::{
     PeerId, SwarmBuilder, identify, identity, multiaddr::Protocol, ping, relay,
@@ -33,6 +43,8 @@ struct RelayBehaviour {
     ping: ping::Behaviour,
 }
 
+const DEFAULT_KEY_FILE: &str = "tui-majo-relay.key";
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
     init_tracing();
@@ -41,8 +53,12 @@ async fn main() -> Result<()> {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(4001);
+    let key_file: PathBuf = std::env::args()
+        .nth(2)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_KEY_FILE));
 
-    let keypair = identity::Keypair::generate_ed25519();
+    let keypair = load_or_create_keypair(&key_file)?;
     let local_peer_id = PeerId::from(&keypair.public());
 
     let mut swarm = SwarmBuilder::with_existing_identity(keypair.clone())
@@ -105,6 +121,41 @@ async fn main() -> Result<()> {
             }
             _ => {}
         }
+    }
+}
+
+/// 加载或创建 ed25519 keypair 持久化文件.
+///
+/// 文件不存在 → 生成新 keypair, 写入 protobuf 编码 (libp2p 标准格式).
+/// 文件存在 → 读取并解码.
+///
+/// 文件权限不做特殊处理 (Windows 上 chmod 无意义). Unix 部署建议用户自行 `chmod 600`.
+fn load_or_create_keypair(path: &Path) -> Result<identity::Keypair> {
+    if path.exists() {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("读取 keypair 文件失败: {}", path.display()))?;
+        let kp = identity::Keypair::from_protobuf_encoding(&bytes)
+            .with_context(|| format!("keypair 文件格式错误: {}", path.display()))?;
+        tracing::info!("loaded keypair from {}", path.display());
+        Ok(kp)
+    } else {
+        let kp = identity::Keypair::generate_ed25519();
+        let bytes = kp
+            .to_protobuf_encoding()
+            .context("encode keypair to protobuf")?;
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(path, bytes)
+            .with_context(|| format!("写入 keypair 文件失败: {}", path.display()))?;
+        tracing::info!("generated new keypair, saved to {}", path.display());
+        eprintln!(
+            "[relay] 已生成新 keypair → {}, 重启保持同 PeerId. 备份 / 妥善保管此文件.",
+            path.display()
+        );
+        Ok(kp)
     }
 }
 
