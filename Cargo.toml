@@ -29,12 +29,26 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-width = "0.2"
-# 多人对战 (LAN) 相关.
+# 多人对战 (P2P) 相关.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
-axum = { version = "0.8", features = ["ws"] }
-tokio-tungstenite = "0.27"
 futures-util = "0.3"
-mdns-sd = "0.13"
+libp2p = { version = "0.56", features = [
+    "tokio",
+    "quic",
+    "tcp",
+    "noise",
+    "yamux",
+    "mdns",
+    "identify",
+    "autonat",
+    "relay",
+    "dcutr",
+    "request-response",
+    "cbor",
+    "ed25519",
+    "macros",
+    "serde",
+] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]

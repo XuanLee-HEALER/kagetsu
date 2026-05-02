@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::net::discovery::{DiscoveryBrowser, RoomEntry};
+use crate::net::p2p::discovery::{RoomBrowser, RoomEntry};
 use crate::ui::Transition;
 
 /// 大厅项目焦点.
@@ -26,7 +26,7 @@ pub struct OnlineLobbyState {
     pub focus: usize,
     pub message: String,
     /// mDNS browser, 启动失败时 None (e.g. 容器/受限网络).
-    pub browser: Option<DiscoveryBrowser>,
+    pub browser: Option<RoomBrowser>,
     /// 当前发现到的房间列表 (每帧 poll 更新).
     pub discovered: Vec<RoomEntry>,
     /// discovered 列表里选中行 (focus=FOCUS_DISCOVERED 时生效).
@@ -34,8 +34,8 @@ pub struct OnlineLobbyState {
 }
 
 impl OnlineLobbyState {
-    pub fn new() -> Self {
-        let browser = DiscoveryBrowser::start().ok();
+    pub fn new(runtime: &tokio::runtime::Handle) -> Self {
+        let browser = RoomBrowser::start(runtime).ok();
         Self {
             nickname: String::new(),
             addr: String::new(),
@@ -47,10 +47,10 @@ impl OnlineLobbyState {
         }
     }
 
-    pub fn with_message(message: String) -> Self {
+    pub fn with_message(runtime: &tokio::runtime::Handle, message: String) -> Self {
         Self {
             message,
-            ..Self::new()
+            ..Self::new(runtime)
         }
     }
 
@@ -139,9 +139,13 @@ impl OnlineLobbyState {
                         return None;
                     }
                     let entry = &self.discovered[self.discovered_selected];
+                    let addr = entry
+                        .dial_multiaddr()
+                        .map(|m| m.to_string())
+                        .unwrap_or_else(|| entry.addr());
                     Some(Transition::JoinOnlineRoom {
                         nickname: self.nickname.trim().to_string(),
-                        addr: entry.addr.clone(),
+                        addr,
                     })
                 }
                 FOCUS_ADDR => {
@@ -275,7 +279,11 @@ impl OnlineLobbyState {
                 lines.push(Line::from(Span::styled(
                     format!(
                         "{} {} @ {} · {}/4 · {}",
-                        cursor, room.host_nick, room.addr, room.players, room.state
+                        cursor,
+                        room.host_nick,
+                        room.addr(),
+                        room.players,
+                        room.state
                     ),
                     style,
                 )));
@@ -296,7 +304,7 @@ impl OnlineLobbyState {
             "  地址: "
         };
         let mut addr_text = if self.addr.is_empty() {
-            "(例如 192.168.1.5:34567)".to_string()
+            "(multiaddr, 例 /ip4/.../udp/.../quic-v1/p2p/...)".to_string()
         } else {
             self.addr.clone()
         };
@@ -354,8 +362,3 @@ impl OnlineLobbyState {
     }
 }
 
-impl Default for OnlineLobbyState {
-    fn default() -> Self {
-        Self::new()
-    }
-}

@@ -98,10 +98,10 @@ pub struct App {
     pub local_prefs: LocalPrefs,
     /// tokio runtime handle, 用于 sync UI 线程调用 async net 操作.
     pub runtime: tokio::runtime::Handle,
-    /// 房主 mode: 当前活跃 ws server 的端口 (用于显示给加入者).
-    pub host_port: Option<u16>,
-    /// 房主 mode: mDNS 广告. 房间结束 / 退出 lobby 时 drop.
-    pub discovery_ad: Option<crate::net::discovery::DiscoveryAd>,
+    /// 房主 mode: 当前 listener 的 multiaddr (含 peer-id, 给加入者拷贝用).
+    pub host_dial_addr: Option<libp2p::Multiaddr>,
+    /// 房主 mode: P2P listener 句柄. drop = 关闭 swarm + mDNS 广告.
+    pub host_listener: Option<crate::net::p2p::host::HostHandle>,
     /// 当前正在显示的 ConfirmModal (含待执行 action). 拦截一切按键直到关闭.
     pub pending_confirm: Option<(ConfirmModal, ConfirmAction)>,
 }
@@ -115,8 +115,8 @@ impl App {
             last_seed_choice: SeedChoice::Random,
             local_prefs: LocalPrefs::default(),
             runtime,
-            host_port: None,
-            discovery_ad: None,
+            host_dial_addr: None,
+            host_listener: None,
             pending_confirm: None,
         }
     }
@@ -276,9 +276,10 @@ impl App {
                 self.running = false;
             }
             Transition::EnterMainMenu => {
-                // 房主退出 → 关 mDNS 广告 + 房间 (RoomHandle 会随 OnlineRoomState drop).
-                self.discovery_ad.take();
-                self.host_port = None;
+                // 房主退出 → drop listener (含 mDNS 广告 + swarm).
+                // RoomHandle 会随 OnlineRoomState drop.
+                self.host_listener.take();
+                self.host_dial_addr = None;
                 self.screen = Screen::MainMenu(MainMenuState::new());
             }
             Transition::EnterConfig => {
@@ -301,7 +302,7 @@ impl App {
                 self.screen = Screen::GameOver(GameOverState::new(rankings));
             }
             Transition::EnterOnlineLobby => {
-                self.screen = Screen::OnlineLobby(OnlineLobbyState::new());
+                self.screen = Screen::OnlineLobby(OnlineLobbyState::new(&self.runtime));
             }
             Transition::CreateOnlineRoom { nickname } => {
                 self.create_online_room(nickname);
@@ -318,52 +319,49 @@ impl App {
         }
     }
 
-    /// 创建本地 RoomActor (房主), 同时启动 ws server 让远程玩家可加入,
-    /// 自己用 LocalSession 直连 RoomActor. 同时 mDNS 广告该房间.
+    /// 创建本地 RoomActor (房主), 同时启动 P2P listener 让远程玩家可加入,
+    /// 自己用 LocalSession 直连 RoomActor. listener 内部跑 mDNS 广告 + libp2p swarm.
     fn create_online_room(&mut self, nickname: String) {
-        use crate::net::discovery::DiscoveryAd;
+        use crate::net::p2p::discovery::encode_metadata;
+        use crate::net::p2p::host::spawn_p2p_listener;
         use crate::net::room::spawn_room;
-        use crate::net::server::{LAN_BIND, spawn_ws_server};
         use crate::net::session::spawn_local_session;
 
+        let room_id = format!("{}", uuid::Uuid::new_v4());
+        let metadata = encode_metadata(&nickname, 1, "lobby", &room_id);
+
         // spawn_room 内部用 tokio::spawn, 必须在 runtime context 中调用.
-        // 整个 setup (spawn_room + spawn_ws_server + spawn_local_session)
-        // 包在一次 block_on 内确保都在 runtime 内.
         let setup_result = self.runtime.block_on(async {
             let handle = spawn_room(nickname.clone(), self.last_config.clone());
-            let port_addr = spawn_ws_server(handle.clone(), LAN_BIND, 0)
+            let listener = spawn_p2p_listener(handle.clone(), metadata)
                 .await
-                .map_err(|e| format!("ws server 启动失败: {e}"))?;
+                .map_err(|e| format!("P2P listener 启动失败: {e}"))?;
             let session = spawn_local_session(handle.clone(), nickname.clone())
                 .await
                 .map_err(|e| format!("房主 join 失败: {e}"))?;
-            Ok::<_, String>((port_addr.port(), session))
+            Ok::<_, String>((listener, session))
         });
-        let (port, session) = match setup_result {
-            Ok(v) => (Some(v.0), v.1),
+        let (listener, session) = match setup_result {
+            Ok(v) => v,
             Err(e) => {
                 tracing::error!("创建房间失败: {e}");
-                self.screen =
-                    Screen::OnlineLobby(OnlineLobbyState::with_message(format!("创建失败: {e}")));
+                self.screen = Screen::OnlineLobby(OnlineLobbyState::with_message(
+                    &self.runtime,
+                    format!("创建失败: {e}"),
+                ));
                 return;
             }
         };
-        self.host_port = port;
+        let dial_addr = listener.dial_addr.clone();
+        self.host_dial_addr = dial_addr.clone();
+        self.host_listener = Some(listener);
 
-        // 启动 mDNS 广告 (port 必须存在才有意义).
-        let room_id = format!("{}", uuid::Uuid::new_v4());
-        if let Some(p) = port {
-            match DiscoveryAd::advertise(&nickname, p, &room_id, 1, "lobby") {
-                Ok(ad) => self.discovery_ad = Some(ad),
-                Err(e) => tracing::warn!("mDNS 广告失败: {e}"),
-            }
-        }
-
+        let room_id_display = match &dial_addr {
+            Some(a) => format!("LAN @ {a}"),
+            None => "LAN".into(),
+        };
         let placeholder_view = crate::net::protocol::RoomView {
-            room_id: match port {
-                Some(p) => format!("LAN @ :{p}"),
-                None => "LAN".into(),
-            },
+            room_id: room_id_display,
             host_id: session.player_id,
             config: self.last_config.clone(),
             players: vec![],
@@ -374,12 +372,22 @@ impl App {
         self.screen = Screen::OnlineRoom(Box::new(room_state));
     }
 
-    /// 远程加入房间 (走 ws).
+    /// 远程加入房间. `addr` 是 multiaddr 字符串 (含 /p2p/<peer-id>).
     fn join_online_room(&mut self, nickname: String, addr: String) {
-        use crate::net::server::join_remote;
+        use crate::net::p2p::join::join_remote;
+        let multiaddr: libp2p::Multiaddr = match addr.parse() {
+            Ok(m) => m,
+            Err(e) => {
+                self.screen = Screen::OnlineLobby(OnlineLobbyState::with_message(
+                    &self.runtime,
+                    format!("地址格式错误: {e}"),
+                ));
+                return;
+            }
+        };
         let r = self
             .runtime
-            .block_on(async { join_remote(&addr, nickname).await });
+            .block_on(async { join_remote(&multiaddr, nickname).await });
         match r {
             Ok(session) => {
                 let placeholder_view = crate::net::protocol::RoomView {
@@ -394,8 +402,10 @@ impl App {
                 self.screen = Screen::OnlineRoom(Box::new(room_state));
             }
             Err(e) => {
-                self.screen =
-                    Screen::OnlineLobby(OnlineLobbyState::with_message(format!("加入失败: {e}")));
+                self.screen = Screen::OnlineLobby(OnlineLobbyState::with_message(
+                    &self.runtime,
+                    format!("加入失败: {e}"),
+                ));
             }
         }
     }

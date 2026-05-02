@@ -1,12 +1,12 @@
-//! 多人对战 (LAN) 模块.
+//! 多人对战模块.
 //!
-//! - [`protocol`] 网络协议消息定义 (client ↔ server)
-//! - [`client`]   transport 抽象 + LocalTransport (mpsc 同进程, 房主自己用)
-//! - 后续 phase 加: server, room, discovery, ai_seat
+//! - [`protocol`] 网络协议消息定义 (client ↔ server).
+//! - [`session`]  NetSession — 房主/远程 client 统一视角.
+//! - [`room`]     RoomActor — 持权威 GameState + 处理玩家命令 (标准模式).
+//! - [`p2p`]      libp2p 实现: mDNS 发现 + QUIC/TCP listen/dial + identify
+//!   房间 metadata + request-response 消息收发.
 
-pub mod client;
-pub mod discovery;
+pub mod p2p;
 pub mod protocol;
 pub mod room;
-pub mod server;
 pub mod session;
