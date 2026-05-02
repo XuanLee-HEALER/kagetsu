@@ -92,14 +92,17 @@ pub struct RoomBrowser {
 
 impl RoomBrowser {
     /// 启动浏览器. 在给定 tokio runtime 上 spawn swarm task.
+    ///
+    /// 注: build_swarm 内部 libp2p-quic (quinn) 初始化要 tokio runtime context,
+    /// 由于本函数被 UI 同步线程调用, 必须先 runtime.enter() 进 context.
     pub fn start(runtime: &tokio::runtime::Handle) -> Result<Self, BrowserError> {
+        let _guard = runtime.enter();
         let kp = new_keypair();
         let mut swarm = build_swarm(kp, "browser".into())
             .map_err(|e| BrowserError::Swarm(e.to_string()))?;
 
         // listen 一个 QUIC 端口让 mDNS service 能注册地址.
         // 这是必要的: libp2p mDNS query 需要本地有 listen 才会发 mDNS announcement.
-        // (M1.B 测试已验证 listen 可用)
         if let Err(e) = swarm.listen_on("/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap()) {
             tracing::warn!("browser listen QUIC 失败: {e}");
         }
@@ -277,5 +280,18 @@ mod tests {
         let m = encode_metadata("A;li=ce", 1, "lobby", "id");
         assert!(!m.contains("A;li=ce"));
         assert!(m.contains("A_li_ce"));
+    }
+
+    /// 回归: RoomBrowser::start 必须能从非 runtime context 的同步线程调用.
+    /// (UI 屏从 ratatui sync 线程调时 quinn 初始化需要 runtime, 必须 enter)
+    #[test]
+    fn start_from_sync_thread_does_not_panic() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // 主线程不在 runtime context 里.
+        let _br = RoomBrowser::start(rt.handle()).expect("start");
+        // drop runtime 让 spawn 的 task 退出.
     }
 }
