@@ -99,7 +99,8 @@ impl EditConfigModal {
 
     pub fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
         let w: u16 = 56;
-        let h: u16 = 14;
+        // 6 字段每字段 2 行 = 12 行内容 + 边框 + 内边距 + hint 行 = 16 行.
+        let h: u16 = 16;
         if area.width < w || area.height < h {
             return;
         }

@@ -193,21 +193,44 @@ impl OnlineRoomState {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "配置",
-            Style::default().fg(Color::Cyan),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )));
-        let len_label = match self.room_view.config.length {
+        let cfg = &self.room_view.config;
+        let len_label = match cfg.length {
             crate::config::LengthRule::Hanchan => "半庄战",
             crate::config::LengthRule::Tonpuusen => "东风战",
         };
-        lines.push(Line::from(format!(
-            "  赛制: {} · 思考时长: {}",
-            len_label,
-            self.room_view
-                .config
-                .thinking_time_secs
-                .map(|s| format!("{} 秒", s))
-                .unwrap_or_else(|| "不限时".into()),
-        )));
+        let thinking_label = cfg
+            .thinking_time_secs
+            .map(|s| format!("{} 秒", s))
+            .unwrap_or_else(|| "不限时".into());
+        let entries: [(&str, String, bool); 6] = [
+            ("赛制", len_label.to_string(), true),
+            ("思考时长", thinking_label, true),
+            ("食断", bool_label(cfg.kuitan), cfg.kuitan),
+            ("赤宝牌", bool_label(cfg.aka_dora), cfg.aka_dora),
+            ("一发", bool_label(cfg.ippatsu), cfg.ippatsu),
+            ("里宝牌", bool_label(cfg.ura_dora), cfg.ura_dora),
+        ];
+        for (key, val, on) in &entries {
+            let val_color = match key.as_ref() {
+                "赛制" | "思考时长" => Color::Yellow,
+                _ => {
+                    if *on {
+                        Color::Green
+                    } else {
+                        Color::DarkGray
+                    }
+                }
+            };
+            lines.push(Line::from(vec![
+                Span::styled("  • ", Style::default().fg(Color::DarkGray)),
+                Span::raw(format!("{}: ", key)),
+                Span::styled(val.clone(), Style::default().fg(val_color)),
+            ]));
+        }
 
         if !self.message.is_empty() {
             lines.push(Line::from(""));
@@ -242,4 +265,8 @@ impl OnlineRoomState {
     fn is_host(&self) -> bool {
         self.room_view.host_id == self.my_player_id()
     }
+}
+
+fn bool_label(v: bool) -> String {
+    if v { "开".into() } else { "关".into() }
 }
