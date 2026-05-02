@@ -46,7 +46,6 @@ const PLAYER_SEAT: Seat = Seat::East;
 /// AI 操作的节流时间, 让玩家看清.
 const AI_STEP_DELAY_MS: u64 = 350;
 
-
 pub struct GameScreenState {
     pub game: GameState,
     /// 玩家选中的手牌索引.
@@ -1000,7 +999,15 @@ impl GameScreenState {
         }
         // 牌河 row 6-9
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide_hl(buf, ox + 54, oy + 6, &p.river, theme, riichi_at, self.highlight_kind());
+        paint_discard_grid_wide_hl(
+            buf,
+            ox + 54,
+            oy + 6,
+            &p.river,
+            theme,
+            riichi_at,
+            self.highlight_kind(),
+        );
     }
 
     /// row 6-19 左侧: 上家 (North).
@@ -1056,7 +1063,15 @@ impl GameScreenState {
         paint_back_column_wide(buf, ox + 14, oy + 6, hand_count.min(13), theme);
         // 牌河 6 列 wide, col 20
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide_hl(buf, ox + 20, oy + 12, &p.river, theme, riichi_at, self.highlight_kind());
+        paint_discard_grid_wide_hl(
+            buf,
+            ox + 20,
+            oy + 12,
+            &p.river,
+            theme,
+            riichi_at,
+            self.highlight_kind(),
+        );
     }
 
     /// row 6-19 右侧: 下家 (South).
@@ -1110,7 +1125,15 @@ impl GameScreenState {
         let hand_count = p.hand.closed.len();
         paint_back_column_wide(buf, ox + 120, oy + 6, hand_count.min(13), theme);
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide_hl(buf, ox + 92, oy + 12, &p.river, theme, riichi_at, self.highlight_kind());
+        paint_discard_grid_wide_hl(
+            buf,
+            ox + 92,
+            oy + 12,
+            &p.river,
+            theme,
+            riichi_at,
+            self.highlight_kind(),
+        );
     }
 
     /// row 17-18: 中央 dora + 山数提示.
@@ -1142,7 +1165,15 @@ impl GameScreenState {
     fn paint_my_river(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
         let p = &self.game.players[PLAYER_SEAT.index()];
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide_hl(buf, ox + 54, oy + 23, &p.river, theme, riichi_at, self.highlight_kind());
+        paint_discard_grid_wide_hl(
+            buf,
+            ox + 54,
+            oy + 23,
+            &p.river,
+            theme,
+            riichi_at,
+            self.highlight_kind(),
+        );
     }
 
     /// row 28-29: 自家分割线 + 状态行.

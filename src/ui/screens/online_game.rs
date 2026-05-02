@@ -435,8 +435,7 @@ impl OnlineGameState {
                 self.session.send(ClientMsg::Action(NetAction::Chi(0)));
             }
             _ => {
-                self.chi_picker =
-                    Some(crate::ui::chi_picker::ChiPicker::new(options, target));
+                self.chi_picker = Some(crate::ui::chi_picker::ChiPicker::new(options, target));
             }
         }
     }
@@ -689,7 +688,15 @@ impl OnlineGameState {
                 col += (tiles.len() as u16) * 3 + 1;
             }
         }
-        paint_discard_grid_wide_hl(buf, ox + 54, oy + 6, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
+        paint_discard_grid_wide_hl(
+            buf,
+            ox + 54,
+            oy + 6,
+            &p.river,
+            theme,
+            p.riichi_river_idx,
+            self.highlight_kind(view),
+        );
     }
 
     /// 上家 (left).
@@ -756,7 +763,15 @@ impl OnlineGameState {
             }
         }
         paint_back_column_wide(buf, ox + 14, oy + 6, p.hand_count.min(13), theme);
-        paint_discard_grid_wide_hl(buf, ox + 20, oy + 12, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
+        paint_discard_grid_wide_hl(
+            buf,
+            ox + 20,
+            oy + 12,
+            &p.river,
+            theme,
+            p.riichi_river_idx,
+            self.highlight_kind(view),
+        );
     }
 
     /// 下家 (right).
@@ -823,7 +838,15 @@ impl OnlineGameState {
             }
         }
         paint_back_column_wide(buf, ox + 120, oy + 6, p.hand_count.min(13), theme);
-        paint_discard_grid_wide_hl(buf, ox + 92, oy + 12, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
+        paint_discard_grid_wide_hl(
+            buf,
+            ox + 92,
+            oy + 12,
+            &p.river,
+            theme,
+            p.riichi_river_idx,
+            self.highlight_kind(view),
+        );
     }
 
     fn paint_center_info(
@@ -863,7 +886,15 @@ impl OnlineGameState {
         my: Seat,
     ) {
         let p = player_at(view, my);
-        paint_discard_grid_wide_hl(buf, ox + 54, oy + 23, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
+        paint_discard_grid_wide_hl(
+            buf,
+            ox + 54,
+            oy + 23,
+            &p.river,
+            theme,
+            p.riichi_river_idx,
+            self.highlight_kind(view),
+        );
     }
 
     fn paint_my_status(

@@ -193,7 +193,10 @@ mod tests {
     #[test]
     fn esc_returns_cancel() {
         let mut p = picker_2();
-        assert!(matches!(p.handle_key(key(KeyCode::Esc)), ChiOutcome::Cancel));
+        assert!(matches!(
+            p.handle_key(key(KeyCode::Esc)),
+            ChiOutcome::Cancel
+        ));
     }
 
     #[test]
