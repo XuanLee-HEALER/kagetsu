@@ -158,6 +158,11 @@ pub enum HostEvent {
         peer_id: PeerId,
         upgraded: bool,
     },
+    /// 新的 listen 地址 (本地 LAN, 公网, 或 relay 中转 /p2p-circuit/...).
+    /// UI 累积所有 addr 并按优先级选最优作 dial_addr 给加入者.
+    NewListenAddr {
+        addr: Multiaddr,
+    },
 }
 
 /// 简化的 NAT 可达性状态 (从 libp2p::autonat::NatStatus 投影).
@@ -301,6 +306,22 @@ async fn handle_swarm_event(
                 peer_id: dcutr_event.remote_peer_id,
                 upgraded,
             });
+        }
+        SwarmEvent::NewListenAddr { address, .. } => {
+            // 含 /p2p-circuit/ 时表示 reservation 已确认, 加入者可通过 relay 连过来.
+            // 不含 circuit 的也推 (LAN / 公网直连地址).
+            // 用 with(P2p(local_peer_id)) 让 multiaddr 完整可 dial.
+            let local_peer_id = *swarm.local_peer_id();
+            let full = if address
+                .iter()
+                .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+            {
+                address
+            } else {
+                address.with(libp2p::multiaddr::Protocol::P2p(local_peer_id))
+            };
+            tracing::info!("new listen addr: {full}");
+            let _ = event_tx.send(HostEvent::NewListenAddr { addr: full });
         }
         SwarmEvent::Behaviour(P2pBehaviourEvent::Mdns(_))
         | SwarmEvent::Behaviour(P2pBehaviourEvent::Identify(_))

@@ -26,6 +26,42 @@ use crate::engine::rules::GameRules;
 use crate::engine::score::Ranking;
 use crate::ui::confirm::{ConfirmChoice, ConfirmModal};
 
+/// multiaddr 优先级评分: 含 /p2p-circuit/ + 公网 IP > 含 circuit > 公网 + QUIC > 公网 > LAN.
+/// 用于从 host_listen_addrs 选最优 dial_addr 给加入者复制粘贴.
+fn addr_score(addr: &libp2p::Multiaddr) -> u32 {
+    let mut score = 0u32;
+    let mut has_circuit = false;
+    let mut has_quic = false;
+    let mut public_ip = false;
+    for proto in addr.iter() {
+        match proto {
+            libp2p::multiaddr::Protocol::P2pCircuit => has_circuit = true,
+            libp2p::multiaddr::Protocol::QuicV1 => has_quic = true,
+            libp2p::multiaddr::Protocol::Ip4(ip) => {
+                if !ip.is_private() && !ip.is_loopback() && !ip.is_link_local() {
+                    public_ip = true;
+                }
+            }
+            libp2p::multiaddr::Protocol::Ip6(ip) => {
+                if !ip.is_loopback() {
+                    public_ip = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if has_circuit {
+        score += 1000;
+    }
+    if public_ip {
+        score += 100;
+    }
+    if has_quic {
+        score += 10;
+    }
+    score
+}
+
 pub use screens::config::{ConfigState, SeedChoice};
 pub use screens::game::GameScreenState;
 pub use screens::gameover::GameOverState;
@@ -101,7 +137,10 @@ pub struct App {
     /// tokio runtime handle, 用于 sync UI 线程调用 async net 操作.
     pub runtime: tokio::runtime::Handle,
     /// 房主 mode: 当前 listener 的 multiaddr (含 peer-id, 给加入者拷贝用).
+    /// 自动从 [`Self::host_listen_addrs`] 选最优 (含 /p2p-circuit/ > 公网 > LAN).
     pub host_dial_addr: Option<libp2p::Multiaddr>,
+    /// 房主 mode: 全部 listen 地址 (LAN + 公网 + relay 中转), 累积自 swarm 事件.
+    pub host_listen_addrs: Vec<libp2p::Multiaddr>,
     /// 房主 mode: P2P listener 句柄. drop = 关闭 swarm + mDNS 广告.
     pub host_listener: Option<crate::net::p2p::host::HostHandle>,
     /// 房主 AutoNAT 探测出的可达性状态 (None = 还没探测).
@@ -125,6 +164,7 @@ impl App {
             local_prefs: prefs,
             runtime,
             host_dial_addr: None,
+            host_listen_addrs: Vec::new(),
             host_listener: None,
             host_nat: None,
             pending_confirm: None,
@@ -144,12 +184,13 @@ impl App {
         Ok(())
     }
 
-    /// 拉空 host_listener.event_rx, 把 NAT/DCUtR 状态更新到 self.host_nat.
+    /// 拉空 host_listener.event_rx, 把 NAT/DCUtR/listen-addr 状态更新到 App.
     fn drain_host_events(&mut self) {
         use crate::net::p2p::host::HostEvent;
         let Some(listener) = self.host_listener.as_mut() else {
             return;
         };
+        let mut addr_changed = false;
         while let Ok(ev) = listener.event_rx.try_recv() {
             match ev {
                 HostEvent::NatStatusChanged { reachability } => {
@@ -166,7 +207,20 @@ impl App {
                 HostEvent::PeerLeft { peer_id } => {
                     tracing::debug!("peer left: {peer_id}");
                 }
+                HostEvent::NewListenAddr { addr } => {
+                    if !self.host_listen_addrs.contains(&addr) {
+                        self.host_listen_addrs.push(addr);
+                        addr_changed = true;
+                    }
+                }
             }
+        }
+        if addr_changed {
+            self.host_dial_addr = self
+                .host_listen_addrs
+                .iter()
+                .max_by_key(|a| addr_score(a))
+                .cloned();
         }
     }
 
@@ -323,6 +377,7 @@ impl App {
                 // RoomHandle 会随 OnlineRoomState drop.
                 self.host_listener.take();
                 self.host_dial_addr = None;
+                self.host_listen_addrs.clear();
                 self.host_nat = None;
                 self.screen = Screen::MainMenu(MainMenuState::new());
             }
@@ -530,7 +585,12 @@ impl App {
             Screen::InGame(s) => s.render(f, area),
             Screen::GameOver(s) => s.render(f, area),
             Screen::OnlineLobby(s) => s.render(f, area),
-            Screen::OnlineRoom(s) => s.render(f, area, self.host_nat.as_ref()),
+            Screen::OnlineRoom(s) => s.render(
+                f,
+                area,
+                self.host_nat.as_ref(),
+                self.host_dial_addr.as_ref(),
+            ),
             Screen::OnlineGame(s) => s.render(f, area),
         }
     }

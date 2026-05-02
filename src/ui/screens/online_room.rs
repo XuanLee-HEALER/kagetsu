@@ -141,6 +141,7 @@ impl OnlineRoomState {
         f: &mut Frame,
         area: Rect,
         nat: Option<&crate::net::p2p::host::NatReachability>,
+        dial_addr: Option<&libp2p::Multiaddr>,
     ) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -156,25 +157,42 @@ impl OnlineRoomState {
             Style::default().fg(Color::Yellow),
         )));
 
-        // 房主端额外显示 NAT 状态.
-        if self.is_host()
-            && let Some(reach) = nat
-        {
-            let (label, color) = match reach {
-                crate::net::p2p::host::NatReachability::Public(_) => {
-                    ("Public (公网可达, 加入者可直连)", Color::Green)
-                }
-                crate::net::p2p::host::NatReachability::Private => {
-                    ("Private (NAT 后, 加入者通过 relay 中转)", Color::Yellow)
-                }
-                crate::net::p2p::host::NatReachability::Unknown => {
-                    ("Unknown (探测中, 等几秒)", Color::DarkGray)
-                }
-            };
-            lines.push(Line::from(vec![
-                Span::raw("NAT 状态: "),
-                Span::styled(label, Style::default().fg(color)),
-            ]));
+        // 房主端额外显示 NAT 状态 + dial multiaddr (给加入者复制).
+        if self.is_host() {
+            if let Some(reach) = nat {
+                let (label, color) = match reach {
+                    crate::net::p2p::host::NatReachability::Public(_) => {
+                        ("Public (公网可达, 加入者可直连)", Color::Green)
+                    }
+                    crate::net::p2p::host::NatReachability::Private => {
+                        ("Private (NAT 后, 加入者通过 relay 中转)", Color::Yellow)
+                    }
+                    crate::net::p2p::host::NatReachability::Unknown => {
+                        ("Unknown (探测中, 等几秒)", Color::DarkGray)
+                    }
+                };
+                lines.push(Line::from(vec![
+                    Span::raw("NAT 状态: "),
+                    Span::styled(label, Style::default().fg(color)),
+                ]));
+            }
+            if let Some(addr) = dial_addr {
+                let s = addr.to_string();
+                let kind = if s.contains("/p2p-circuit") {
+                    "通过 relay"
+                } else {
+                    "直连"
+                };
+                lines.push(Line::from(vec![
+                    Span::raw(format!("加入用 ({}): ", kind)),
+                    Span::styled(s, Style::default().fg(Color::Cyan)),
+                ]));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    "加入用 multiaddr: (准备中, 等 listen 地址 + relay reservation)",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
         }
         lines.push(Line::from(""));
 
