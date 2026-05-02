@@ -34,9 +34,9 @@ use crate::engine::score::final_ranking;
 use crate::engine::state::{CallOptions, GameState, RoundResult, RyuukyokuKind};
 use crate::ui::Transition;
 use crate::ui::paint::{
-    TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row,
-    paint_discard_grid_wide, paint_double_box, paint_fill, paint_hr, paint_hr_accent,
-    paint_meld_row_tight, paint_str, paint_tile_tight, paint_tile_wide,
+    TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row_hl,
+    paint_discard_grid_wide_hl, paint_double_box, paint_fill, paint_hr, paint_hr_accent,
+    paint_meld_row_tight_hl, paint_str, paint_tile_tight, paint_tile_wide,
 };
 use crate::ui::theme::Theme;
 use crate::ui::widgets::seat_label;
@@ -723,6 +723,15 @@ impl GameScreenState {
             .count()
     }
 
+    /// 当前 selected 手牌的 kind (用于河/副露/手牌联动高亮).
+    /// 仅自家 AwaitDiscard 阶段返回 Some, 其它阶段返回 None.
+    fn highlight_kind(&self) -> Option<crate::domain::tile::TileIndex> {
+        if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
+            return None;
+        }
+        self.selectable_tiles().get(self.selected).map(|t| t.kind)
+    }
+
     /// 切牌等导致 selectable 长度变化后, 钳 selected 到合法范围.
     fn clamp_selected(&mut self) {
         let len = self.selectable_count();
@@ -1087,13 +1096,13 @@ impl GameScreenState {
             let mut col = ox + 48;
             for meld in &p.hand.melds {
                 let tiles: Vec<Tile> = meld.tiles().to_vec();
-                paint_meld_row_tight(buf, col, oy + 5, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, oy + 5, &tiles, theme, self.highlight_kind());
                 col += (tiles.len() as u16) * 3 + 1;
             }
         }
         // 牌河 row 6-9
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide(buf, ox + 54, oy + 6, &p.river, theme, riichi_at);
+        paint_discard_grid_wide_hl(buf, ox + 54, oy + 6, &p.river, theme, riichi_at, self.highlight_kind());
     }
 
     /// row 6-19 左侧: 上家 (North).
@@ -1135,7 +1144,7 @@ impl GameScreenState {
             let mut row = oy + 10;
             for meld in &p.hand.melds {
                 let tiles: Vec<Tile> = meld.tiles().to_vec();
-                paint_meld_row_tight(buf, col, row, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, row, &tiles, theme, self.highlight_kind());
                 col += (tiles.len() as u16) * 3 + 1;
                 if col > ox + 14 {
                     col = ox + 2;
@@ -1148,7 +1157,7 @@ impl GameScreenState {
         paint_back_column_wide(buf, ox + 14, oy + 6, hand_count.min(13), theme);
         // 牌河 6 列 wide, col 20
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide(buf, ox + 20, oy + 12, &p.river, theme, riichi_at);
+        paint_discard_grid_wide_hl(buf, ox + 20, oy + 12, &p.river, theme, riichi_at, self.highlight_kind());
     }
 
     /// row 6-19 右侧: 下家 (South).
@@ -1190,7 +1199,7 @@ impl GameScreenState {
             let mut row = oy + 10;
             for meld in &p.hand.melds {
                 let tiles: Vec<Tile> = meld.tiles().to_vec();
-                paint_meld_row_tight(buf, col, row, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, row, &tiles, theme, self.highlight_kind());
                 col += (tiles.len() as u16) * 3 + 1;
                 if col > ox + 138 {
                     col = ox + 126;
@@ -1201,7 +1210,7 @@ impl GameScreenState {
         let hand_count = p.hand.closed.len();
         paint_back_column_wide(buf, ox + 120, oy + 6, hand_count.min(13), theme);
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide(buf, ox + 92, oy + 12, &p.river, theme, riichi_at);
+        paint_discard_grid_wide_hl(buf, ox + 92, oy + 12, &p.river, theme, riichi_at, self.highlight_kind());
     }
 
     /// row 17-18: 中央 dora + 山数提示.
@@ -1233,7 +1242,7 @@ impl GameScreenState {
     fn paint_my_river(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
         let p = &self.game.players[PLAYER_SEAT.index()];
         let riichi_at = riichi_index_in_river(p);
-        paint_discard_grid_wide(buf, ox + 54, oy + 23, &p.river, theme, riichi_at);
+        paint_discard_grid_wide_hl(buf, ox + 54, oy + 23, &p.river, theme, riichi_at, self.highlight_kind());
     }
 
     /// row 28-29: 自家分割线 + 状态行.
@@ -1425,7 +1434,16 @@ impl GameScreenState {
         } else {
             None
         };
-        paint_boxed_row(buf, ox + 4, oy + 31, &display, theme, selected, drawn_idx);
+        paint_boxed_row_hl(
+            buf,
+            ox + 4,
+            oy + 31,
+            &display,
+            theme,
+            selected,
+            drawn_idx,
+            self.highlight_kind(),
+        );
         // 编号 row 35 (与 paint_boxed_row 同样的间隙规则: drawn 前留 3 cells)
         let drawn_gap = 3u16;
         let mut cx = ox + 4 + 1;

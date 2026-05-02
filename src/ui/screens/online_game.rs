@@ -36,8 +36,8 @@ use crate::net::protocol::{
 use crate::net::session::NetSession;
 use crate::ui::Transition;
 use crate::ui::paint::{
-    TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row,
-    paint_discard_grid_wide, paint_fill, paint_hr, paint_hr_accent, paint_meld_row_tight,
+    TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row_hl,
+    paint_discard_grid_wide_hl, paint_fill, paint_hr, paint_hr_accent, paint_meld_row_tight_hl,
     paint_str, paint_tile_tight, paint_tile_wide,
 };
 use crate::ui::screens::game::TileSpec;
@@ -260,6 +260,16 @@ impl OnlineGameState {
     }
 
     /// 自家可选牌数 = 手牌中除 last_drawn 之外的张数.
+    /// 当前 selected 手牌的 kind (用于河/副露/手牌联动高亮).
+    /// 仅自家 AwaitDiscard 阶段返回 Some, 其它阶段返回 None.
+    fn highlight_kind(&self, view: &GameStateView) -> Option<TileIndex> {
+        if view.turn != view.my_seat || view.phase != Phase::AwaitDiscard {
+            return None;
+        }
+        let (sel, _) = Self::split_hand(view);
+        sel.get(self.selected).map(|t| t.kind)
+    }
+
     fn selectable_count(&self, view: &GameStateView) -> usize {
         if let Some(d) = view.my_last_drawn {
             // 找一张匹配 d 的位置, 那一张就是 last_drawn (不可选).
@@ -589,11 +599,11 @@ impl OnlineGameState {
             let mut col = ox + 48;
             for meld in &p.melds {
                 let tiles: Vec<Tile> = meld_tiles(meld);
-                paint_meld_row_tight(buf, col, oy + 5, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, oy + 5, &tiles, theme, self.highlight_kind(view));
                 col += (tiles.len() as u16) * 3 + 1;
             }
         }
-        paint_discard_grid_wide(buf, ox + 54, oy + 6, &p.river, theme, p.riichi_river_idx);
+        paint_discard_grid_wide_hl(buf, ox + 54, oy + 6, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
     }
 
     /// 上家 (left).
@@ -651,7 +661,7 @@ impl OnlineGameState {
             let mut row = oy + 10;
             for meld in &p.melds {
                 let tiles: Vec<Tile> = meld_tiles(meld);
-                paint_meld_row_tight(buf, col, row, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, row, &tiles, theme, self.highlight_kind(view));
                 col += (tiles.len() as u16) * 3 + 1;
                 if col > ox + 14 {
                     col = ox + 2;
@@ -660,7 +670,7 @@ impl OnlineGameState {
             }
         }
         paint_back_column_wide(buf, ox + 14, oy + 6, p.hand_count.min(13), theme);
-        paint_discard_grid_wide(buf, ox + 20, oy + 12, &p.river, theme, p.riichi_river_idx);
+        paint_discard_grid_wide_hl(buf, ox + 20, oy + 12, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
     }
 
     /// 下家 (right).
@@ -718,7 +728,7 @@ impl OnlineGameState {
             let mut row = oy + 10;
             for meld in &p.melds {
                 let tiles: Vec<Tile> = meld_tiles(meld);
-                paint_meld_row_tight(buf, col, row, &tiles, theme);
+                paint_meld_row_tight_hl(buf, col, row, &tiles, theme, self.highlight_kind(view));
                 col += (tiles.len() as u16) * 3 + 1;
                 if col > ox + 138 {
                     col = ox + 126;
@@ -727,7 +737,7 @@ impl OnlineGameState {
             }
         }
         paint_back_column_wide(buf, ox + 120, oy + 6, p.hand_count.min(13), theme);
-        paint_discard_grid_wide(buf, ox + 92, oy + 12, &p.river, theme, p.riichi_river_idx);
+        paint_discard_grid_wide_hl(buf, ox + 92, oy + 12, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
     }
 
     fn paint_center_info(
@@ -767,7 +777,7 @@ impl OnlineGameState {
         my: Seat,
     ) {
         let p = player_at(view, my);
-        paint_discard_grid_wide(buf, ox + 54, oy + 23, &p.river, theme, p.riichi_river_idx);
+        paint_discard_grid_wide_hl(buf, ox + 54, oy + 23, &p.river, theme, p.riichi_river_idx, self.highlight_kind(view));
     }
 
     fn paint_my_status(
@@ -968,7 +978,16 @@ impl OnlineGameState {
         } else {
             None
         };
-        paint_boxed_row(buf, ox + 4, oy + 31, &display, theme, selected, drawn_idx);
+        paint_boxed_row_hl(
+            buf,
+            ox + 4,
+            oy + 31,
+            &display,
+            theme,
+            selected,
+            drawn_idx,
+            self.highlight_kind(view),
+        );
         let drawn_gap = 3u16;
         let mut cx = ox + 4 + 1;
         for i in 0..display.len() {
