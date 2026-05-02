@@ -2,6 +2,10 @@
 //!
 //! 自实现 Barnett-Smart 协议 + Bayer-Groth shuffle argument, 不依赖外部
 //! mental-poker crate. 当前 embed 在主 crate, 后续稳定后抽离为独立开源 crate.
+
+// 协议 / 数学说明里大量 markdown 列表 + 公式延续, 用 4 / 6 空格对齐让阅读更清楚.
+// clippy 默认期望 list item 延续行 3 空格, 跟数学排版冲突 — 整模块 allow.
+#![allow(clippy::doc_overindented_list_items, clippy::doc_lazy_continuation)]
 //!
 //! ## 设计来源
 //! - Barnett-Smart 2003 (eprint 2005/162): "On the Security of Discrete-Log

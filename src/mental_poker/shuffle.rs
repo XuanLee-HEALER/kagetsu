@@ -16,8 +16,8 @@
 use ark_ff::UniformRand;
 use ark_std::rand::Rng;
 
-use super::elgamal::{remask, Ciphertext, PublicKey};
 use super::Scalar;
+use super::elgamal::{Ciphertext, PublicKey, remask};
 
 /// 置换 π: 长度 N 的 vec, π[i] = j 表示 "output position i 放 input position j 的元素".
 ///
@@ -114,8 +114,8 @@ pub fn shuffle_and_remask<R: Rng + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mental_poker::elgamal::{keygen, mask, unmask_with_sk};
     use crate::mental_poker::Curve;
+    use crate::mental_poker::elgamal::{keygen, mask, unmask_with_sk};
     use ark_ff::UniformRand;
     use ark_std::test_rng;
     use std::collections::HashSet;
@@ -162,10 +162,7 @@ mod tests {
 
         let n = 16usize;
         let plaintexts: Vec<Curve> = (0..n).map(|_| Curve::rand(rng)).collect();
-        let deck: Vec<Ciphertext> = plaintexts
-            .iter()
-            .map(|m| mask(rng, &pk, m).0)
-            .collect();
+        let deck: Vec<Ciphertext> = plaintexts.iter().map(|m| mask(rng, &pk, m).0).collect();
 
         let (shuffled, _pi, _r) = shuffle_and_remask(rng, &pk, &deck);
         assert_eq!(shuffled.len(), n);
@@ -204,10 +201,7 @@ mod tests {
         // 模拟麻将一副: 136 张
         let n = 136usize;
         let plaintexts: Vec<Curve> = (0..n).map(|_| Curve::rand(rng)).collect();
-        let mut deck: Vec<Ciphertext> = plaintexts
-            .iter()
-            .map(|m| mask(rng, &pk, m).0)
-            .collect();
+        let mut deck: Vec<Ciphertext> = plaintexts.iter().map(|m| mask(rng, &pk, m).0).collect();
 
         // 4 个玩家轮流洗
         for _player in 0..4 {

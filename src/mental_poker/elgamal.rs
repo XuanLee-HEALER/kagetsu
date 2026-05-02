@@ -56,11 +56,7 @@ pub fn keygen<R: Rng + ?Sized>(rng: &mut R) -> (SecretKey, PublicKey) {
 ///
 /// r 由调用方决定保留还是丢弃: shuffle / remask 协议需要保留 r 以便生成
 /// re-encryption proof; 普通"加密一张随机牌"丢弃即可.
-pub fn mask<R: Rng + ?Sized>(
-    rng: &mut R,
-    pk: &PublicKey,
-    message: &Curve,
-) -> (Ciphertext, Scalar) {
+pub fn mask<R: Rng + ?Sized>(rng: &mut R, pk: &PublicKey, message: &Curve) -> (Ciphertext, Scalar) {
     let r = Scalar::rand(rng);
     mask_with_r(pk, message, r)
 }
@@ -153,8 +149,7 @@ mod tests {
         let rng = &mut test_rng();
         let (sk, pk) = keygen(rng);
         let messages: Vec<Curve> = (0..8).map(|_| Curve::rand(rng)).collect();
-        let cts: Vec<Ciphertext> =
-            messages.iter().map(|m| mask(rng, &pk, m).0).collect();
+        let cts: Vec<Ciphertext> = messages.iter().map(|m| mask(rng, &pk, m).0).collect();
         for (m, ct) in messages.iter().zip(cts.iter()) {
             assert_eq!(unmask_with_sk(&sk, ct), *m);
         }

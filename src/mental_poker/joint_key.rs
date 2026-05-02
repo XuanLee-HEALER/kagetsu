@@ -16,9 +16,9 @@
 
 use thiserror::Error;
 
+use super::Curve;
 use super::elgamal::PublicKey;
 use super::schnorr::{self, DlogProof};
-use super::Curve;
 
 /// 联合公钥. 4 个玩家的 pk_i 之和.
 ///
@@ -51,9 +51,7 @@ pub fn aggregate(
     members: &[(Vec<u8>, PublicKey, DlogProof)],
 ) -> Result<JointPublicKey, AggregateError> {
     if members.len() < 2 {
-        return Err(AggregateError::InsufficientMembers {
-            got: members.len(),
-        });
+        return Err(AggregateError::InsufficientMembers { got: members.len() });
     }
 
     // 1. 每人验证 schnorr proof.
@@ -84,9 +82,9 @@ fn hex_short(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mental_poker::elgamal::{self, keygen, SecretKey};
-    use crate::mental_poker::schnorr;
     use crate::mental_poker::Scalar;
+    use crate::mental_poker::elgamal::{self, SecretKey, keygen};
+    use crate::mental_poker::schnorr;
     use ark_ec::PrimeGroup;
     use ark_ff::UniformRand;
     use ark_std::test_rng;

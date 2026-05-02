@@ -53,7 +53,10 @@ pub fn effective_bootstrap_relays(override_list: &[String]) -> Vec<Multiaddr> {
 ///
 /// 顺序保留 static 优先 — host swarm dial bootstrap 时按列表顺序探, Tier 1
 /// 通常更稳, 应优先尝试. dynamic 追加在后作 fallback.
-pub fn merge_relay_pool(static_relays: Vec<Multiaddr>, dynamic_relays: Vec<Multiaddr>) -> Vec<Multiaddr> {
+pub fn merge_relay_pool(
+    static_relays: Vec<Multiaddr>,
+    dynamic_relays: Vec<Multiaddr>,
+) -> Vec<Multiaddr> {
     let mut out = static_relays;
     for addr in dynamic_relays {
         if !out.contains(&addr) {

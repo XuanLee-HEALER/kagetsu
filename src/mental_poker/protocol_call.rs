@@ -14,8 +14,8 @@
 
 use thiserror::Error;
 
-use super::protocol_state::{CallType, HandStateError, MeldRecord, Table};
 use super::Curve;
+use super::protocol_state::{CallType, HandStateError, MeldRecord, Table};
 
 /// 鸣牌广播包.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,12 +80,13 @@ impl CallAnnouncement {
         let from_index = self.deck_indices[self.from_position_in_meld];
         let from_pt = self.plaintexts[self.from_position_in_meld];
         let from_hand = table.hand(self.from_player);
-        let recorded = from_hand
-            .discarded_plaintext(from_index)
-            .ok_or(CallError::FromDiscardNotFound {
-                from: self.from_player,
-                index: from_index,
-            })?;
+        let recorded =
+            from_hand
+                .discarded_plaintext(from_index)
+                .ok_or(CallError::FromDiscardNotFound {
+                    from: self.from_player,
+                    index: from_index,
+                })?;
         if *recorded != from_pt {
             return Err(CallError::FromPlaintextMismatch { index: from_index });
         }

@@ -136,7 +136,12 @@ mod tests {
     fn commit_is_hiding_via_blinding() {
         let rng = &mut test_rng();
         let ck = CommitmentKey::from_label(b"test", 4);
-        let values: Vec<Scalar> = vec![Scalar::from(1u64), Scalar::from(2u64), Scalar::from(3u64), Scalar::from(4u64)];
+        let values: Vec<Scalar> = vec![
+            Scalar::from(1u64),
+            Scalar::from(2u64),
+            Scalar::from(3u64),
+            Scalar::from(4u64),
+        ];
         let r1 = Scalar::rand(rng);
         let r2 = Scalar::rand(rng);
         let c1 = ck.commit(&values, r1);

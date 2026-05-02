@@ -20,8 +20,8 @@
 
 use thiserror::Error;
 
-use super::protocol_state::{ConcealedKanRecord, HandStateError, Table};
 use super::Curve;
+use super::protocol_state::{ConcealedKanRecord, HandStateError, Table};
 
 /// 公开部分: 让所有人知道有暗杠.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

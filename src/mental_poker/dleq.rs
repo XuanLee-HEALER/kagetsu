@@ -222,6 +222,13 @@ mod tests {
         // 用错的 PK 应失败
         let (_other_sk, other_pk_pt) = (Scalar::rand(rng), Curve::rand(rng));
         let _ = _other_sk;
-        assert!(!verify(&g, &h1, &other_pk_pt, &h2, &proof, b"shuffle-step-3"));
+        assert!(!verify(
+            &g,
+            &h1,
+            &other_pk_pt,
+            &h2,
+            &proof,
+            b"shuffle-step-3"
+        ));
     }
 }

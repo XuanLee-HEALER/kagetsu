@@ -294,13 +294,15 @@ impl RoomBrowser {
             .unwrap_or(0);
         let mut out: Vec<Multiaddr> = Vec::new();
         for (peer, entry) in &self.state.relays {
-            if entry.last_seen_unix_ms > 0
-                && now_ms - entry.last_seen_unix_ms > RELAY_ENTRY_TTL_MS
+            if entry.last_seen_unix_ms > 0 && now_ms - entry.last_seen_unix_ms > RELAY_ENTRY_TTL_MS
             {
                 continue;
             }
             for addr in &entry.multiaddrs {
-                let full = if addr.iter().any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_))) {
+                let full = if addr
+                    .iter()
+                    .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                {
                     addr.clone()
                 } else {
                     addr.clone().with(libp2p::multiaddr::Protocol::P2p(*peer))

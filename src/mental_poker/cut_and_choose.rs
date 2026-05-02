@@ -32,10 +32,10 @@ use ark_ff::UniformRand;
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
 
-use super::elgamal::{remask, Ciphertext, PublicKey};
+use super::Scalar;
+use super::elgamal::{Ciphertext, PublicKey, remask};
 use super::shuffle::Permutation;
 use super::transcript::Transcript;
-use super::{Curve, Scalar};
 
 /// 默认 cut-and-choose 重复轮数. 80 给 80-bit 安全.
 /// 测试可用更小值加速 (e.g. 20 → 1M 分之 1 概率, 也足够调试).
@@ -218,12 +218,16 @@ fn append_ciphertext_vec(t: &mut Transcript, label: &[u8], v: &[Ciphertext]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mental_poker::Curve;
     use crate::mental_poker::elgamal::{keygen, mask};
     use crate::mental_poker::shuffle::shuffle_and_remask;
+    use ark_ff::UniformRand;
     use ark_std::test_rng;
 
     /// 工具: 构造 (pk, c_in, c_out, π, r) 4 元组用于测试.
-    fn setup_shuffle(n: usize) -> (
+    fn setup_shuffle(
+        n: usize,
+    ) -> (
         PublicKey,
         Vec<Ciphertext>,
         Vec<Ciphertext>,
@@ -339,7 +343,7 @@ mod tests {
         // 期望 pre + post = K, 各约 K/2 (二项分布)
         assert_eq!(pre_count + post_count, DEFAULT_K);
         // 各 ~ K/2 (允许 ±20 偏差, 防 flaky)
-        assert!(pre_count >= 20 && pre_count <= 60, "pre_count={pre_count}");
+        assert!((20..=60).contains(&pre_count), "pre_count={pre_count}");
     }
 
     /// 麻将 136 张 cut-and-choose, K=20 (加速测试).
@@ -354,9 +358,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         assert!(verify(&pk, &c_in, &c_out, &proof));
         let dt_verify = t0.elapsed();
-        println!(
-            "[cnc-136-K20] prove: {dt_prove:?}, verify: {dt_verify:?}"
-        );
+        println!("[cnc-136-K20] prove: {dt_prove:?}, verify: {dt_verify:?}");
         // sanity: < 30 秒
         assert!(dt_prove.as_secs() < 30);
         assert!(dt_verify.as_secs() < 30);
@@ -364,8 +366,8 @@ mod tests {
 
     // ====== M4.C.4 4 玩家 e2e 测试 (协议 1 端到端) ======
 
-    use crate::mental_poker::elgamal::{unmask_with_sk, SecretKey};
-    use crate::mental_poker::joint_key::{aggregate, JointPublicKey};
+    use crate::mental_poker::elgamal::{SecretKey, unmask_with_sk};
+    use crate::mental_poker::joint_key::{JointPublicKey, aggregate};
     use crate::mental_poker::schnorr;
     use std::collections::HashSet;
 
@@ -388,10 +390,7 @@ mod tests {
     }
 
     /// 加密 N 张随机牌, 返回 (plaintexts, ciphertexts).
-    fn encrypt_initial_deck(
-        pk: &PublicKey,
-        n: usize,
-    ) -> (Vec<Curve>, Vec<Ciphertext>) {
+    fn encrypt_initial_deck(pk: &PublicKey, n: usize) -> (Vec<Curve>, Vec<Ciphertext>) {
         let rng = &mut test_rng();
         let plaintexts: Vec<Curve> = (0..n).map(|_| Curve::rand(rng)).collect();
         let cts: Vec<Ciphertext> = plaintexts.iter().map(|m| mask(rng, pk, m).0).collect();
@@ -482,10 +481,7 @@ mod tests {
         }
 
         // 至少有一个位置的密文跟初始不同 (实际上几乎 100% 都不同, 因为 remask 都换 r).
-        let any_different = initial_deck
-            .iter()
-            .zip(deck.iter())
-            .any(|(a, b)| a != b);
+        let any_different = initial_deck.iter().zip(deck.iter()).any(|(a, b)| a != b);
         assert!(any_different, "4 轮 shuffle 后 deck 应跟初始不同");
     }
 

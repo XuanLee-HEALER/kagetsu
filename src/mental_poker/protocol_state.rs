@@ -96,7 +96,9 @@ pub enum HandStateError {
     },
     #[error("from_position_in_meld {pos} 越界 (deck_indices 长 {len})")]
     FromPositionOutOfRange { pos: usize, len: usize },
-    #[error("声明从玩家 {from_player} 弃牌 index={from_index} 鸣, 但该 index 不在 from_player discarded 集合")]
+    #[error(
+        "声明从玩家 {from_player} 弃牌 index={from_index} 鸣, 但该 index 不在 from_player discarded 集合"
+    )]
     FromDiscardNotFound {
         from_player: usize,
         from_index: usize,
@@ -237,10 +239,7 @@ impl HandState {
     // --- transition: 协议 6 暗杠 ---
 
     /// 记录暗杠. 验证: 4 个 deck_indices 都在自己手牌内.
-    pub fn record_concealed_kan(
-        &mut self,
-        kan: ConcealedKanRecord,
-    ) -> Result<(), HandStateError> {
+    pub fn record_concealed_kan(&mut self, kan: ConcealedKanRecord) -> Result<(), HandStateError> {
         for idx in &kan.deck_indices {
             if !self.has_in_hand(*idx) {
                 return Err(HandStateError::NotInHand { index: *idx });

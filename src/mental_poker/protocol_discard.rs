@@ -9,8 +9,8 @@
 
 use thiserror::Error;
 
-use super::protocol_state::{HandStateError, Table};
 use super::Curve;
+use super::protocol_state::{HandStateError, Table};
 
 /// 弃牌广播包.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

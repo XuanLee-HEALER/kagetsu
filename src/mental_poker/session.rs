@@ -17,11 +17,11 @@
 use std::collections::HashMap;
 use thiserror::Error;
 
+use super::Curve;
 use super::cut_and_choose::{self, ShuffleProof};
-use super::elgamal::{mask, Ciphertext, PublicKey};
+use super::elgamal::{Ciphertext, mask};
 use super::joint_key::JointPublicKey;
 use super::protocol_reveal::{self, MemberInfo, RevealShare};
-use super::Curve;
 
 // ============================================================================
 // ShuffleSession — 协议 1 (联合洗牌)
@@ -77,9 +77,7 @@ impl ShuffleSession {
         cnc_k_rounds: usize,
     ) -> Result<Self, ShuffleError> {
         if members.len() < 2 {
-            return Err(ShuffleError::InsufficientMembers {
-                got: members.len(),
-            });
+            return Err(ShuffleError::InsufficientMembers { got: members.len() });
         }
         // 加密初始 deck under jpk. 没有 randomness 保留 (初始加密不参与
         // shuffle re-encryption proof, 它只是公开 commit).
@@ -151,9 +149,7 @@ impl ShuffleSession {
             });
         }
         if !cut_and_choose::verify(&self.jpk.as_pk(), input_deck, &new_deck, &proof) {
-            return Err(ShuffleError::InvalidProof {
-                player: player_idx,
-            });
+            return Err(ShuffleError::InvalidProof { player: player_idx });
         }
         self.decks.push(new_deck);
         self.proofs.push(proof);
@@ -228,22 +224,20 @@ impl ThresholdDecryptSession {
     }
 
     /// 玩家 idx 提交 share. verify_one 通过才接受.
-    pub fn submit(&mut self, player_idx: usize, contribution: RevealShare) -> Result<(), DecryptError> {
+    pub fn submit(
+        &mut self,
+        player_idx: usize,
+        contribution: RevealShare,
+    ) -> Result<(), DecryptError> {
         if player_idx >= self.members.len() {
-            return Err(DecryptError::UnknownPlayer {
-                player: player_idx,
-            });
+            return Err(DecryptError::UnknownPlayer { player: player_idx });
         }
         if self.received.contains_key(&player_idx) {
-            return Err(DecryptError::DuplicateSubmission {
-                player: player_idx,
-            });
+            return Err(DecryptError::DuplicateSubmission { player: player_idx });
         }
         let m = &self.members[player_idx];
         if !protocol_reveal::verify_one(&m.pk, &self.ct, &contribution, &m.peer_id) {
-            return Err(DecryptError::InvalidShare {
-                player: player_idx,
-            });
+            return Err(DecryptError::InvalidShare { player: player_idx });
         }
         self.received.insert(player_idx, contribution);
         Ok(())
@@ -254,13 +248,10 @@ impl ThresholdDecryptSession {
         if !self.is_ready() {
             return None;
         }
-        let contributions: Vec<RevealShare> = (0..self.members.len())
-            .map(|i| self.received[&i])
-            .collect();
-        match protocol_reveal::public_reveal(&self.members, &self.ct, &contributions) {
-            Ok(plaintext) => Some(plaintext),
-            Err(_) => None, // verify 已经 submit 时通过, 这里不应走到
-        }
+        let contributions: Vec<RevealShare> =
+            (0..self.members.len()).map(|i| self.received[&i]).collect();
+        // verify 已经 submit 时通过, 这里 Err 路径不应走到.
+        protocol_reveal::public_reveal(&self.members, &self.ct, &contributions).ok()
     }
 }
 
@@ -275,7 +266,7 @@ pub type RevealSession = ThresholdDecryptSession;
 mod tests {
     use super::*;
     use crate::mental_poker::cut_and_choose;
-    use crate::mental_poker::elgamal::{keygen, SecretKey};
+    use crate::mental_poker::elgamal::{PublicKey, SecretKey, keygen};
     use crate::mental_poker::joint_key::aggregate;
     use crate::mental_poker::protocol_reveal::prepare_share;
     use crate::mental_poker::schnorr;
@@ -285,7 +276,12 @@ mod tests {
     use std::collections::HashMap;
 
     /// 构造 4 玩家场景, 返回 (sks, members, jpk).
-    fn setup_4_players() -> (Vec<SecretKey>, Vec<PublicKey>, Vec<MemberInfo>, JointPublicKey) {
+    fn setup_4_players() -> (
+        Vec<SecretKey>,
+        Vec<PublicKey>,
+        Vec<MemberInfo>,
+        JointPublicKey,
+    ) {
         let rng = &mut test_rng();
         let mut sks = Vec::new();
         let mut pks = Vec::new();
@@ -370,7 +366,8 @@ mod tests {
 
         let input = session.current_input_deck().to_vec();
         let (out, pi, r) = shuffle_and_remask(rng, &session.jpk().as_pk(), &input);
-        let mut proof = cut_and_choose::prove(rng, &session.jpk().as_pk(), &input, &out, &pi, &r, 20);
+        let mut proof =
+            cut_and_choose::prove(rng, &session.jpk().as_pk(), &input, &out, &pi, &r, 20);
         // 篡改 proof
         proof.intermediates[0][0].c1 += session.jpk().as_pk().0;
         let err = session.submit_round(0, out, proof).unwrap_err();
@@ -440,8 +437,7 @@ mod tests {
             plaintexts.iter().map(|p| format!("{p}")).collect();
 
         // ===== 协议 1: 联合洗牌 =====
-        let mut shuffle_sess =
-            ShuffleSession::start(members.clone(), jpk, plaintexts, 20).unwrap();
+        let mut shuffle_sess = ShuffleSession::start(members.clone(), jpk, plaintexts, 20).unwrap();
         for player in 0..4 {
             let input = shuffle_sess.current_input_deck().to_vec();
             let (out, pi, r) = shuffle_and_remask(rng, &shuffle_sess.jpk().as_pk(), &input);
@@ -461,8 +457,7 @@ mod tests {
         // ===== 协议 2: 玩家 0 摸 8 张牌 =====
         let draw_n = 8;
         let mut drawn_tiles = Vec::new();
-        for k in 0..draw_n {
-            let ct = final_deck[k];
+        for ct in final_deck.iter().take(draw_n).copied() {
             let mut draw_sess = DrawSession::new(members.clone(), ct);
             for i in 0..4 {
                 let c = prepare_share(rng, &sks[i], &pks[i], &ct, &members[i].peer_id);

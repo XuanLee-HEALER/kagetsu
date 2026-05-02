@@ -32,9 +32,9 @@
 use ark_ec::PrimeGroup;
 use ark_std::rand::Rng;
 
+use super::Curve;
 use super::dleq::{self, DleqProof};
 use super::elgamal::{Ciphertext, PublicKey, SecretKey};
-use super::Curve;
 
 /// 玩家 i 对一个 ciphertext 计算的 partial decryption.
 ///
@@ -87,10 +87,10 @@ pub fn combine_shares(ct: &Ciphertext, shares: &[DecryptionShare]) -> Curve {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mental_poker::Scalar;
     use crate::mental_poker::elgamal::{keygen, mask, unmask_with_sk};
     use crate::mental_poker::joint_key::aggregate;
     use crate::mental_poker::schnorr;
-    use crate::mental_poker::Scalar;
     use ark_ff::UniformRand;
     use ark_std::test_rng;
 
@@ -288,7 +288,10 @@ mod tests {
 
         let n = 8;
         let messages: Vec<Curve> = (0..n).map(|_| Curve::rand(rng)).collect();
-        let cts: Vec<Ciphertext> = messages.iter().map(|m| mask(rng, &jpk.as_pk(), m).0).collect();
+        let cts: Vec<Ciphertext> = messages
+            .iter()
+            .map(|m| mask(rng, &jpk.as_pk(), m).0)
+            .collect();
 
         for (m, ct) in messages.iter().zip(cts.iter()) {
             let shares: Vec<DecryptionShare> = (0..4)

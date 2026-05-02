@@ -4,7 +4,9 @@
 //! 给定 generators (G, H) (两组各 n 个独立曲线点), generator u, commitment
 //! P ∈ Curve, 公开值 c ∈ Scalar, 证明知道向量 (a, b) ∈ F^n × F^n 使得:
 //!
-//!     P = ⟨a, G⟩ + ⟨b, H⟩ + ⟨a, b⟩ · u
+//! ```text
+//! P = ⟨a, G⟩ + ⟨b, H⟩ + ⟨a, b⟩ · u
+//! ```
 //!
 //! ## 协议结构 (递归 log_2(n) 轮)
 //! 每轮 prover 把 a/b 折半, 用 challenge x 重新组合:
@@ -12,11 +14,14 @@
 //! - R = ⟨a_R, G_L⟩ + ⟨b_L, H_R⟩ + ⟨a_R, b_L⟩ · u
 //! - 派生 challenge x = Hash(transcript, L, R)
 //! - 更新 (Bulletproofs standard form):
-//!     a' = a_L · x + a_R · x⁻¹
-//!     b' = b_L · x⁻¹ + b_R · x
-//!     G' = G_L · x⁻¹ + G_R · x
-//!     H' = H_L · x + H_R · x⁻¹
-//!     P' = x² · L + P + x⁻² · R
+//!
+//! ```text
+//! a' = a_L · x + a_R · x⁻¹
+//! b' = b_L · x⁻¹ + b_R · x
+//! G' = G_L · x⁻¹ + G_R · x
+//! H' = H_L · x + H_R · x⁻¹
+//! P' = x² · L + P + x⁻² · R
+//! ```
 //!
 //! Invariant: P' = ⟨a', G'⟩ + ⟨b', H'⟩ + ⟨a', b'⟩ · u  (展开后所有交叉项归零)
 //!
@@ -51,7 +56,11 @@ pub struct InnerProductProof {
     pub b_final: Scalar,
 }
 
-const DOMAIN: &[u8] = b"tui-majo/mp/ipa/v1";
+/// Fiat-Shamir transcript domain. caller 应在调 prove/verify 前用此 label
+/// 起 transcript. 当前未在协议路径上使用 (M4.C 用 cut-and-choose 替代 BG),
+/// IPA 留作未来 Bayer-Groth shuffle proof 升级时的核心 building block.
+#[allow(dead_code)]
+pub const DOMAIN: &[u8] = b"tui-majo/mp/ipa/v1";
 
 /// 计算 inner product ⟨a, b⟩ = sum_i a_i · b_i.
 pub fn inner_product(a: &[Scalar], b: &[Scalar]) -> Scalar {
@@ -213,9 +222,8 @@ pub fn verify(
     }
 
     // 检查: P_final == a_final · G_final + b_final · H_final + (a · b) · u
-    let expected = g_final * proof.a_final
-        + h_final * proof.b_final
-        + *u * (proof.a_final * proof.b_final);
+    let expected =
+        g_final * proof.a_final + h_final * proof.b_final + *u * (proof.a_final * proof.b_final);
     p_final == expected
 }
 

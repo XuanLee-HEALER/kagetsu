@@ -15,8 +15,8 @@
 use std::collections::HashSet;
 use thiserror::Error;
 
-use super::protocol_state::Table;
 use super::Curve;
+use super::protocol_state::Table;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WinType {
@@ -56,7 +56,9 @@ pub enum WinError {
     DuplicateIndex { index: usize },
     #[error("玩家未持有 deck_index={index} (不在 drawn / melded / concealed_kanned)")]
     NotOwned { index: usize },
-    #[error("Ron 声明从玩家 {from} 弃牌 index={index} 和, 但该 index 不在 from_player discarded 集合")]
+    #[error(
+        "Ron 声明从玩家 {from} 弃牌 index={index} 和, 但该 index 不在 from_player discarded 集合"
+    )]
     RonFromDiscardNotFound { from: usize, index: usize },
     #[error("Tsumo: winning_tile_index {index} 不在自己 drawn 集合 (玩家未摸过)")]
     TsumoNotDrawn { index: usize },
@@ -130,7 +132,10 @@ impl WinAnnouncement {
             }
             WinType::Ron { from_player } => {
                 if from_player >= n {
-                    return Err(WinError::UnknownFromPlayer { from: from_player, n });
+                    return Err(WinError::UnknownFromPlayer {
+                        from: from_player,
+                        n,
+                    });
                 }
                 if from_player == self.player {
                     return Err(WinError::SelfRon {
@@ -338,8 +343,14 @@ mod tests {
         let rng = &mut test_rng();
         let mut table = Table::new(4, 136);
         // 玩家 0 摸 0/1 (将被 meld 走)
-        table.hand_mut(0).record_draw(0, Some(Curve::rand(rng))).unwrap();
-        table.hand_mut(0).record_draw(1, Some(Curve::rand(rng))).unwrap();
+        table
+            .hand_mut(0)
+            .record_draw(0, Some(Curve::rand(rng)))
+            .unwrap();
+        table
+            .hand_mut(0)
+            .record_draw(1, Some(Curve::rand(rng)))
+            .unwrap();
         // mock 一个 meld 用 0/1/99 (99 from player 1 弃)
         let meld = MeldRecord {
             call_type: CallType::Pon,
@@ -351,7 +362,10 @@ mod tests {
         table.hand_mut(0).record_meld(meld).unwrap();
         // 玩家 0 此后摸 11 张暗手 (2..13)
         for i in 2..13 {
-            table.hand_mut(0).record_draw(i, Some(Curve::rand(rng))).unwrap();
+            table
+                .hand_mut(0)
+                .record_draw(i, Some(Curve::rand(rng)))
+                .unwrap();
         }
         // 和牌 14 张 = melded 3 (0, 1, 99) + drawn 11 (2..13) = 14
         let mut hand_indices: Vec<usize> = vec![0, 1, 99];

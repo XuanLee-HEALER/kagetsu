@@ -30,13 +30,13 @@
 use ark_std::rand::Rng;
 use thiserror::Error;
 
+use super::Curve;
 use super::dleq::DleqProof;
 use super::elgamal::{Ciphertext, PublicKey, SecretKey};
 use super::protocol_draw::{
-    self, combine_shares as draw_combine_shares, compute_share as draw_compute_share,
-    verify_share as draw_verify_share, DecryptionShare,
+    self, DecryptionShare, combine_shares as draw_combine_shares,
+    compute_share as draw_compute_share, verify_share as draw_verify_share,
 };
-use super::Curve;
 
 /// 一个玩家提交的 reveal 包: (share, dleq_proof). 跟 [`MemberInfo`] 配对组成
 /// 完整可验证的 reveal contribution.
@@ -130,10 +130,10 @@ pub use protocol_draw::DecryptionShare as Share;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mental_poker::Curve;
     use crate::mental_poker::elgamal::{keygen, mask};
     use crate::mental_poker::joint_key::aggregate;
     use crate::mental_poker::schnorr;
-    use crate::mental_poker::Curve;
     use ark_ec::PrimeGroup;
     use ark_ff::UniformRand;
     use ark_std::test_rng;
@@ -247,7 +247,10 @@ mod tests {
         let err = public_reveal(&members, &ct, &contributions).expect_err("size mismatch");
         assert!(matches!(
             err,
-            RevealError::SizeMismatch { got: 3, expected: 4 }
+            RevealError::SizeMismatch {
+                got: 3,
+                expected: 4
+            }
         ));
     }
 
@@ -265,8 +268,7 @@ mod tests {
             let contributions: Vec<RevealShare> = (0..4)
                 .map(|i| prepare_share(rng, &sks[i], &pks[i], ct, &members[i].peer_id))
                 .collect();
-            let recovered =
-                public_reveal(&members, ct, &contributions).expect("each ct reveals");
+            let recovered = public_reveal(&members, ct, &contributions).expect("each ct reveals");
             assert_eq!(recovered, *tile);
         }
     }
