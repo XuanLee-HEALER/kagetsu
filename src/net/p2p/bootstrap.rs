@@ -49,6 +49,20 @@ pub fn effective_bootstrap_relays(override_list: &[String]) -> Vec<Multiaddr> {
         .collect()
 }
 
+/// M3.D: 把静态 (Tier 1 prefs) + 动态 (Tier 2 玩家贡献池) relay 列表合并去重.
+///
+/// 顺序保留 static 优先 — host swarm dial bootstrap 时按列表顺序探, Tier 1
+/// 通常更稳, 应优先尝试. dynamic 追加在后作 fallback.
+pub fn merge_relay_pool(static_relays: Vec<Multiaddr>, dynamic_relays: Vec<Multiaddr>) -> Vec<Multiaddr> {
+    let mut out = static_relays;
+    for addr in dynamic_relays {
+        if !out.contains(&addr) {
+            out.push(addr);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +83,17 @@ mod tests {
         let override_list = vec!["/ip4/127.0.0.1/tcp/4001".into()];
         let result = effective_bootstrap_relays(&override_list);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn merge_dedup_keeps_static_first() {
+        let s: Multiaddr = "/ip4/1.1.1.1/udp/4001/quic-v1".parse().unwrap();
+        let d1: Multiaddr = "/ip4/2.2.2.2/udp/4001/quic-v1".parse().unwrap();
+        let d2: Multiaddr = "/ip4/1.1.1.1/udp/4001/quic-v1".parse().unwrap(); // 跟 s 重复
+        let merged = merge_relay_pool(vec![s.clone()], vec![d1.clone(), d2]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0], s);
+        assert_eq!(merged[1], d1);
     }
 
     #[test]

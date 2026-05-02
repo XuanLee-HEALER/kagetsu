@@ -17,11 +17,15 @@ use libp2p::{Multiaddr, PeerId, gossipsub, identify, mdns, swarm::SwarmEvent};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
-use super::behaviour::{AGENT_PREFIX, LOBBY_TOPIC, LobbyAnnouncement, P2pBehaviourEvent};
+use super::behaviour::{
+    AGENT_PREFIX, LOBBY_TOPIC, LobbyAnnouncement, P2pBehaviourEvent, RELAYS_TOPIC,
+    RelayAnnouncement,
+};
 use super::swarm::{build_swarm, new_keypair};
 
-/// gossipsub announcement 超过这个时间没刷新视为下线 (从 rooms() 中过滤).
+/// gossipsub announcement 超过这个时间没刷新视为下线 (从 rooms() / relays() 中过滤).
 const LOBBY_ENTRY_TTL_MS: i64 = 30_000;
+const RELAY_ENTRY_TTL_MS: i64 = 30_000;
 
 /// 发现到的一个房间. 给 UI 显示用.
 #[derive(Debug, Clone)]
@@ -65,6 +69,14 @@ fn addr_is_quic(addr: &Multiaddr) -> bool {
 struct BrowserState {
     addrs: HashMap<PeerId, Vec<Multiaddr>>,
     metadata: HashMap<PeerId, RoomMetadata>,
+    /// M3.D: 收到的 Tier 2 玩家 relay 池.
+    relays: HashMap<PeerId, RelayPoolEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct RelayPoolEntry {
+    multiaddrs: Vec<Multiaddr>,
+    last_seen_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -93,6 +105,8 @@ pub enum BrowserEvent {
     },
     /// gossipsub 收到的房间 announcement.
     LobbyAnnouncement(LobbyAnnouncement),
+    /// gossipsub 收到的 Tier 2 玩家 relay 池 announcement (M3.D).
+    RelayAnnouncement(RelayAnnouncement),
 }
 
 #[derive(Debug, Error)]
@@ -137,6 +151,11 @@ impl RoomBrowser {
         if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
             tracing::warn!("browser 订阅 lobby topic 失败: {e}");
         }
+        // 订阅 relays topic 累积 Tier 2 玩家 relay 池 (M3.D).
+        let relays_topic = gossipsub::IdentTopic::new(RELAYS_TOPIC);
+        if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&relays_topic) {
+            tracing::warn!("browser 订阅 relays topic 失败: {e}");
+        }
 
         // 主动 dial bootstrap relay 让 gossipsub mesh 通过它们扩散.
         for addr in &bootstrap_relays {
@@ -171,7 +190,8 @@ impl RoomBrowser {
                             SwarmEvent::Behaviour(P2pBehaviourEvent::Gossipsub(
                                 gossipsub::Event::Message { message, .. },
                             )) => {
-                                if message.topic.as_str() == LOBBY_TOPIC {
+                                let topic_str = message.topic.as_str();
+                                if topic_str == LOBBY_TOPIC {
                                     match serde_json::from_slice::<LobbyAnnouncement>(&message.data) {
                                         Ok(ann) => {
                                             let _ = event_tx
@@ -180,6 +200,18 @@ impl RoomBrowser {
                                         Err(e) => {
                                             tracing::debug!(
                                                 "lobby announcement 解析失败: {e}"
+                                            );
+                                        }
+                                    }
+                                } else if topic_str == RELAYS_TOPIC {
+                                    match serde_json::from_slice::<RelayAnnouncement>(&message.data) {
+                                        Ok(ann) => {
+                                            let _ = event_tx
+                                                .send(BrowserEvent::RelayAnnouncement(ann));
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!(
+                                                "relay announcement 解析失败: {e}"
                                             );
                                         }
                                     }
@@ -238,6 +270,36 @@ impl RoomBrowser {
         out.sort_by(|a, b| a.host_nick.cmp(&b.host_nick));
         out
     }
+
+    /// M3.D: 当前累积的 Tier 2 玩家 relay 候选 (TTL 过期已过滤).
+    ///
+    /// 返回的 multiaddr 已含 `/p2p/<peer-id>`. UI 创建房间时合并到
+    /// bootstrap_relays 减少对 Tier 1 单点依赖.
+    pub fn relays(&self) -> Vec<Multiaddr> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let mut out: Vec<Multiaddr> = Vec::new();
+        for (peer, entry) in &self.state.relays {
+            if entry.last_seen_unix_ms > 0
+                && now_ms - entry.last_seen_unix_ms > RELAY_ENTRY_TTL_MS
+            {
+                continue;
+            }
+            for addr in &entry.multiaddrs {
+                let full = if addr.iter().any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_))) {
+                    addr.clone()
+                } else {
+                    addr.clone().with(libp2p::multiaddr::Protocol::P2p(*peer))
+                };
+                if !out.contains(&full) {
+                    out.push(full);
+                }
+            }
+        }
+        out
+    }
 }
 
 fn handle_mdns(
@@ -286,6 +348,26 @@ impl BrowserState {
                 if let Some(md) = parse_metadata(&agent_version) {
                     self.metadata.insert(peer, md);
                 }
+            }
+            BrowserEvent::RelayAnnouncement(ann) => {
+                let Ok(peer) = ann.peer_id.parse::<PeerId>() else {
+                    return;
+                };
+                let parsed: Vec<Multiaddr> = ann
+                    .multiaddrs
+                    .iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                if parsed.is_empty() {
+                    return;
+                }
+                self.relays.insert(
+                    peer,
+                    RelayPoolEntry {
+                        multiaddrs: parsed,
+                        last_seen_unix_ms: ann.timestamp_unix_ms,
+                    },
+                );
             }
             BrowserEvent::LobbyAnnouncement(ann) => {
                 let Ok(peer) = ann.host_peer_id.parse::<PeerId>() else {
@@ -369,6 +451,79 @@ mod tests {
         let m = encode_metadata("A;li=ce", 1, "lobby", "id");
         assert!(!m.contains("A;li=ce"));
         assert!(m.contains("A_li_ce"));
+    }
+
+    /// M3.D: BrowserState 累积有效 RelayAnnouncement, 并按 TTL 过滤 stale 条目.
+    #[test]
+    fn relay_pool_ttl_filtering() {
+        let mut state = BrowserState::default();
+        let kp = libp2p::identity::Keypair::generate_ed25519();
+        let peer = PeerId::from(&kp.public());
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        // 新鲜 announcement 应进 pool.
+        state.apply(BrowserEvent::RelayAnnouncement(RelayAnnouncement {
+            schema_version: 1,
+            peer_id: peer.to_string(),
+            multiaddrs: vec!["/ip4/8.8.8.8/udp/4001/quic-v1".into()],
+            timestamp_unix_ms: now_ms,
+        }));
+        assert_eq!(state.relays.len(), 1);
+
+        // 模拟 RoomBrowser.relays() 的 TTL 过滤逻辑.
+        let entry = state.relays.get(&peer).unwrap();
+        assert!(entry.last_seen_unix_ms > 0);
+        assert_eq!(entry.multiaddrs.len(), 1);
+
+        // stale (> 30s 前) announcement 进入 state 但 fresh-cutoff 时被排除.
+        let kp_old = libp2p::identity::Keypair::generate_ed25519();
+        let peer_old = PeerId::from(&kp_old.public());
+        state.apply(BrowserEvent::RelayAnnouncement(RelayAnnouncement {
+            schema_version: 1,
+            peer_id: peer_old.to_string(),
+            multiaddrs: vec!["/ip4/9.9.9.9/udp/4001/quic-v1".into()],
+            timestamp_unix_ms: now_ms - 60_000, // 60 秒前
+        }));
+        assert_eq!(state.relays.len(), 2);
+        let stale_entry = state.relays.get(&peer_old).unwrap();
+        assert!(now_ms - stale_entry.last_seen_unix_ms > RELAY_ENTRY_TTL_MS);
+    }
+
+    /// M3.D: 解析失败的 multiaddr 字符串不应入 pool, 但部分有效保留.
+    #[test]
+    fn relay_announcement_skips_invalid_addrs() {
+        let mut state = BrowserState::default();
+        let kp = libp2p::identity::Keypair::generate_ed25519();
+        let peer = PeerId::from(&kp.public());
+        state.apply(BrowserEvent::RelayAnnouncement(RelayAnnouncement {
+            schema_version: 1,
+            peer_id: peer.to_string(),
+            multiaddrs: vec![
+                "/ip4/8.8.8.8/udp/4001/quic-v1".into(),
+                "garbage not multiaddr".into(),
+            ],
+            timestamp_unix_ms: 1,
+        }));
+        let entry = state.relays.get(&peer).expect("should exist");
+        assert_eq!(entry.multiaddrs.len(), 1, "garbage 应被跳过");
+    }
+
+    /// M3.D: 全部 multiaddr 解析失败应不入 pool (避免空条目).
+    #[test]
+    fn relay_announcement_all_invalid_skipped() {
+        let mut state = BrowserState::default();
+        let kp = libp2p::identity::Keypair::generate_ed25519();
+        let peer = PeerId::from(&kp.public());
+        state.apply(BrowserEvent::RelayAnnouncement(RelayAnnouncement {
+            schema_version: 1,
+            peer_id: peer.to_string(),
+            multiaddrs: vec!["garbage".into(), "also garbage".into()],
+            timestamp_unix_ms: 1,
+        }));
+        assert!(state.relays.is_empty());
     }
 
     /// 回归: RoomBrowser::start 必须能从非 runtime context 的同步线程调用.

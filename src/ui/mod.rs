@@ -414,7 +414,7 @@ impl App {
     /// 创建本地 RoomActor (房主), 同时启动 P2P listener 让远程玩家可加入,
     /// 自己用 LocalSession 直连 RoomActor. listener 内部跑 mDNS 广告 + libp2p swarm.
     fn create_online_room(&mut self, nickname: String) {
-        use crate::net::p2p::bootstrap::effective_bootstrap_relays;
+        use crate::net::p2p::bootstrap::{effective_bootstrap_relays, merge_relay_pool};
         use crate::net::p2p::discovery::encode_metadata;
         use crate::net::p2p::host::spawn_p2p_listener;
         use crate::net::room::spawn_room;
@@ -422,7 +422,25 @@ impl App {
 
         let room_id = format!("{}", uuid::Uuid::new_v4());
         let metadata = encode_metadata(&nickname, 1, "lobby", &room_id);
-        let bootstrap = effective_bootstrap_relays(&self.local_prefs.network.bootstrap_relays);
+        // M3.D: 合并 Tier 1 (静态 prefs) + Tier 2 (大厅累积的玩家 relay 池).
+        let static_bootstrap =
+            effective_bootstrap_relays(&self.local_prefs.network.bootstrap_relays);
+        let dynamic_bootstrap = if let Screen::OnlineLobby(state) = &self.screen {
+            state
+                .browser
+                .as_ref()
+                .map(|b| b.relays())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let bootstrap = merge_relay_pool(static_bootstrap, dynamic_bootstrap);
+        if bootstrap.len() > self.local_prefs.network.bootstrap_relays.len() {
+            tracing::info!(
+                "create_online_room: bootstrap pool 含 {} relay (static + Tier 2 玩家贡献)",
+                bootstrap.len()
+            );
+        }
         let lobby_meta = crate::net::p2p::host::LobbyMeta {
             host_nick: nickname.clone(),
             room_id: room_id.clone(),

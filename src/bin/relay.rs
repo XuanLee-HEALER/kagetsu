@@ -42,7 +42,7 @@ use libp2p::{
     Multiaddr, PeerId, SwarmBuilder, gossipsub, identify, identity, multiaddr::Protocol, ping,
     relay, swarm::NetworkBehaviour, swarm::SwarmEvent,
 };
-use tui_majo::net::p2p::behaviour::LOBBY_TOPIC;
+use tui_majo::net::p2p::behaviour::{LOBBY_TOPIC, RELAYS_TOPIC};
 
 /// relay 节点的 NetworkBehaviour: 只跑必要协议.
 /// gossipsub 作 lobby mesh 桥接节点 (relay 不 publish, 只订阅参与 mesh forward).
@@ -107,12 +107,18 @@ async fn main() -> Result<()> {
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
-    // 订阅 lobby topic 让 relay 参与 mesh forward (不 publish, 只转发).
+    // 订阅 lobby + relays topic 让 relay 参与 mesh forward (不 publish, 只转发).
     let topic = gossipsub::IdentTopic::new(LOBBY_TOPIC);
     if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
         tracing::warn!("relay 订阅 lobby topic 失败: {e}");
     } else {
         tracing::info!("relay subscribed to {LOBBY_TOPIC} as mesh bridge");
+    }
+    let relays_topic = gossipsub::IdentTopic::new(RELAYS_TOPIC);
+    if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&relays_topic) {
+        tracing::warn!("relay 订阅 relays topic 失败: {e}");
+    } else {
+        tracing::info!("relay subscribed to {RELAYS_TOPIC} as mesh bridge (M3.D)");
     }
 
     swarm.listen_on(format!("/ip4/0.0.0.0/udp/{port}/quic-v1").parse()?)?;

@@ -19,7 +19,8 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::net::p2p::behaviour::{
-    Ack, LOBBY_TOPIC, LobbyAnnouncement, P2pBehaviour, P2pBehaviourEvent,
+    Ack, LOBBY_TOPIC, LobbyAnnouncement, P2pBehaviour, P2pBehaviourEvent, RELAYS_TOPIC,
+    RelayAnnouncement,
 };
 use crate::net::p2p::swarm::{build_swarm, new_keypair};
 use crate::net::protocol::{ClientMsg, ServerMsg};
@@ -65,6 +66,11 @@ pub async fn spawn_p2p_listener(
     let topic = gossipsub::IdentTopic::new(LOBBY_TOPIC);
     if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
         tracing::warn!("订阅 lobby topic 失败: {e}");
+    }
+    // 订阅 relay 贡献池 topic (M3.D). 自己 Public 时 publish, 平时也参与 mesh forward.
+    let relays_topic = gossipsub::IdentTopic::new(RELAYS_TOPIC);
+    if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&relays_topic) {
+        tracing::warn!("订阅 relays topic 失败: {e}");
     }
 
     swarm
@@ -216,11 +222,15 @@ async fn host_swarm_task(
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<(PeerId, ServerMsg)>();
     // 累积全部 listen addr 用于 publish (含 LAN/公网/circuit).
     let mut my_listen_addrs: Vec<Multiaddr> = Vec::new();
+    // M3.D: 自己 AutoNAT 探测到 Public 后启用 relay 池 publish.
+    // 内容是 AutoNAT 确认的公网 multiaddr (不含 /p2p-circuit/, 不含 LAN/loopback).
+    let mut public_addrs: Vec<Multiaddr> = Vec::new();
 
-    // 每 5 秒 publish lobby announcement.
+    // 每 5 秒 publish lobby + relays announcement.
     let mut publish_interval = tokio::time::interval(Duration::from_secs(5));
     publish_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let topic = gossipsub::IdentTopic::new(LOBBY_TOPIC);
+    let relays_topic = gossipsub::IdentTopic::new(RELAYS_TOPIC);
 
     loop {
         tokio::select! {
@@ -236,6 +246,9 @@ async fn host_swarm_task(
             }
             _ = publish_interval.tick() => {
                 publish_lobby(&mut swarm, &topic, &lobby_meta, local_peer_id, &my_listen_addrs);
+                if !public_addrs.is_empty() {
+                    publish_relays(&mut swarm, &relays_topic, local_peer_id, &public_addrs);
+                }
             }
             event = swarm.select_next_some() => {
                 if let SwarmEvent::NewListenAddr { ref address, .. } = event {
@@ -246,6 +259,36 @@ async fn host_swarm_task(
                     };
                     if !my_listen_addrs.contains(&full) {
                         my_listen_addrs.push(full);
+                    }
+                }
+                // M3.D: AutoNAT 探测结果 → public_addrs (relay 贡献池源)
+                if let SwarmEvent::Behaviour(P2pBehaviourEvent::Autonat(
+                    autonat::Event::StatusChanged { ref new, .. },
+                )) = event
+                {
+                    match new {
+                        autonat::NatStatus::Public(addr) => {
+                            let full = if addr.iter().any(|p| matches!(p, Protocol::P2p(_))) {
+                                addr.clone()
+                            } else {
+                                addr.clone().with(Protocol::P2p(local_peer_id))
+                            };
+                            if !public_addrs.contains(&full) {
+                                tracing::info!(
+                                    "AutoNAT Public confirmed, adding to relay pool: {full}"
+                                );
+                                public_addrs.push(full);
+                            }
+                        }
+                        autonat::NatStatus::Private | autonat::NatStatus::Unknown => {
+                            if !public_addrs.is_empty() {
+                                tracing::info!(
+                                    "AutoNAT 不再 Public, 撤销 relay 池 publish ({} addrs)",
+                                    public_addrs.len()
+                                );
+                                public_addrs.clear();
+                            }
+                        }
                     }
                 }
                 handle_swarm_event(
@@ -278,7 +321,7 @@ fn publish_lobby(
         schema_version: 1,
         host_peer_id: local_peer_id.to_string(),
         host_nick: meta.host_nick.clone(),
-        players: 1, // TODO M3.E: 跟 RoomActor 同步真实人数
+        players: 1, // TODO: 跟 RoomActor 同步真实人数
         lifecycle: "lobby".into(),
         room_id: meta.room_id.clone(),
         multiaddrs: listen_addrs.iter().map(|a| a.to_string()).collect(),
@@ -304,6 +347,49 @@ fn publish_lobby(
             // 启动早期 mesh 还没建立, NoPeers 错误正常; 其它也只 debug 不阻塞.
             tracing::debug!("publish lobby pending: {e}");
         }
+    }
+}
+
+/// M3.D: 公网 host 周期 publish 自己作 relay 的可 dial 公网 multiaddr.
+///
+/// 调用前提: AutoNAT 探测确认 Public, public_addrs 非空. relay-server
+/// behaviour 已在 P2pBehaviour 启用, 入站 reservation 自动接受
+/// (受 relay::Config::default() 限制 — 默认 128 reservations / 16 circuits).
+fn publish_relays(
+    swarm: &mut Swarm<P2pBehaviour>,
+    topic: &gossipsub::IdentTopic,
+    local_peer_id: PeerId,
+    public_addrs: &[Multiaddr],
+) {
+    if public_addrs.is_empty() {
+        return;
+    }
+    let announcement = RelayAnnouncement {
+        schema_version: 1,
+        peer_id: local_peer_id.to_string(),
+        multiaddrs: public_addrs.iter().map(|a| a.to_string()).collect(),
+        timestamp_unix_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
+    };
+    let payload = match serde_json::to_vec(&announcement) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("序列化 relay announcement 失败: {e}");
+            return;
+        }
+    };
+    match swarm
+        .behaviour_mut()
+        .gossipsub
+        .publish(topic.clone(), payload)
+    {
+        Ok(_) => tracing::debug!(
+            "published relay announcement (Tier 2), addrs={}",
+            public_addrs.len()
+        ),
+        Err(e) => tracing::debug!("publish relay pending: {e}"),
     }
 }
 

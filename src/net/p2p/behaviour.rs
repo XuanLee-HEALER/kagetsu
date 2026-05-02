@@ -28,6 +28,15 @@ pub const PROTOCOL_S2C: StreamProtocol = StreamProtocol::new("/tui-majo/s2c/1");
 pub const AGENT_PREFIX: &str = "tui-majo/";
 /// gossipsub topic: 在线房间广播.
 pub const LOBBY_TOPIC: &str = "tui-majo/lobby/v1";
+/// gossipsub topic: Tier 2 玩家 relay 贡献池广播.
+///
+/// 公网可达 (AutoNAT 探测确认 Public) 的房主在 host swarm 周期 publish
+/// 自己的可 dial multiaddr, 让 NAT 后玩家把它们当作候选 relay (除 Tier 1
+/// claw 之外的备选, 减少单点依赖).
+///
+/// 大厅 [`crate::net::p2p::discovery::RoomBrowser`] 订阅累积成 relay pool,
+/// UI 创建房间时合并进 bootstrap_relays.
+pub const RELAYS_TOPIC: &str = "tui-majo/relays/v1";
 
 #[derive(NetworkBehaviour)]
 pub struct P2pBehaviour {
@@ -63,6 +72,24 @@ pub struct LobbyAnnouncement {
     /// 加入者从中选最优.
     pub multiaddrs: Vec<String>,
     /// unix 毫秒, 用于过期判断 (大厅超过 30 秒没收到新 announcement 视为下线).
+    pub timestamp_unix_ms: i64,
+}
+
+/// Tier 2 玩家 relay 贡献池公告.
+///
+/// 公网可达 (AutoNAT NatStatus::Public) 的 host swarm 周期 publish 这个,
+/// 大厅累积形成动态 relay 池, 减少对 Tier 1 claw 单点依赖.
+///
+/// 与 [`LobbyAnnouncement`] 的区别: 后者在房间存在时才 publish, 内容是
+/// 房间元数据; 前者只要节点 Public 就 publish, 内容是 relay 服务地址.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayAnnouncement {
+    pub schema_version: u32,
+    /// relay 节点的 PeerId (字符串编码).
+    pub peer_id: String,
+    /// 此 relay 的可 dial multiaddrs (公网直连, 不含 /p2p-circuit/ 自循环).
+    pub multiaddrs: Vec<String>,
+    /// unix 毫秒. 大厅超过 30 秒没刷新视为下线.
     pub timestamp_unix_ms: i64,
 }
 
