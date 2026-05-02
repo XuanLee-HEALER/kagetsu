@@ -81,8 +81,8 @@ fn room_addr_tag(room: &RoomEntry) -> &'static str {
 }
 
 impl OnlineLobbyState {
-    pub fn new(runtime: &tokio::runtime::Handle) -> Self {
-        let browser = RoomBrowser::start(runtime).ok();
+    pub fn new(runtime: &tokio::runtime::Handle, bootstrap_relays: Vec<libp2p::Multiaddr>) -> Self {
+        let browser = RoomBrowser::start(runtime, bootstrap_relays).ok();
         Self {
             nickname: String::new(),
             addr: String::new(),
@@ -94,10 +94,14 @@ impl OnlineLobbyState {
         }
     }
 
-    pub fn with_message(runtime: &tokio::runtime::Handle, message: String) -> Self {
+    pub fn with_message(
+        runtime: &tokio::runtime::Handle,
+        bootstrap_relays: Vec<libp2p::Multiaddr>,
+        message: String,
+    ) -> Self {
         Self {
             message,
-            ..Self::new(runtime)
+            ..Self::new(runtime, bootstrap_relays)
         }
     }
 

@@ -391,7 +391,10 @@ impl App {
                 self.screen = Screen::GameOver(GameOverState::new(rankings));
             }
             Transition::EnterOnlineLobby => {
-                self.screen = Screen::OnlineLobby(OnlineLobbyState::new(&self.runtime));
+                let bootstrap = crate::net::p2p::bootstrap::effective_bootstrap_relays(
+                    &self.local_prefs.network.bootstrap_relays,
+                );
+                self.screen = Screen::OnlineLobby(OnlineLobbyState::new(&self.runtime, bootstrap));
             }
             Transition::CreateOnlineRoom { nickname } => {
                 self.create_online_room(nickname);
@@ -440,8 +443,12 @@ impl App {
             Ok(v) => v,
             Err(e) => {
                 tracing::error!("创建房间失败: {e}");
+                let bootstrap = crate::net::p2p::bootstrap::effective_bootstrap_relays(
+                    &self.local_prefs.network.bootstrap_relays,
+                );
                 self.screen = Screen::OnlineLobby(OnlineLobbyState::with_message(
                     &self.runtime,
+                    bootstrap,
                     format!("创建失败: {e}"),
                 ));
                 return;
@@ -473,8 +480,12 @@ impl App {
         let multiaddr: libp2p::Multiaddr = match addr.parse() {
             Ok(m) => m,
             Err(e) => {
+                let bootstrap = crate::net::p2p::bootstrap::effective_bootstrap_relays(
+                    &self.local_prefs.network.bootstrap_relays,
+                );
                 self.screen = Screen::OnlineLobby(OnlineLobbyState::with_message(
                     &self.runtime,
+                    bootstrap,
                     format!("地址格式错误: {e}"),
                 ));
                 return;
@@ -497,8 +508,12 @@ impl App {
                 self.screen = Screen::OnlineRoom(Box::new(room_state));
             }
             Err(e) => {
+                let bootstrap = crate::net::p2p::bootstrap::effective_bootstrap_relays(
+                    &self.local_prefs.network.bootstrap_relays,
+                );
                 self.screen = Screen::OnlineLobby(OnlineLobbyState::with_message(
                     &self.runtime,
+                    bootstrap,
                     format!("加入失败: {e}"),
                 ));
             }

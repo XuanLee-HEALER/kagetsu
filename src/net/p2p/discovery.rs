@@ -111,9 +111,16 @@ pub struct RoomBrowser {
 impl RoomBrowser {
     /// 启动浏览器. 在给定 tokio runtime 上 spawn swarm task.
     ///
+    /// `bootstrap_relays` 是公网 lobby mesh 入口 — 大厅必须主动 dial 至少一个
+    /// bootstrap, 才能跟其它客户端的 host swarm 建立 gossipsub mesh, 收到 publish
+    /// 的房间 announcement. 不传时只走 LAN mDNS 路径 (跟 v1 行为一致).
+    ///
     /// 注: build_swarm 内部 libp2p-quic (quinn) 初始化要 tokio runtime context,
     /// 由于本函数被 UI 同步线程调用, 必须先 runtime.enter() 进 context.
-    pub fn start(runtime: &tokio::runtime::Handle) -> Result<Self, BrowserError> {
+    pub fn start(
+        runtime: &tokio::runtime::Handle,
+        bootstrap_relays: Vec<Multiaddr>,
+    ) -> Result<Self, BrowserError> {
         let _guard = runtime.enter();
         let kp = new_keypair();
         let mut swarm =
@@ -129,6 +136,15 @@ impl RoomBrowser {
         let topic = gossipsub::IdentTopic::new(LOBBY_TOPIC);
         if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&topic) {
             tracing::warn!("browser 订阅 lobby topic 失败: {e}");
+        }
+
+        // 主动 dial bootstrap relay 让 gossipsub mesh 通过它们扩散.
+        for addr in &bootstrap_relays {
+            if let Err(e) = swarm.dial(addr.clone()) {
+                tracing::warn!("browser dial bootstrap {addr} 失败: {e}");
+            } else {
+                tracing::info!("browser dialed bootstrap {addr}");
+            }
         }
 
         let (event_tx, event_rx) = mpsc::unbounded_channel::<BrowserEvent>();
@@ -364,7 +380,7 @@ mod tests {
             .build()
             .unwrap();
         // 主线程不在 runtime context 里.
-        let _br = RoomBrowser::start(rt.handle()).expect("start");
+        let _br = RoomBrowser::start(rt.handle(), vec![]).expect("start");
         // drop runtime 让 spawn 的 task 退出.
     }
 }
