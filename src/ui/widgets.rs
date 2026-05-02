@@ -1,6 +1,6 @@
 //! 跨屏共享的小 helper. 牌张渲染走 [`crate::ui::paint`] 的 paint_tile_*.
 
-use crate::meld::Seat;
+use crate::domain::meld::Seat;
 
 pub fn seat_label(s: Seat) -> &'static str {
     match s {

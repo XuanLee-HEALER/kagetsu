@@ -6,7 +6,7 @@
 //!
 //! 活牌山可摸 `136 - 14 - 13×4 = 70` 张.
 
-use crate::tile::{Tile, standard_set};
+use crate::domain::tile::{Tile, standard_set};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn from_components_preserves_state() {
-        use crate::tile::TileIndex;
+        use crate::domain::tile::TileIndex;
         let mk = |k: u8, id: u16| Tile {
             id,
             kind: TileIndex(k),

@@ -3,10 +3,10 @@
 //! 详见 docs/spec/scoring.md
 
 use crate::config::GameConfig;
-use crate::decompose::{Decomposition, Mentsu, WaitKind};
+use crate::domain::decompose::{Decomposition, Mentsu, WaitKind};
 use crate::game::PlayerState;
-use crate::meld::{Meld, MeldKind, Seat};
-use crate::yaku::{WinContext, Yaku, detect_yaku};
+use crate::domain::meld::{Meld, MeldKind, Seat};
+use crate::domain::yaku::{WinContext, Yaku, detect_yaku};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoreLevel {
@@ -110,7 +110,7 @@ pub fn calculate_fu(d: &Decomposition, ctx: &WinContext, melds: &[Meld]) -> u32 
     }
 }
 
-fn mentsu_fu(m: &Mentsu, ctx: &WinContext, wait: WaitKind, winning: crate::tile::TileIndex) -> u32 {
+fn mentsu_fu(m: &Mentsu, ctx: &WinContext, wait: WaitKind, winning: crate::domain::tile::TileIndex) -> u32 {
     match m {
         Mentsu::Shuntsu(_) => 0,
         Mentsu::Koutsu(t, true) => {

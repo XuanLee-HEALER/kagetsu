@@ -9,13 +9,13 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use crate::config::GameConfig;
-use crate::decompose::decompose;
-use crate::hand::Hand;
-use crate::meld::{Meld, MeldKind, Seat};
+use crate::domain::decompose::decompose;
+use crate::domain::hand::Hand;
+use crate::domain::meld::{Meld, MeldKind, Seat};
 use crate::score::{PaymentDistribution, ScoreResult, distribute, evaluate};
-use crate::tile::{Tile, TileIndex, count_by_kind};
+use crate::domain::tile::{Tile, TileIndex, count_by_kind};
 use crate::wall::Wall;
-use crate::yaku::WinContext;
+use crate::domain::yaku::WinContext;
 
 /// 局内动作事件, 给 UI 渲染最近动作日志使用.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -517,7 +517,7 @@ impl GameState {
             let dealer_p = &self.players[self.dealer.index()];
             let counts = count_by_kind(&dealer_p.hand.closed);
             let dealer_tenpai =
-                !crate::decompose::tenpai_tiles(&counts, &dealer_p.hand.melds).is_empty();
+                !crate::domain::decompose::tenpai_tiles(&counts, &dealer_p.hand.melds).is_empty();
             if !dealer_tenpai {
                 self.advance_kyoku();
             }
@@ -584,7 +584,7 @@ impl GameState {
         let counts = count_by_kind(&p.hand.closed);
         // 13 张才听牌; 若是 14 张(刚摸), 需要先尝试切一张
         if p.hand.closed.len() == 13 {
-            crate::decompose::tenpai_tiles(&counts, &p.hand.melds)
+            crate::domain::decompose::tenpai_tiles(&counts, &p.hand.melds)
         } else {
             Vec::new()
         }
@@ -598,7 +598,7 @@ impl GameState {
             return false;
         }
         counts[discard.kind.0 as usize] -= 1;
-        !crate::decompose::tenpai_tiles(&counts, &p.hand.melds).is_empty()
+        !crate::domain::decompose::tenpai_tiles(&counts, &p.hand.melds).is_empty()
     }
 
     /// 列出某家对最近弃牌的合法鸣牌选项(碰/吃/明杠/荣和).
@@ -715,7 +715,7 @@ impl GameState {
                 }
                 let mut c = counts;
                 c[tile.kind.0 as usize] -= 1;
-                if !crate::decompose::tenpai_tiles(&c, &p.hand.melds).is_empty() {
+                if !crate::domain::decompose::tenpai_tiles(&c, &p.hand.melds).is_empty() {
                     opts.riichi_discards.push(*tile);
                     seen_kinds.push(tile.kind.0);
                 }
@@ -920,7 +920,7 @@ impl GameState {
                 return Err("tile not in hand");
             }
             counts[idx] -= 1;
-            if crate::decompose::tenpai_tiles(&counts, &p.hand.melds).is_empty() {
+            if crate::domain::decompose::tenpai_tiles(&counts, &p.hand.melds).is_empty() {
                 return Err("not tenpai after discard");
             }
         }

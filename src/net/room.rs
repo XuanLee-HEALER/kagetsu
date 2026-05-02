@@ -27,13 +27,13 @@ use uuid::Uuid;
 
 use crate::config::GameConfig;
 use crate::game::{GameState, Phase, RoundResult, RyuukyokuKind};
-use crate::meld::Seat;
+use crate::domain::meld::Seat;
 use crate::net::protocol::{
     ClientMsg, GameOverView, GameStateView, NetAction, PlayerSlot, PlayerView, RoomLifecycle,
     RoomView, RoundResultView, ServerMsg,
 };
 use crate::score::final_ranking;
-use crate::tile::Tile;
+use crate::domain::tile::Tile;
 
 // ============================================================================
 // 公开 API
@@ -839,7 +839,7 @@ impl RoomActor {
         // hints 简化: 列出主要可用动作 (UI 自己渲染按键速查).
         let hints = vec![
             NetAction::Discard(crate::ui::screens::game::TileSpec {
-                kind: crate::tile::TileIndex(0),
+                kind: crate::domain::tile::TileIndex(0),
             }),
             NetAction::Tsumo,
         ];
@@ -859,11 +859,11 @@ impl RoomActor {
     }
 
     /// 把 AI 的 [`Action`] 转化成 GameState 调用. 失败时退化为摸切.
-    fn apply_ai_action(&mut self, action: crate::action::Action) {
+    fn apply_ai_action(&mut self, action: crate::domain::action::Action) {
         let Some(game) = self.game.as_mut() else {
             return;
         };
-        use crate::action::Action;
+        use crate::domain::action::Action;
         match action {
             Action::Discard(t) => {
                 let _ = game.do_discard(t);
@@ -1338,7 +1338,7 @@ mod tests {
     // RoomActor 内部单元测试 (直接 sync 调内部方法)
     // ============================================================================
 
-    use crate::tile::TileIndex;
+    use crate::domain::tile::TileIndex;
 
     /// 构造一个处于 InGame 状态的 RoomActor (sync, 不 spawn task).
     /// 玩家 id: 1=East, 2=South, 3=West, 4=North. is_ai 由 humans 列表决定.

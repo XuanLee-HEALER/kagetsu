@@ -2,8 +2,8 @@
 //!
 //! 由 UI 或 AI 产生, 由 [`crate::game::GameState`] 消费.
 
-use crate::meld::Seat;
-use crate::tile::Tile;
+use crate::domain::meld::Seat;
+use crate::domain::tile::Tile;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {

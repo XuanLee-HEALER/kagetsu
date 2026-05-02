@@ -16,9 +16,9 @@ use uuid::Uuid;
 
 use crate::config::GameConfig;
 use crate::game::{GameEvent, Phase, RoundWind};
-use crate::meld::{Meld, Seat};
+use crate::domain::meld::{Meld, Seat};
 use crate::score::Ranking;
-use crate::tile::{Tile, TileIndex};
+use crate::domain::tile::{Tile, TileIndex};
 use crate::ui::screens::game::TileSpec;
 
 // ============================================================================

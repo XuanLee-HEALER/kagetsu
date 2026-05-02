@@ -22,13 +22,13 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use std::time::{Duration, Instant};
 
-use crate::action::Action;
+use crate::domain::action::Action;
 use crate::config::GameConfig;
 use crate::game::{CallOptions, GameEvent, GameState, Phase, RoundResult, RyuukyokuKind};
-use crate::meld::{MeldKind, Seat};
+use crate::domain::meld::{MeldKind, Seat};
 use crate::player::{ai_choose_discard, default_action_on_timeout};
 use crate::score::final_ranking;
-use crate::tile::{Tile, TileIndex};
+use crate::domain::tile::{Tile, TileIndex};
 use crate::ui::Transition;
 use crate::ui::paint::{
     TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row,
@@ -1277,8 +1277,8 @@ impl GameScreenState {
         );
         // 听牌检测
         let waits = if p.hand.closed.len() == 13 {
-            crate::decompose::tenpai_tiles(
-                &crate::tile::count_by_kind(&p.hand.closed),
+            crate::domain::decompose::tenpai_tiles(
+                &crate::domain::tile::count_by_kind(&p.hand.closed),
                 &p.hand.melds,
             )
         } else {

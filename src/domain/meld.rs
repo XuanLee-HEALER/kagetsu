@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::tile::Tile;
+use crate::domain::tile::Tile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Seat {

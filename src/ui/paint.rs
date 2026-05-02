@@ -6,7 +6,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::style::{Modifier, Style};
 
-use crate::tile::Tile;
+use crate::domain::tile::Tile;
 use crate::ui::theme::Theme;
 
 /// 牌张视觉状态.

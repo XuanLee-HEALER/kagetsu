@@ -1,7 +1,7 @@
 //! 手牌容器.
 
-use crate::meld::Meld;
-use crate::tile::{TILE_KINDS, Tile, count_by_kind};
+use crate::domain::meld::Meld;
+use crate::domain::tile::{TILE_KINDS, Tile, count_by_kind};
 
 #[derive(Debug, Clone, Default)]
 pub struct Hand {

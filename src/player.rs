@@ -6,9 +6,9 @@
 //!
 //! 后续可替换为更复杂的策略(牌效率/防守/听牌选择等).
 
-use crate::action::Action;
+use crate::domain::action::Action;
 use crate::game::{GameState, Phase};
-use crate::meld::Seat;
+use crate::domain::meld::Seat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Controller {
