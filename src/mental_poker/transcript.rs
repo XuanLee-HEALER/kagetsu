@@ -64,6 +64,36 @@ impl Transcript {
         self.hasher.update(bytes);
         Scalar::from_le_bytes_mod_order(&bytes)
     }
+
+    /// 派生 `count` 个 challenge bits (布尔). 用于 cut-and-choose 协议.
+    /// SHA-256 256 bit 输出, 跨 32 字节扩展时再 hash 一轮.
+    pub fn challenge_bits(&mut self, label: &[u8], count: usize) -> Vec<bool> {
+        self.append_message(b"challenge_bits_label", label);
+        let mut bits = Vec::with_capacity(count);
+        let mut counter: u32 = 0;
+        while bits.len() < count {
+            let mut h = self.hasher.clone();
+            h.update(b"bits_chunk");
+            h.update(counter.to_be_bytes());
+            let chunk = h.finalize();
+            for byte in chunk.iter() {
+                for shift in 0..8 {
+                    if bits.len() >= count {
+                        break;
+                    }
+                    bits.push((byte >> shift) & 1 == 1);
+                }
+                if bits.len() >= count {
+                    break;
+                }
+            }
+            counter += 1;
+        }
+        // 把派生这一步喂进 hasher 防止后续 challenge 重复
+        self.hasher.update(b"bits_consumed");
+        self.hasher.update((count as u32).to_be_bytes());
+        bits
+    }
 }
 
 #[cfg(test)]

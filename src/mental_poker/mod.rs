@@ -33,6 +33,7 @@
 //!
 //! 当前实现进度: M4.A.0 (ElGamal mask/unmask baseline).
 
+pub mod cut_and_choose;
 pub mod dleq;
 pub mod elgamal;
 pub mod ipa;
