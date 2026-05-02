@@ -1,5 +1,9 @@
-//! 局域网大厅: 输入 nickname → 创建房间 / 加入房间.
-//! 同时跑 mDNS browser 自动发现局域网内房间.
+//! 在线大厅: 输入 nickname → 创建房间 / 加入房间.
+//!
+//! 房间发现:
+//! - LAN 走 mDNS (libp2p mdns Behaviour) 自动发现同 WiFi 房间
+//! - 公网走 DHT/gossipsub (M3.B 后) 发现 bootstrap relay 注册的房间
+//! - 手动输入 multiaddr (含 /p2p-circuit/ 走 relay 中转, 不含则尝试直连)
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
@@ -31,6 +35,49 @@ pub struct OnlineLobbyState {
     pub discovered: Vec<RoomEntry>,
     /// discovered 列表里选中行 (focus=FOCUS_DISCOVERED 时生效).
     pub discovered_selected: usize,
+}
+
+/// 给一个发现到的房间打 tag: [LAN] / [中转] / [远程].
+/// LAN: 私网 IP (192.168/10/172.16-31, 169.254 等)
+/// 中转: multiaddr 含 /p2p-circuit/
+/// 远程: 公网 IP 直连
+fn room_addr_tag(room: &RoomEntry) -> &'static str {
+    use libp2p::multiaddr::Protocol;
+    let Some(addr) = room.primary_addr() else {
+        return "?";
+    };
+    let mut has_circuit = false;
+    let mut public_ip = false;
+    let mut private_ip = false;
+    for p in addr.iter() {
+        match p {
+            Protocol::P2pCircuit => has_circuit = true,
+            Protocol::Ip4(ip) => {
+                if ip.is_private() || ip.is_loopback() || ip.is_link_local() {
+                    private_ip = true;
+                } else {
+                    public_ip = true;
+                }
+            }
+            Protocol::Ip6(ip) => {
+                if ip.is_loopback() {
+                    private_ip = true;
+                } else {
+                    public_ip = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if has_circuit {
+        "中转"
+    } else if public_ip {
+        "远程"
+    } else if private_ip {
+        "LAN"
+    } else {
+        "?"
+    }
 }
 
 impl OnlineLobbyState {
@@ -184,7 +231,7 @@ impl OnlineLobbyState {
     pub fn render(&self, f: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" 局域网游戏 · 大厅 ")
+            .title(" 在线游戏 · 大厅 ")
             .title_alignment(Alignment::Center);
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -228,7 +275,10 @@ impl OnlineLobbyState {
                     .add_modifier(Modifier::BOLD);
             }
             lines.push(Line::from(Span::styled(
-                format!("{}创建房间 (本机做房主, 监听 LAN)", prefix),
+                format!(
+                    "{}创建房间 (本机做房主, 同时支持 LAN mDNS + 公网 relay 中转)",
+                    prefix
+                ),
                 style,
             )));
         }
@@ -248,7 +298,7 @@ impl OnlineLobbyState {
                 .add_modifier(Modifier::BOLD)
         };
         lines.push(Line::from(Span::styled(
-            format!("{}局域网发现 ({})", header_prefix, self.discovered.len()),
+            format!("{}发现的房间 ({})", header_prefix, self.discovered.len()),
             header_style,
         )));
         if self.browser.is_none() {
@@ -276,10 +326,12 @@ impl OnlineLobbyState {
                 } else {
                     Style::default().fg(Color::White)
                 };
+                let tag = room_addr_tag(room);
                 lines.push(Line::from(Span::styled(
                     format!(
-                        "{} {} @ {} · {}/4 · {}",
+                        "{} [{}] {} @ {} · {}/4 · {}",
                         cursor,
+                        tag,
                         room.host_nick,
                         room.addr(),
                         room.players,

@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::ui::Transition;
 
-const ITEMS: &[&str] = &["单人游戏", "局域网游戏", "退出"];
+const ITEMS: &[&str] = &["单人游戏", "在线游戏", "退出"];
 
 #[derive(Debug, Default)]
 pub struct MainMenuState {
