@@ -90,6 +90,10 @@ pub struct MpPlayerActor {
     draw_sessions: HashMap<Uuid, PendingDraw>,
     /// 协议 3 公开揭示进行中的 session (key = deck_index).
     reveal_sessions: HashMap<u32, PendingReveal>,
+    /// 自己已摸到的 (deck_index → tile_id). 协议 4 弃牌时反查 plaintext (=
+    /// card_mapping.encode(tile_id)). plaintext 不需要单独存因为 mapping 可
+    /// 反查.
+    own_drawn: HashMap<u32, usize>,
     /// Cmd 接收 channel.
     rx: UnboundedReceiver<MpRoomCmd>,
     /// 事件发送 channel (上层 UI / P2P 桥).
@@ -155,6 +159,7 @@ impl MpPlayerActor {
             shuffle_proofs: Vec::new(),
             draw_sessions: HashMap::new(),
             reveal_sessions: HashMap::new(),
+            own_drawn: HashMap::new(),
             rx,
             event_tx,
             shutdown_rx,
@@ -224,6 +229,25 @@ impl MpPlayerActor {
                 self.start_reveal(deck_index);
                 true
             }
+            MpRoomCmd::Discard { deck_index } => {
+                self.do_discard(deck_index);
+                true
+            }
+            MpRoomCmd::Tsumo {
+                hand_indices,
+                winning_tile_index,
+            } => {
+                self.do_win(true, None, hand_indices, winning_tile_index);
+                true
+            }
+            MpRoomCmd::Ron {
+                from_player,
+                hand_indices,
+                winning_tile_index,
+            } => {
+                self.do_win(false, Some(from_player), hand_indices, winning_tile_index);
+                true
+            }
             MpRoomCmd::Tick => true,
         }
     }
@@ -258,6 +282,34 @@ impl MpPlayerActor {
             }
             MentalPokerMsg::RevealShare { ct, share, proof } if self.phase == MpPhase::Playing => {
                 self.handle_reveal_share(from, ct, share, proof);
+            }
+            MentalPokerMsg::DrawAnnouncement { player, deck_index }
+                if self.phase == MpPhase::Playing =>
+            {
+                self.handle_draw_announcement(player, deck_index);
+            }
+            MentalPokerMsg::Discard {
+                player,
+                deck_index,
+                plaintext,
+            } if self.phase == MpPhase::Playing => {
+                self.handle_discard_msg(player, deck_index, plaintext);
+            }
+            MentalPokerMsg::Win {
+                player,
+                win_type,
+                hand_indices,
+                hand_plaintexts,
+                winning_tile_index,
+                ..
+            } if self.phase == MpPhase::Playing => {
+                self.handle_win_msg(
+                    player,
+                    win_type,
+                    hand_indices,
+                    hand_plaintexts,
+                    winning_tile_index,
+                );
             }
             other => {
                 tracing::debug!(
@@ -643,6 +695,8 @@ impl MpPlayerActor {
         };
         let deck_index = pending.deck_index;
         self.draw_sessions.remove(&request_id);
+        // 更新 own_drawn / table / 广播 DrawAnnouncement
+        self.finalize_own_draw(deck_index, tile_id, plaintext);
         let _ = self.event_tx.send(MpEvent::DrawComplete {
             request_id,
             deck_index,
@@ -779,6 +833,305 @@ impl MpPlayerActor {
             return;
         }
         self.try_complete_reveal(deck_index);
+    }
+
+    /// 协议 2 内部辅助: combine 完成后调, 同步 own_drawn / table 自己 drawn /
+    /// 广播 DrawAnnouncement 给其他 actor (让他们 record_draw 同步).
+    fn finalize_own_draw(
+        &mut self,
+        deck_index: u32,
+        tile_id: usize,
+        plaintext: crate::mental_poker::Curve,
+    ) {
+        self.own_drawn.insert(deck_index, tile_id);
+        // 自己 record_draw with plaintext
+        let _ = self
+            .table
+            .hand_mut(self.cfg.own_index)
+            .record_draw(deck_index as usize, Some(plaintext));
+        // 广播 DrawAnnouncement
+        let msg = MentalPokerMsg::DrawAnnouncement {
+            player: self.cfg.own_index as u32,
+            deck_index,
+        };
+        let _ = self.event_tx.send(MpEvent::OutboundMsg { to: None, msg });
+    }
+
+    /// 协议 2 远端: 收到他人 DrawAnnouncement → record_draw(None) (我们不知 plaintext).
+    fn handle_draw_announcement(&mut self, player: u32, deck_index: u32) {
+        if (player as usize) == self.cfg.own_index {
+            return; // 自己 echo, 已处理
+        }
+        if (player as usize) >= self.cfg.n_players() {
+            self.emit_protocol_error(None, format!("DrawAnnouncement player={player} 越界"));
+            return;
+        }
+        if let Err(e) = self
+            .table
+            .hand_mut(player as usize)
+            .record_draw(deck_index as usize, None)
+        {
+            self.emit_protocol_error(
+                Some(player as usize),
+                format!("DrawAnnouncement record_draw 失败: {e}"),
+            );
+        }
+    }
+
+    /// 协议 4 自己弃牌. 验证 + apply 本地 + 广播.
+    fn do_discard(&mut self, deck_index: u32) {
+        if self.phase != MpPhase::Playing {
+            return;
+        }
+        let Some(&tile_id) = self.own_drawn.get(&deck_index) else {
+            self.emit_protocol_error(
+                None,
+                format!("Discard: 未摸过 deck_index={deck_index} (不在 own_drawn)"),
+            );
+            return;
+        };
+        let plaintext = self.card_mapping.encode(tile_id);
+        // 自己 apply 到 table
+        let ann = crate::mental_poker::protocol_discard::DiscardAnnouncement {
+            player: self.cfg.own_index,
+            deck_index: deck_index as usize,
+            plaintext,
+        };
+        if let Err(e) = ann.apply(&mut self.table) {
+            self.emit_protocol_error(None, format!("自己 Discard apply 失败: {e}"));
+            return;
+        }
+        // 广播
+        let msg = MentalPokerMsg::Discard {
+            player: self.cfg.own_index as u32,
+            deck_index,
+            plaintext: wire::encode_curve(&plaintext),
+        };
+        let _ = self.event_tx.send(MpEvent::OutboundMsg { to: None, msg });
+        // emit local UI event
+        let _ = self.event_tx.send(MpEvent::DiscardApplied {
+            player: self.cfg.own_index as u32,
+            deck_index,
+            tile_id,
+        });
+    }
+
+    /// 协议 4 远端弃牌. 反查 plaintext → tile_id, validate + apply.
+    fn handle_discard_msg(&mut self, player: u32, deck_index: u32, plaintext_bytes: Vec<u8>) {
+        if (player as usize) >= self.cfg.n_players() {
+            self.emit_protocol_error(None, format!("Discard player={player} 越界"));
+            return;
+        }
+        if (player as usize) == self.cfg.own_index {
+            return; // 自己 echo, 已 apply
+        }
+        let plaintext = match wire::decode_curve(&plaintext_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                self.emit_protocol_error(
+                    Some(player as usize),
+                    format!("Discard plaintext decode: {e}"),
+                );
+                return;
+            }
+        };
+        let Some(tile_id) = self.card_mapping.decode(&plaintext) else {
+            self.emit_protocol_error(
+                Some(player as usize),
+                "Discard plaintext 不在 card_mapping (作弊?)".into(),
+            );
+            return;
+        };
+        let ann = crate::mental_poker::protocol_discard::DiscardAnnouncement {
+            player: player as usize,
+            deck_index: deck_index as usize,
+            plaintext,
+        };
+        if let Err(e) = ann.apply(&mut self.table) {
+            self.emit_protocol_error(Some(player as usize), format!("Discard apply 失败: {e}"));
+            return;
+        }
+        let _ = self.event_tx.send(MpEvent::DiscardApplied {
+            player,
+            deck_index,
+            tile_id,
+        });
+    }
+
+    /// 协议 7 自己宣告和牌 (Tsumo / Ron). validate 本地 + 广播 (不 apply 到
+    /// Table 因为 Win 是终局事件不修改 state).
+    fn do_win(
+        &mut self,
+        is_tsumo: bool,
+        from_player: Option<u32>,
+        hand_indices: Vec<u32>,
+        winning_tile_index: u32,
+    ) {
+        if self.phase != MpPhase::Playing {
+            return;
+        }
+        // 反查 hand plaintexts (自己持有的)
+        let mut plaintexts: Vec<crate::mental_poker::Curve> =
+            Vec::with_capacity(hand_indices.len());
+        for &idx in &hand_indices {
+            // own_drawn 含自己摸过的; melds / kan 走 Table 内部数据; ron 时
+            // winning_tile 不在自己 drawn (是 from_player 弃牌, 已在 Table 中).
+            // 简化: 从 own_drawn 反查 tile_id, 再 encode 到 plaintext.
+            let pt = if let Some(&tid) = self.own_drawn.get(&idx) {
+                self.card_mapping.encode(tid)
+            } else {
+                // 可能是 Ron 的 winning_tile: 从对方 discarded 中拿
+                let mut found = None;
+                for hand in &self.table.hands {
+                    if let Some(p) = hand.discarded_plaintext(idx as usize) {
+                        found = Some(*p);
+                        break;
+                    }
+                }
+                match found {
+                    Some(p) => p,
+                    None => {
+                        self.emit_protocol_error(
+                            None,
+                            format!(
+                                "Win: deck_index={idx} 不在 own_drawn 也不在任一玩家 discarded"
+                            ),
+                        );
+                        return;
+                    }
+                }
+            };
+            plaintexts.push(pt);
+        }
+        let win_type = if is_tsumo {
+            crate::mental_poker::protocol_win::WinType::Tsumo
+        } else {
+            crate::mental_poker::protocol_win::WinType::Ron {
+                from_player: from_player.unwrap_or(0) as usize,
+            }
+        };
+        let win = crate::mental_poker::protocol_win::WinAnnouncement {
+            player: self.cfg.own_index,
+            win_type,
+            hand_indices: hand_indices.iter().map(|&i| i as usize).collect(),
+            hand_plaintexts: plaintexts.clone(),
+            winning_tile_index: winning_tile_index as usize,
+            dora_plaintexts: vec![], // M5.B+ 加 dora indicators 时填
+            uradoor_plaintexts: None,
+        };
+        if let Err(e) = win.validate(&self.table) {
+            self.emit_protocol_error(None, format!("自己 Win validate 失败: {e}"));
+            return;
+        }
+        // 广播
+        let win_type_wire = match win_type {
+            crate::mental_poker::protocol_win::WinType::Tsumo => {
+                crate::mental_poker::wire::WireWinType::Tsumo
+            }
+            crate::mental_poker::protocol_win::WinType::Ron { from_player } => {
+                crate::mental_poker::wire::WireWinType::Ron {
+                    from_player: from_player as u32,
+                }
+            }
+        };
+        let msg = MentalPokerMsg::Win {
+            player: self.cfg.own_index as u32,
+            win_type: win_type_wire,
+            hand_indices: hand_indices.clone(),
+            hand_plaintexts: plaintexts
+                .iter()
+                .map(crate::mental_poker::wire::encode_curve)
+                .collect(),
+            winning_tile_index,
+            dora_plaintexts: vec![],
+            uradoor_plaintexts: None,
+        };
+        let _ = self.event_tx.send(MpEvent::OutboundMsg { to: None, msg });
+        // 自己也 emit WinValidated
+        let tile_ids: Vec<usize> = plaintexts
+            .iter()
+            .map(|p| self.card_mapping.decode(p).unwrap_or(usize::MAX))
+            .collect();
+        let _ = self.event_tx.send(MpEvent::WinValidated {
+            player: self.cfg.own_index as u32,
+            is_tsumo,
+            from_player,
+            winning_tile_index,
+            hand_tile_ids: tile_ids,
+        });
+        self.phase = MpPhase::GameOver;
+        let _ = self
+            .event_tx
+            .send(MpEvent::PhaseChanged { phase: self.phase });
+    }
+
+    /// 协议 7 远端宣告和牌. validate Table + 反查 tile_ids + emit WinValidated.
+    fn handle_win_msg(
+        &mut self,
+        player: u32,
+        win_type_wire: crate::mental_poker::wire::WireWinType,
+        hand_indices: Vec<u32>,
+        hand_plaintexts: Vec<Vec<u8>>,
+        winning_tile_index: u32,
+    ) {
+        if (player as usize) >= self.cfg.n_players() {
+            self.emit_protocol_error(None, format!("Win player={player} 越界"));
+            return;
+        }
+        if (player as usize) == self.cfg.own_index {
+            return; // 自己 echo
+        }
+        // decode plaintexts
+        let mut plaintexts: Vec<crate::mental_poker::Curve> =
+            Vec::with_capacity(hand_plaintexts.len());
+        for b in &hand_plaintexts {
+            match wire::decode_curve(b) {
+                Ok(p) => plaintexts.push(p),
+                Err(e) => {
+                    self.emit_protocol_error(
+                        Some(player as usize),
+                        format!("Win plaintext decode: {e}"),
+                    );
+                    return;
+                }
+            }
+        }
+        let win_type: crate::mental_poker::protocol_win::WinType = win_type_wire.into();
+        let is_tsumo = matches!(win_type, crate::mental_poker::protocol_win::WinType::Tsumo);
+        let from_player = match win_type {
+            crate::mental_poker::protocol_win::WinType::Ron { from_player } => {
+                Some(from_player as u32)
+            }
+            _ => None,
+        };
+        let win = crate::mental_poker::protocol_win::WinAnnouncement {
+            player: player as usize,
+            win_type,
+            hand_indices: hand_indices.iter().map(|&i| i as usize).collect(),
+            hand_plaintexts: plaintexts.clone(),
+            winning_tile_index: winning_tile_index as usize,
+            dora_plaintexts: vec![],
+            uradoor_plaintexts: None,
+        };
+        if let Err(e) = win.validate(&self.table) {
+            self.emit_protocol_error(Some(player as usize), format!("Win validate 失败: {e}"));
+            return;
+        }
+        let tile_ids: Vec<usize> = plaintexts
+            .iter()
+            .map(|p| self.card_mapping.decode(p).unwrap_or(usize::MAX))
+            .collect();
+        let _ = self.event_tx.send(MpEvent::WinValidated {
+            player,
+            is_tsumo,
+            from_player,
+            winning_tile_index,
+            hand_tile_ids: tile_ids,
+        });
+        self.phase = MpPhase::GameOver;
+        let _ = self
+            .event_tx
+            .send(MpEvent::PhaseChanged { phase: self.phase });
     }
 
     fn try_complete_reveal(&mut self, deck_index: u32) {
@@ -1049,7 +1402,10 @@ mod tests {
                                 "actor {src} reported ProtocolError offender={offender:?}: {reason}"
                             );
                         }
-                        MpEvent::ShuffleProgress { .. } | MpEvent::GameOver { .. } => {}
+                        MpEvent::ShuffleProgress { .. }
+                        | MpEvent::GameOver { .. }
+                        | MpEvent::DiscardApplied { .. }
+                        | MpEvent::WinValidated { .. } => {}
                     }
                 }
             }
@@ -1079,7 +1435,7 @@ mod tests {
 
         // 桥: 收每个 actor 的 OutboundMsg → 路由给其他 actor 作 PeerMsg.
         // broadcast (to=None) → 发给其他 N-1 个; unicast (to=Some(idx)) → 发给指定.
-        let max_steps = 200;
+        let max_steps = 600; // 全测试并行时 cnc proof CPU 争抢, 留余量
         let mut phases: Vec<MpPhase> = vec![MpPhase::KeyExchange; N];
         let mut shuffle_progress: Vec<u32> = vec![0; N];
         let mut all_in_playing = false;
@@ -1119,7 +1475,9 @@ mod tests {
                         }
                         MpEvent::GameOver { .. }
                         | MpEvent::DrawComplete { .. }
-                        | MpEvent::RevealComplete { .. } => {}
+                        | MpEvent::RevealComplete { .. }
+                        | MpEvent::DiscardApplied { .. }
+                        | MpEvent::WinValidated { .. } => {}
                     }
                 }
             }
@@ -1169,7 +1527,7 @@ mod tests {
             .collect();
 
         // 跑到 all in Playing
-        let (phases, _, _) = run_bridge(&mut handles, &mut rxs, 200, |p| {
+        let (phases, _, _) = run_bridge(&mut handles, &mut rxs, 600, |p| {
             p.iter().all(|x| *x == MpPhase::Playing)
         })
         .await;
@@ -1185,7 +1543,7 @@ mod tests {
 
         // 跑直到 actor 0 收到 DrawComplete (drews.len() >= 1)
         let mut all_draws: Vec<(usize, u32, usize)> = Vec::new();
-        for _step in 0..200usize {
+        for _step in 0..600usize {
             let mut any = false;
             for src in 0..N {
                 while let Ok(ev) = rxs[src].try_recv() {
@@ -1243,6 +1601,98 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
+    /// **M5.B.6 e2e**: 协议 4 弃牌. actor 0 摸 deck[0] + 弃, 4 actor 都应收
+    /// DiscardApplied 含同 tile_id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn protocol_4_discard_propagates_to_all() {
+        const N: usize = 4;
+        let mut handles: Vec<MpPlayerHandle> = (0..N)
+            .map(|i| spawn_mp_player(test_cfg(i), Some((i + 300) as u64)))
+            .collect();
+        let mut rxs: Vec<_> = handles
+            .iter_mut()
+            .map(|h| h.take_event_rx().unwrap())
+            .collect();
+
+        // 跑到 all in Playing
+        let (phases, _, _) = run_bridge(&mut handles, &mut rxs, 600, |p| {
+            p.iter().all(|x| *x == MpPhase::Playing)
+        })
+        .await;
+        assert!(phases.iter().all(|p| *p == MpPhase::Playing));
+
+        // actor 0 摸 deck[0]
+        handles[0]
+            .send(MpRoomCmd::TriggerDraw { deck_index: 0 })
+            .unwrap();
+        // 等 actor 0 收到 DrawComplete (并 emit DrawAnnouncement broadcast 给其他 actor)
+        let mut got_draw = false;
+        let mut discards: Vec<(usize, u32, usize)> = Vec::new();
+        for _step in 0..400usize {
+            let mut any = false;
+            for src in 0..N {
+                while let Ok(ev) = rxs[src].try_recv() {
+                    any = true;
+                    match ev {
+                        MpEvent::OutboundMsg { to, msg } => {
+                            let targets: Vec<usize> = match to {
+                                None => (0..N).filter(|&i| i != src).collect(),
+                                Some(idx) => vec![idx],
+                            };
+                            for t in targets {
+                                handles[t]
+                                    .send(MpRoomCmd::PeerMsg {
+                                        from: Some(src),
+                                        msg: msg.clone(),
+                                    })
+                                    .unwrap();
+                            }
+                        }
+                        MpEvent::DrawComplete { .. } => {
+                            got_draw = true;
+                            // 触发 actor 0 弃牌
+                            handles[0]
+                                .send(MpRoomCmd::Discard { deck_index: 0 })
+                                .unwrap();
+                        }
+                        MpEvent::DiscardApplied {
+                            player,
+                            deck_index,
+                            tile_id,
+                        } => {
+                            discards.push((src, deck_index, tile_id));
+                            // 仅记录, 不停止 (等收齐 4 个)
+                            let _ = player;
+                        }
+                        MpEvent::ProtocolError { offender, reason } => {
+                            panic!("actor {src} ProtocolError offender={offender:?}: {reason}");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if discards.len() == N {
+                break;
+            }
+            if !any {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        assert!(got_draw, "actor 0 应完成摸牌");
+        assert_eq!(discards.len(), N, "4 actor 应都收 DiscardApplied");
+        // 全部 tile_id 一致 + deck_index = 0
+        let first = discards[0].2;
+        for (_src, idx, tile_id) in &discards {
+            assert_eq!(*idx, 0);
+            assert_eq!(*tile_id, first);
+        }
+
+        for h in &handles {
+            h.send(MpRoomCmd::Disconnect).ok();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
     /// **M5.B.5 e2e**: 协议 3 公开揭示 deck[1]. 4 actor 都应收 RevealComplete
     /// 含同 tile_id.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1257,7 +1707,7 @@ mod tests {
             .collect();
 
         // 跑到 all in Playing
-        let (phases, _, _) = run_bridge(&mut handles, &mut rxs, 200, |p| {
+        let (phases, _, _) = run_bridge(&mut handles, &mut rxs, 600, |p| {
             p.iter().all(|x| *x == MpPhase::Playing)
         })
         .await;
@@ -1269,7 +1719,7 @@ mod tests {
             .unwrap();
 
         let mut reveals: Vec<(usize, u32, usize)> = Vec::new();
-        for _step in 0..200usize {
+        for _step in 0..600usize {
             let mut any = false;
             for src in 0..N {
                 while let Ok(ev) = rxs[src].try_recv() {

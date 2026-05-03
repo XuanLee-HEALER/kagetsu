@@ -29,6 +29,21 @@ pub enum MpRoomCmd {
     TriggerDraw { deck_index: u32 },
     /// 主动触发公开揭示 (协议 3): 通常 dora indicator. caller 决定揭示哪张.
     TriggerReveal { deck_index: u32 },
+    /// 主动弃牌 (协议 4): caller 指定要弃的 deck_index. 必须是自己之前摸过 +
+    /// 未弃过 + 未鸣过的位置.
+    Discard { deck_index: u32 },
+    /// 主动自摸和 (协议 7): caller 指定完整手牌的 deck_indices + winning_tile.
+    /// actor 跟据本地状态广播 WinAnnouncement (Tsumo).
+    Tsumo {
+        hand_indices: Vec<u32>,
+        winning_tile_index: u32,
+    },
+    /// 主动荣和 (协议 7): caller 指定 from_player + winning_tile.
+    Ron {
+        from_player: u32,
+        hand_indices: Vec<u32>,
+        winning_tile_index: u32,
+    },
     /// 主动断线 / 退房间.
     Disconnect,
     /// 收到本地 sub-actor (e.g. shuffle session timeout) 触发的 tick.
@@ -68,6 +83,22 @@ pub enum MpEvent {
     },
     /// 协议 3 公开揭示完成 (所有 actor 都会收, 同 plaintext / tile_id).
     RevealComplete { deck_index: u32, tile_id: usize },
+    /// 协议 4 弃牌应用到本地 Table 镜像 (含自己 + 远端).
+    DiscardApplied {
+        player: u32,
+        deck_index: u32,
+        /// plaintext 反查后的 tile_id (UI 渲染弃牌池时用).
+        tile_id: usize,
+    },
+    /// 协议 7 和牌 (Tsumo / Ron) validate 通过 (4 方都收, 同 player + winning_tile).
+    /// caller (上层 GameState) 拿 hand_indices 反查 Tile + 算分 (yaku.rs).
+    WinValidated {
+        player: u32,
+        is_tsumo: bool,
+        from_player: Option<u32>,
+        winning_tile_index: u32,
+        hand_tile_ids: Vec<usize>,
+    },
     /// 一局结束 (流局 / 和牌).
     GameOver { reason: String },
 }

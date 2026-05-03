@@ -375,6 +375,10 @@ pub enum MentalPokerMsg {
         share: Vec<u8>,
         proof: Vec<u8>,
     },
+    /// 协议 2 摸牌 — 摸牌方收齐 + combine 后广播"我占有 deck[i]"以更新各方
+    /// HandState (协议 4-7 require deck_index in drawn before discard/meld).
+    /// 不含 plaintext (零信任安全): 只有摸牌方知 plaintext.
+    DrawAnnouncement { player: u32, deck_index: u32 },
     /// 协议 3 公开揭示 — 4 方都广播.
     RevealShare {
         ct: Vec<u8>,
