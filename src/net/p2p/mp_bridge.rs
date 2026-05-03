@@ -165,11 +165,12 @@ impl MpTransport for MockTransport {
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)]
 mod tests {
     use super::*;
     use crate::net::mp::MpPhase;
-    use crate::net::mp::actor::{MpConfig, spawn_mp_player};
-    use crate::net::mp::cmd::MpEvent;
+    use crate::net::mp::actor::{MpConfig, MpPlayerHandle, spawn_mp_player};
+    use crate::net::mp::cmd::{MpEvent, MpRoomCmd};
     use std::time::Duration;
 
     fn test_cfg(own: usize) -> MpConfig {
@@ -187,28 +188,46 @@ mod tests {
         }
     }
 
-    /// 4 actor 通过 mp_bridge + MockTransport 互连, 跑通 keygen + 联合洗牌.
-    /// 验证 bridge 的抽象不破坏协议正确性 — 跟 actor.rs 内 inline mpsc 桥接
-    /// 走相同 outcome.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn four_actors_via_mp_bridge_keygen_and_shuffle() {
-        const N: usize = 4;
-
-        // 1. 创建 4 个 inbound channel
+    /// 启动 N 个 actor + N 个 bridge 用 MockTransport 互连. 返回:
+    /// - handles: actor handle (持有保活)
+    /// - cmd_txs: 给 caller 发 MpRoomCmd 用 (TriggerDraw / Discard / etc.)
+    /// - test_event_rxs: 测试侧 event 流 (跟 bridge 各拿一份)
+    /// - bridges: bridge handle (持有保活)
+    #[allow(clippy::type_complexity)]
+    fn spawn_n_actors_with_bridges(
+        n: usize,
+        seed_base: u64,
+    ) -> (
+        Vec<MpPlayerHandle>,
+        Vec<UnboundedSender<MpRoomCmd>>,
+        Vec<UnboundedReceiver<MpEvent>>,
+        Vec<MpBridgeHandle>,
+    ) {
         let mut inbound_pairs: Vec<(MpInbound, UnboundedReceiver<MpInboundMsg>)> =
-            (0..N).map(|_| new_inbound_channel()).collect();
+            (0..n).map(|_| new_inbound_channel()).collect();
         let inbounds: Vec<MpInbound> = inbound_pairs.iter().map(|(i, _)| i.clone()).collect();
 
-        // 2. spawn 4 actor + 4 bridge
-        let mut handles = Vec::with_capacity(N);
-        let mut event_rxs_for_assert = Vec::with_capacity(N);
-        let mut bridges = Vec::with_capacity(N);
-        for i in 0..N {
-            let mut player = spawn_mp_player(test_cfg(i), Some((i + 7000) as u64));
-            let cmd_tx = player.cmd_tx.clone();
+        let mut handles = Vec::with_capacity(n);
+        let mut cmd_txs = Vec::with_capacity(n);
+        let mut event_rxs_for_assert = Vec::with_capacity(n);
+        let mut bridges = Vec::with_capacity(n);
+        let mut cfg = test_cfg(0);
+        cfg.deck_size = 36; // 大一点 deck 让多步流程 deck_index 0..30 都有效
+        let mut cfg_template = cfg;
+        for i in 0..n {
+            cfg_template.own_index = i;
+            let cfg_i = MpConfig {
+                own_index: i,
+                all_peer_ids: cfg_template.all_peer_ids.clone(),
+                session_label: cfg_template.session_label.clone(),
+                deck_size: cfg_template.deck_size,
+                cnc_k_rounds: cfg_template.cnc_k_rounds,
+            };
+            let mut player = spawn_mp_player(cfg_i, Some(seed_base + i as u64));
+            cmd_txs.push(player.cmd_tx.clone());
             let event_rx = player.take_event_rx().unwrap();
 
-            // 用 fan-out: 拿一个 mpsc 把 actor event 拷一份给测试 + 一份给 bridge.
+            // fan-out: actor event → bridge_event_rx + test_event_rx
             let (bridge_event_tx, bridge_event_rx) = unbounded_channel::<MpEvent>();
             let (test_event_tx, test_event_rx) = unbounded_channel::<MpEvent>();
             tokio::spawn(async move {
@@ -222,37 +241,276 @@ mod tests {
 
             let transport = MockTransport::new(i, inbounds.clone());
             let inbound_rx = inbound_pairs.remove(0).1;
-            let bridge = spawn_mp_bridge(transport, bridge_event_rx, cmd_tx, inbound_rx);
+            let bridge = spawn_mp_bridge(
+                transport,
+                bridge_event_rx,
+                player.cmd_tx.clone(),
+                inbound_rx,
+            );
 
-            // 保留 player handle 让 actor 不退出 (drop = shutdown)
             handles.push(player);
             bridges.push(bridge);
         }
+        (handles, cmd_txs, event_rxs_for_assert, bridges)
+    }
 
-        // 3. 收集每方 phase, 等到 all in Playing
-        let mut phases = [MpPhase::KeyExchange; N];
-        let timeout = tokio::time::timeout(Duration::from_secs(40), async {
-            loop {
-                for (i, rx) in event_rxs_for_assert.iter_mut().enumerate() {
-                    while let Ok(ev) = rx.try_recv() {
-                        if let MpEvent::PhaseChanged { phase } = ev {
-                            phases[i] = phase;
-                        }
+    /// 推动 e2e 直到 cond 返回 true 或 max_steps 用完. drain 各 actor 的 event,
+    /// 累积进 events_out 给 cond 判断.
+    async fn drive_until<F>(
+        rxs: &mut [UnboundedReceiver<MpEvent>],
+        max_steps: usize,
+        events_out: &mut Vec<(usize, MpEvent)>,
+        mut cond: F,
+    ) -> bool
+    where
+        F: FnMut(&[(usize, MpEvent)]) -> bool,
+    {
+        let n = rxs.len();
+        for _step in 0..max_steps {
+            let mut any = false;
+            for src in 0..n {
+                while let Ok(ev) = rxs[src].try_recv() {
+                    any = true;
+                    if let MpEvent::ProtocolError { offender, reason } = &ev {
+                        panic!("actor {src} ProtocolError offender={offender:?}: {reason}");
                     }
+                    events_out.push((src, ev));
                 }
-                if phases.iter().all(|p| *p == MpPhase::Playing) {
-                    return true;
-                }
+            }
+            if cond(events_out) {
+                return true;
+            }
+            if !any {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
+        }
+        false
+    }
+
+    /// 4 actor 通过 mp_bridge + MockTransport 互连, 跑通 keygen + 联合洗牌.
+    /// 验证 bridge 的抽象不破坏协议正确性 — 4 actor 通过 mp_bridge + MockTransport
+    /// 互连, 跑通 keygen + 联合洗牌.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn four_actors_via_mp_bridge_keygen_and_shuffle() {
+        const N: usize = 4;
+        let (handles, _cmd_txs, mut rxs, bridges) = spawn_n_actors_with_bridges(N, 7000);
+
+        let mut events: Vec<(usize, MpEvent)> = Vec::new();
+        let ok = drive_until(&mut rxs, 800, &mut events, |evs| {
+            let mut phase = [MpPhase::KeyExchange; N];
+            for (src, ev) in evs {
+                if let MpEvent::PhaseChanged { phase: p } = ev {
+                    phase[*src] = *p;
+                }
+            }
+            phase.iter().all(|p| *p == MpPhase::Playing)
+        })
+        .await;
+        assert!(ok, "4 actor 通过 mp_bridge 应全 transition 到 Playing");
+
+        drop(bridges);
+        drop(handles);
+    }
+
+    /// **M5 in-memory mock e2e**: 4 actor 通过 mp_bridge + MockTransport 互连,
+    /// 跑通完整一手 (协议 0+1+2+3+4+5+7). 验证整个 wiring 链条 work:
+    ///   actor → MpEvent::OutboundMsg → bridge → MockTransport
+    ///   → 对端 MpInbound → MpRoomCmd::PeerMsg → actor
+    /// 跟 actor.rs::protocol_full_hand_e2e 跑相同流程, 但走 bridge 抽象.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn full_hand_e2e_via_mp_bridge() {
+        const N: usize = 4;
+        let (handles, cmd_txs, mut rxs, bridges) = spawn_n_actors_with_bridges(N, 8000);
+
+        // Step 1: 跑到 all in Playing
+        let mut events: Vec<(usize, MpEvent)> = Vec::new();
+        let entered_playing = drive_until(&mut rxs, 1000, &mut events, |evs| {
+            let mut phase = [MpPhase::KeyExchange; N];
+            for (src, ev) in evs {
+                if let MpEvent::PhaseChanged { phase: p } = ev {
+                    phase[*src] = *p;
+                }
+            }
+            phase.iter().all(|p| *p == MpPhase::Playing)
+        })
+        .await;
+        assert!(entered_playing, "4 actor 应全 transition 到 Playing");
+
+        // Step 2: actor 0 摸 deck[0], deck[1] (准备 Pon 的 2 张)
+        events.clear();
+        cmd_txs[0]
+            .send(MpRoomCmd::TriggerDraw { deck_index: 0 })
+            .unwrap();
+        let drew_0 = drive_until(&mut rxs, 600, &mut events, |evs| {
+            evs.iter()
+                .any(|(s, e)| *s == 0 && matches!(e, MpEvent::DrawComplete { deck_index: 0, .. }))
+        })
+        .await;
+        assert!(drew_0, "actor 0 应完成摸 deck[0]");
+
+        events.clear();
+        cmd_txs[0]
+            .send(MpRoomCmd::TriggerDraw { deck_index: 1 })
+            .unwrap();
+        let drew_1 = drive_until(&mut rxs, 600, &mut events, |evs| {
+            evs.iter()
+                .any(|(s, e)| *s == 0 && matches!(e, MpEvent::DrawComplete { deck_index: 1, .. }))
+        })
+        .await;
+        assert!(drew_1, "actor 0 应完成摸 deck[1]");
+
+        // Step 3: actor 1 摸 deck[2] → 弃 deck[2]
+        events.clear();
+        cmd_txs[1]
+            .send(MpRoomCmd::TriggerDraw { deck_index: 2 })
+            .unwrap();
+        let drew_2 = drive_until(&mut rxs, 600, &mut events, |evs| {
+            evs.iter()
+                .any(|(s, e)| *s == 1 && matches!(e, MpEvent::DrawComplete { deck_index: 2, .. }))
+        })
+        .await;
+        assert!(drew_2, "actor 1 应完成摸 deck[2]");
+
+        events.clear();
+        cmd_txs[1]
+            .send(MpRoomCmd::Discard { deck_index: 2 })
+            .unwrap();
+        let discard_2_done = drive_until(&mut rxs, 400, &mut events, |evs| {
+            evs.iter()
+                .filter(|(_, e)| {
+                    matches!(
+                        e,
+                        MpEvent::DiscardApplied {
+                            player: 1,
+                            deck_index: 2,
+                            ..
+                        }
+                    )
+                })
+                .count()
+                == N
         })
         .await;
         assert!(
-            timeout.is_ok() && timeout.unwrap(),
-            "4 actor 通过 mp_bridge 应全 transition 到 Playing, 实际 {phases:?}"
+            discard_2_done,
+            "4 actor 应都收 DiscardApplied(player=1, deck=2)"
         );
 
-        // 4. cleanup
+        // Step 4: actor 0 Pon [0,1,2] from=1
+        events.clear();
+        cmd_txs[0]
+            .send(MpRoomCmd::Call {
+                call_type: crate::mental_poker::wire::WireCallType::Pon,
+                deck_indices: vec![0, 1, 2],
+                from_player: 1,
+                from_position_in_meld: 2,
+            })
+            .unwrap();
+        let pon_done = drive_until(&mut rxs, 400, &mut events, |evs| {
+            evs.iter()
+                .filter(|(_, e)| {
+                    matches!(
+                        e,
+                        MpEvent::CallApplied {
+                            player: 0,
+                            from_player: 1,
+                            ..
+                        }
+                    )
+                })
+                .count()
+                == N
+        })
+        .await;
+        assert!(pon_done, "4 actor 应都收 CallApplied(player=0, from=1)");
+
+        // Step 5: actor 0 揭示 deck[15] (dora indicator), 4 actor 收同 tile_id
+        events.clear();
+        cmd_txs[0]
+            .send(MpRoomCmd::TriggerReveal { deck_index: 15 })
+            .unwrap();
+        let reveal_done = drive_until(&mut rxs, 800, &mut events, |evs| {
+            evs.iter()
+                .filter(|(_, e)| matches!(e, MpEvent::RevealComplete { deck_index: 15, .. }))
+                .count()
+                == N
+        })
+        .await;
+        assert!(reveal_done, "4 actor 应都收 RevealComplete(deck=15)");
+        let reveal_tids: Vec<usize> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                MpEvent::RevealComplete {
+                    deck_index: 15,
+                    tile_id,
+                } => Some(*tile_id),
+                _ => None,
+            })
+            .collect();
+        let dora_tid = reveal_tids[0];
+        for tid in &reveal_tids {
+            assert_eq!(*tid, dora_tid, "4 actor 看到的 dora tile_id 应一致");
+        }
+
+        // Step 6: actor 0 摸 deck[3,4,5]
+        for idx in [3u32, 4, 5] {
+            events.clear();
+            cmd_txs[0]
+                .send(MpRoomCmd::TriggerDraw { deck_index: idx })
+                .unwrap();
+            let ok = drive_until(&mut rxs, 600, &mut events, |evs| {
+                evs.iter().any(|(s, e)| {
+                    *s == 0
+                        && matches!(e, MpEvent::DrawComplete { deck_index: di, .. } if *di == idx)
+                })
+            })
+            .await;
+            assert!(ok, "actor 0 应完成摸 deck[{idx}]");
+        }
+
+        // Step 7: actor 0 Tsumo, hand=[3,4,5], winning=5
+        events.clear();
+        cmd_txs[0]
+            .send(MpRoomCmd::Tsumo {
+                hand_indices: vec![3, 4, 5],
+                winning_tile_index: 5,
+            })
+            .unwrap();
+        let win_done = drive_until(&mut rxs, 400, &mut events, |evs| {
+            evs.iter()
+                .filter(|(_, e)| {
+                    matches!(
+                        e,
+                        MpEvent::WinValidated {
+                            player: 0,
+                            is_tsumo: true,
+                            ..
+                        }
+                    )
+                })
+                .count()
+                == N
+        })
+        .await;
+        assert!(win_done, "4 actor 应都收 WinValidated(player=0, tsumo)");
+
+        // 各 actor 进 GameOver
+        let game_over_count = events
+            .iter()
+            .filter(|(_, e)| {
+                matches!(
+                    e,
+                    MpEvent::PhaseChanged {
+                        phase: MpPhase::GameOver
+                    }
+                )
+            })
+            .count();
+        assert!(
+            game_over_count >= N,
+            "至少 {N} 个 PhaseChanged(GameOver), 实际 {game_over_count}"
+        );
+
         drop(bridges);
         drop(handles);
     }
