@@ -57,6 +57,18 @@ pub struct UiTable {
     pub dora_indicators: Vec<usize>,
     /// 最后一次弃牌 (player, deck_index, tile_id) — Ron 触发用. None = 还没人弃过.
     pub last_discard: Option<(u32, u32, usize)>,
+    /// 最后一次和牌信息 (M5.F.2). GameOver 屏渲染用.
+    pub last_win: Option<WinSummary>,
+}
+
+/// 协议 7 和牌结果 (UI 渲染用).
+#[derive(Debug, Clone)]
+pub struct WinSummary {
+    pub player: u32,
+    pub is_tsumo: bool,
+    pub from_player: Option<u32>,
+    pub winning_tile_index: u32,
+    pub hand_tile_ids: Vec<usize>,
 }
 
 pub struct ZeroTrustGameState {
@@ -333,8 +345,19 @@ impl ZeroTrustGameState {
                     .push(format!("Player {player} concealed kan"));
             }
             MpEvent::WinValidated {
-                player, is_tsumo, ..
+                player,
+                is_tsumo,
+                from_player,
+                winning_tile_index,
+                hand_tile_ids,
             } => {
+                self.ui_table.last_win = Some(WinSummary {
+                    player,
+                    is_tsumo,
+                    from_player,
+                    winning_tile_index,
+                    hand_tile_ids: hand_tile_ids.clone(),
+                });
                 self.event_log.push(format!(
                     "Player {player} won ({})",
                     if is_tsumo { "Tsumo" } else { "Ron" }
@@ -502,20 +525,15 @@ impl ZeroTrustGameState {
 
     /// 协议 7 验证后赢家 + 是否自摸. None 表示尚未 win.
     pub fn winner(&self) -> Option<(u32, bool)> {
-        if self.phase != MpPhase::GameOver {
-            return None;
-        }
-        // 从 event_log 反查最后一条 "Player {p} won (Tsumo|Ron)"
-        for line in self.event_log.iter().rev() {
-            if let Some(rest) = line.strip_prefix("Player ")
-                && let Some((player_str, tail)) = rest.split_once(" won (")
-                && let Ok(player) = player_str.parse::<u32>()
-            {
-                let is_tsumo = tail.starts_with("Tsumo");
-                return Some((player, is_tsumo));
-            }
-        }
-        None
+        self.ui_table
+            .last_win
+            .as_ref()
+            .map(|w| (w.player, w.is_tsumo))
+    }
+
+    /// 完整赢家信息 (含 hand tile_ids). 给 GameOver 屏渲染用.
+    pub fn win_summary(&self) -> Option<&WinSummary> {
+        self.ui_table.last_win.as_ref()
     }
 
     pub fn cursor_left(&mut self) {
@@ -740,21 +758,79 @@ impl ZeroTrustGameState {
             );
         f.render_widget(hand, chunks[3]);
 
-        // 事件日志
-        let log_lines: Vec<Line> = self
-            .event_log
-            .iter()
-            .rev()
-            .take(20)
-            .rev()
-            .map(|s| Line::from(s.as_str()))
-            .collect();
+        // 事件日志 / 赢家详情 (GameOver 时切换)
+        let (log_block_title, log_lines): (&str, Vec<Line>) = if self.phase == MpPhase::GameOver
+            && let Some(win) = self.win_summary()
+        {
+            let win_type = if win.is_tsumo {
+                "自摸 (Tsumo)".to_string()
+            } else {
+                format!("荣和 (Ron) from player {}", win.from_player.unwrap_or(0))
+            };
+            let hand_str: Vec<String> = win
+                .hand_tile_ids
+                .iter()
+                .map(|&t| tile_label(t, self.args.deck_size))
+                .collect();
+            let winning_label = win
+                .hand_tile_ids
+                .iter()
+                .position(|_| false) // placeholder, we use winning_tile_index 而非 tile_id 反查
+                .map(|_| String::new())
+                .unwrap_or_default();
+            let _ = winning_label;
+            let dora_str: Vec<String> = self
+                .ui_table
+                .dora_indicators
+                .iter()
+                .map(|&t| tile_label(t, self.args.deck_size))
+                .collect();
+            (
+                "和牌详情",
+                vec![
+                    Line::from(vec![Span::styled(
+                        format!("★ player {} {}", win.player, win_type),
+                        Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
+                    )]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw("和牌型: "),
+                        Span::styled(hand_str.join(" "), Style::default().fg(theme.accent)),
+                    ]),
+                    Line::from(format!(
+                        "winning_tile_deck_index = {}",
+                        win.winning_tile_index
+                    )),
+                    Line::from(if dora_str.is_empty() {
+                        "宝牌指示: (无)".to_string()
+                    } else {
+                        format!("宝牌指示: {}", dora_str.join(" "))
+                    }),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "(算分留 application 层接 yaku.rs, 当前仅显示协议层 ownership 验证通过)",
+                        Style::default().fg(theme.dim),
+                    )),
+                ],
+            )
+        } else {
+            (
+                "事件日志",
+                self.event_log
+                    .iter()
+                    .rev()
+                    .take(20)
+                    .rev()
+                    .map(|s| Line::from(s.as_str()))
+                    .collect(),
+            )
+        };
         let log = Paragraph::new(log_lines)
             .style(Style::default().fg(theme.fg).bg(theme.bg))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("事件日志")
+                    .title(log_block_title)
                     .style(Style::default().bg(theme.bg)),
             );
         f.render_widget(log, chunks[4]);
@@ -2254,5 +2330,43 @@ mod tests {
     fn tile_label_t_for_test_deck() {
         assert_eq!(tile_label(0, 16), "t0");
         assert_eq!(tile_label(7, 16), "t7");
+    }
+
+    /// **M5.F.2 win_summary 单测**: WinValidated event 应累积到 ui_table.last_win,
+    /// win_summary() 返回 含 hand_tile_ids.
+    #[test]
+    fn win_summary_captures_hand_tile_ids() {
+        use crate::net::session::NetSession;
+        use tokio::sync::mpsc::unbounded_channel;
+        use uuid::Uuid;
+
+        let (out_tx, _out_rx) = unbounded_channel::<crate::net::protocol::ClientMsg>();
+        let (_in_tx, in_rx) = unbounded_channel::<crate::net::protocol::ServerMsg>();
+        let session = NetSession::from_channels(0, Uuid::new_v4(), out_tx, in_rx);
+        // 不带 mp 边带 → spawn actor 失败, 但 advance() / apply_event 可独立测.
+        let args = MpStartArgs {
+            all_peer_ids: vec![vec![1; 32], vec![2; 32], vec![3; 32], vec![4; 32]],
+            own_index: 0,
+            session_label: vec![0xAB; 32],
+            deck_size: 16,
+            cnc_k_rounds: 8,
+        };
+        let mut state = ZeroTrustGameState::new(session, args);
+        // 模拟 actor emit WinValidated
+        state.apply_event(MpEvent::WinValidated {
+            player: 2,
+            is_tsumo: false,
+            from_player: Some(1),
+            winning_tile_index: 7,
+            hand_tile_ids: vec![3, 5, 7, 9, 11],
+        });
+        let win = state.win_summary().expect("win_summary 应有值");
+        assert_eq!(win.player, 2);
+        assert!(!win.is_tsumo);
+        assert_eq!(win.from_player, Some(1));
+        assert_eq!(win.winning_tile_index, 7);
+        assert_eq!(win.hand_tile_ids, vec![3, 5, 7, 9, 11]);
+        // winner() 反查也通过
+        assert_eq!(state.winner(), Some((2, false)));
     }
 }
