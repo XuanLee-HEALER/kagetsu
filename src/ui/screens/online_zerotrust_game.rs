@@ -2060,6 +2060,186 @@ mod tests {
         );
     }
 
+    /// **M5.F.1 4 玩家轮流摸打 e2e**: 4 screen 跑到 Playing → 玩家 0/1/2/3
+    /// 轮流 (摸 1 张 + 弃) 1 回合 → 验证 4 screen 视角一致:
+    /// - 各家 discarded_pools 长度 = 1
+    /// - 4 screen 看到 player[i] 的弃牌 tile_id 一致 (gossipsub 全广播)
+    /// - 4 screen 的 next_deck_index >= 4 (每玩家摸 1 张 = 4 张)
+    ///
+    /// 这个测试比单步操作更全面, 验证长流程下 wire-up 稳定 (RemoteDrawObserved /
+    /// DiscardApplied 在多玩家交替推进时正确累积).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn zerotrust_4_players_rotate_draw_discard_one_round() {
+        use crate::mental_poker::wire::MentalPokerMsg;
+        use crate::net::p2p::mp_swarm::SwarmCommand;
+        use crate::net::session::NetSession;
+        use libp2p::PeerId;
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tokio::sync::mpsc::unbounded_channel;
+        use uuid::Uuid;
+
+        const N: usize = 4;
+        fn fake_peer_id(seed: u8) -> PeerId {
+            let mut bytes = [0u8; 32];
+            bytes[0] = seed;
+            let kp = libp2p::identity::Keypair::ed25519_from_bytes(bytes).expect("kp");
+            PeerId::from(&kp.public())
+        }
+        let peer_ids: Vec<PeerId> = (0..N as u8).map(fake_peer_id).collect();
+        let peer_to_idx: HashMap<PeerId, usize> =
+            peer_ids.iter().enumerate().map(|(i, p)| (*p, i)).collect();
+
+        let mut session_inbound_txs: Vec<
+            tokio::sync::mpsc::UnboundedSender<(PeerId, MentalPokerMsg)>,
+        > = Vec::with_capacity(N);
+        let mut cmd_rxs = Vec::with_capacity(N);
+        let mut sessions = Vec::with_capacity(N);
+        for i in 0..N {
+            let (out_tx, _out_rx) = unbounded_channel::<crate::net::protocol::ClientMsg>();
+            let (_in_tx, in_rx) = unbounded_channel::<crate::net::protocol::ServerMsg>();
+            let (mp_cmd_tx, mp_cmd_rx) = unbounded_channel::<SwarmCommand>();
+            let (mp_in_tx, mp_in_rx) = unbounded_channel::<(PeerId, MentalPokerMsg)>();
+            let session = NetSession::from_channels(i as u32, Uuid::new_v4(), out_tx, in_rx)
+                .with_mp_handles(mp_cmd_tx, mp_in_rx);
+            sessions.push(session);
+            cmd_rxs.push(mp_cmd_rx);
+            session_inbound_txs.push(mp_in_tx);
+        }
+
+        let session_label = vec![0xF1u8; 32];
+        let mut screens = Vec::with_capacity(N);
+        for (i, sess) in sessions.into_iter().enumerate() {
+            let args = MpStartArgs {
+                all_peer_ids: peer_ids.iter().map(|p| p.to_bytes()).collect(),
+                own_index: i as u32,
+                session_label: session_label.clone(),
+                deck_size: 16,
+                cnc_k_rounds: 8,
+            };
+            screens.push(ZeroTrustGameState::new(sess, args));
+        }
+
+        for i in 0..N {
+            let mut cmd_rx = cmd_rxs.remove(0);
+            let inbound_txs = session_inbound_txs.clone();
+            let peer_to_idx_clone = peer_to_idx.clone();
+            let peer_ids_clone = peer_ids.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = cmd_rx.recv().await {
+                    match cmd {
+                        SwarmCommand::Broadcast { topic: _, msg } => {
+                            for (idx, tx) in inbound_txs.iter().enumerate() {
+                                if idx == i {
+                                    continue;
+                                }
+                                let _ = tx.send((peer_ids_clone[i], msg.clone()));
+                            }
+                        }
+                        SwarmCommand::Unicast { target, msg } => {
+                            if let Some(&t_idx) = peer_to_idx_clone.get(&target) {
+                                let _ = inbound_txs[t_idx].send((peer_ids_clone[i], msg));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Step 1: all in Playing
+        let _ = tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens.iter().all(|s| s.phase == MpPhase::Playing) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(screens.iter().all(|s| s.phase == MpPhase::Playing));
+
+        // Step 2: 4 玩家轮流摸 + 弃
+        for player in 0..N {
+            // 摸: 等本玩家 own_drawn 长度从 0 → 1
+            screens[player].trigger_draw_next();
+            let _ = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    for s in &mut screens {
+                        let _ = s.advance();
+                    }
+                    if screens[player].ui_table.own_drawn_in_hand.len() == 1 {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            assert_eq!(
+                screens[player].ui_table.own_drawn_in_hand.len(),
+                1,
+                "player {player} 应摸到 1 张"
+            );
+
+            // 弃: 等所有 4 screen 的 discarded_pools[player] 长度增加到 player+1 的位置
+            // (轮到 player 弃的第 player+1 次 discard).
+            screens[player].discard_cursor();
+            let expected_count_after = player + 1;
+            let _ = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    for s in &mut screens {
+                        let _ = s.advance();
+                    }
+                    if screens
+                        .iter()
+                        .all(|s| s.ui_table.discarded_pools[player].len() == 1)
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            for (vi, s) in screens.iter().enumerate() {
+                assert_eq!(
+                    s.ui_table.discarded_pools[player].len(),
+                    1,
+                    "screen {vi} 应看到 player {player} 弃 1 张"
+                );
+            }
+            // 自家手牌应回 0
+            assert_eq!(
+                screens[player].ui_table.own_drawn_in_hand.len(),
+                0,
+                "player {player} 弃后应回 0 张"
+            );
+            let _ = expected_count_after;
+        }
+
+        // Step 3: 验证各 screen 的 4 家 discarded_pools 顺序一致
+        // (gossipsub 全广播 → 4 玩家看到同 tile_id)
+        let reference: Vec<Vec<usize>> = screens[0].ui_table.discarded_pools.to_vec();
+        for (vi, s) in screens.iter().enumerate() {
+            for (player, ref_pool) in reference.iter().enumerate() {
+                assert_eq!(
+                    &s.ui_table.discarded_pools[player], ref_pool,
+                    "screen {vi} player {player} discarded_pools 跟 screen[0] 不一致"
+                );
+            }
+        }
+
+        // Step 4: 验证 next_deck_index >= 4 (4 玩家各摸 1 张)
+        for (vi, s) in screens.iter().enumerate() {
+            assert!(
+                s.next_deck_index >= 4,
+                "screen {vi} next_deck_index={} 应 >= 4",
+                s.next_deck_index
+            );
+        }
+    }
+
     #[test]
     fn tile_label_mahjong_for_full_deck() {
         assert_eq!(tile_label(0, 136), "1m");
