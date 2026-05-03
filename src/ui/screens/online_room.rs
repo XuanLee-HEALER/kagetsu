@@ -63,12 +63,33 @@ impl OnlineRoomState {
             }
             ServerMsg::RoomUpdate(view) => {
                 self.room_view = *view;
-                if self.room_view.state == RoomLifecycle::InGame {
+                // ZeroTrust 模式 InGame 状态等 MpStart 路由 (不走 Standard).
+                if self.room_view.state == RoomLifecycle::InGame
+                    && self.room_view.mode == crate::net::p2p::RoomMode::Standard
+                {
                     return Some(Transition::EnterOnlineGame);
                 }
             }
             ServerMsg::GameStateView(_) => {
                 return Some(Transition::EnterOnlineGame);
+            }
+            ServerMsg::MpStart {
+                all_peer_ids,
+                own_index,
+                session_label,
+                deck_size,
+                cnc_k_rounds,
+            } => {
+                let args = crate::ui::screens::online_zerotrust_game::MpStartArgs {
+                    all_peer_ids,
+                    own_index,
+                    session_label,
+                    deck_size,
+                    cnc_k_rounds,
+                };
+                return Some(Transition::EnterZeroTrustGame {
+                    args: Box::new(args),
+                });
             }
             ServerMsg::Error { message } => {
                 self.message = message;

@@ -95,6 +95,10 @@ pub enum Transition {
     },
     /// 房间内 server 推送 GameStateView/InGame, 切到 OnlineGame.
     EnterOnlineGame,
+    /// ZeroTrust 模式: 房间收到 ServerMsg::MpStart 时切到 ZeroTrustGame 屏.
+    EnterZeroTrustGame {
+        args: Box<crate::ui::screens::online_zerotrust_game::MpStartArgs>,
+    },
     /// 屏请求弹一个 ConfirmModal. App 拦下来 stash, Yes 时执行 ConfirmAction.
     RequestConfirm {
         modal: Box<ConfirmModal>,
@@ -126,6 +130,8 @@ pub enum Screen {
     OnlineLobby(OnlineLobbyState),
     OnlineRoom(Box<OnlineRoomState>),
     OnlineGame(Box<OnlineGameState>),
+    /// ZeroTrust 模式游戏屏 (M5.B.9 scaffold). 房间收到 MpStart 后切到此屏.
+    ZeroTrustGame(Box<crate::ui::screens::online_zerotrust_game::ZeroTrustGameState>),
 }
 
 pub struct App {
@@ -243,6 +249,7 @@ impl App {
             Screen::OnlineLobby(s) => s.advance(),
             Screen::OnlineRoom(s) => s.advance(),
             Screen::OnlineGame(s) => s.advance(),
+            Screen::ZeroTrustGame(s) => s.advance(),
             _ => None,
         };
         if let Some(t) = transition {
@@ -299,6 +306,7 @@ impl App {
                 Screen::OnlineLobby(s) => s.handle_event(key),
                 Screen::OnlineRoom(s) => s.handle_event(key),
                 Screen::OnlineGame(s) => s.handle_event(key),
+                Screen::ZeroTrustGame(s) => s.handle_event(key),
             };
         }
         // 派发到屏.
@@ -310,6 +318,7 @@ impl App {
             Screen::OnlineLobby(s) => s.handle_event(key),
             Screen::OnlineRoom(s) => s.handle_event(key),
             Screen::OnlineGame(s) => s.handle_event(key),
+            Screen::ZeroTrustGame(s) => s.handle_event(key),
         }
     }
 
@@ -327,6 +336,8 @@ impl App {
             }
             ConfirmAction::LeaveOnlineGame => {
                 if let Screen::OnlineGame(s) = &mut self.screen {
+                    s.session.send(crate::net::protocol::ClientMsg::Leave);
+                } else if let Screen::ZeroTrustGame(s) = &mut self.screen {
                     s.session.send(crate::net::protocol::ClientMsg::Leave);
                 }
                 Transition::EnterMainMenu
@@ -353,6 +364,7 @@ impl App {
             Screen::InGame(s) => s.set_theme(next),
             Screen::OnlineRoom(s) => s.set_theme(next),
             Screen::OnlineGame(s) => s.theme_kind = next,
+            Screen::ZeroTrustGame(s) => s.set_theme(next),
             _ => {}
         }
     }
@@ -408,6 +420,9 @@ impl App {
             }
             Transition::EnterOnlineGame => {
                 self.transition_room_to_game();
+            }
+            Transition::EnterZeroTrustGame { args } => {
+                self.transition_room_to_zerotrust_game(*args);
             }
             Transition::RequestConfirm { modal, action } => {
                 self.pending_confirm = Some((*modal, action));
@@ -563,6 +578,23 @@ impl App {
         }
     }
 
+    /// M5.B.9: ZeroTrust MpStart 触发 → 把 OnlineRoom 切到 ZeroTrustGame.
+    /// 复用 NetSession (UI 仍可发非游戏消息 e.g. Leave). args 含协议层全部
+    /// 启动参数 (协议层 actor 真实 spawn 留 M5.C swarm 集成时做).
+    fn transition_room_to_zerotrust_game(
+        &mut self,
+        args: crate::ui::screens::online_zerotrust_game::MpStartArgs,
+    ) {
+        let prev = std::mem::replace(&mut self.screen, Screen::MainMenu(MainMenuState::new()));
+        if let Screen::OnlineRoom(state) = prev {
+            let s = *state;
+            let mut zt =
+                crate::ui::screens::online_zerotrust_game::ZeroTrustGameState::new(s.session, args);
+            zt.set_theme(self.local_prefs.theme);
+            self.screen = Screen::ZeroTrustGame(Box::new(zt));
+        }
+    }
+
     fn render(&self, f: &mut ratatui::Frame) {
         let area = f.area();
         const MIN_W: u16 = 144;
@@ -632,6 +664,7 @@ impl App {
                 self.host_dial_addr.as_ref(),
             ),
             Screen::OnlineGame(s) => s.render(f, area),
+            Screen::ZeroTrustGame(s) => s.render(f, area),
         }
     }
 

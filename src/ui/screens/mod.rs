@@ -7,3 +7,4 @@ pub mod main_menu;
 pub mod online_game;
 pub mod online_lobby;
 pub mod online_room;
+pub mod online_zerotrust_game;
