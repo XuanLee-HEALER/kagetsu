@@ -145,6 +145,13 @@ pub async fn spawn_p2p_listener(
     let (mp_command_tx, mp_command_rx) = mpsc::unbounded_channel::<SwarmCommand>();
     let (mp_inbound_tx, mp_inbound_rx) = mpsc::unbounded_channel::<(PeerId, MentalPokerMsg)>();
 
+    // M5.D.2: 通知 RoomActor 房主自己的 libp2p PeerId, ZeroTrust 模式开局时填
+    // MpStart.all_peer_ids 用. host slot 已 join 时立即关联 (handle_cmd 内处理),
+    // 否则等 host 调 spawn_local_session 加入后再关联.
+    let _ = handle.tx.send(RoomCmd::SetLocalPeerId {
+        peer_id_bytes: local_peer_id.to_bytes(),
+    });
+
     tokio::spawn(host_swarm_task(
         swarm,
         handle,
@@ -698,6 +705,13 @@ async fn process_pending_join(
             player_id: join.player_id,
         },
     );
+
+    // M5.D.2: 关联加入者 player_id ↔ libp2p PeerId, ZeroTrust 模式 start 时
+    // 拼 MpStart.all_peer_ids 用.
+    let _ = room_handle.tx.send(RoomCmd::AssociatePeer {
+        player_id: join.player_id,
+        peer_id_bytes: peer.to_bytes(),
+    });
 
     // 起 forwarding task: s2c_rx → outbox.
     let outbox_tx_clone = outbox_tx.clone();

@@ -131,6 +131,15 @@ pub enum RoomCmd {
     /// 鸣牌窗口超时 (内部 timer 触发).
     /// `expected_round`/`expected_kyoku` 防止过期 timer 影响后续局.
     CallTimeout { generation: u64 },
+    /// M5.D.2: 设置房主自己的 libp2p PeerId. spawn_p2p_listener 拿到
+    /// local_peer_id 后调一次, RoomActor 把它关联到 host slot.
+    SetLocalPeerId { peer_id_bytes: Vec<u8> },
+    /// M5.D.2: 关联 player_id 到 libp2p PeerId 字节. host_swarm_task 在
+    /// process_pending_join 完成 ClientMsg::Join 时调一次.
+    AssociatePeer {
+        player_id: u32,
+        peer_id_bytes: Vec<u8>,
+    },
 }
 
 // ============================================================================
@@ -226,6 +235,14 @@ struct RoomActor {
     /// mental poker (M5.B.3+ 集成协议 1/2/3 + 协议 4-7 announcement).
     /// lobby phase 房主可改, 开局后冻结.
     mode: crate::net::p2p::RoomMode,
+    /// M5.D.2: player_id → libp2p PeerId 字节的反查表. host_swarm_task 在
+    /// 玩家 Join 完成时调 AssociatePeer 注入; spawn_p2p_listener 启动后调
+    /// SetLocalPeerId 注入 host 自己的. ZeroTrust 模式 start_zerotrust_game
+    /// 用此表填 MpStart.all_peer_ids.
+    player_peers: HashMap<u32, Vec<u8>>,
+    /// M5.D.2: 暂存的 host local_peer_id. SetLocalPeerId 时存这, 一旦 host
+    /// slot 加入就关联到 player_peers; 反之 host 已 Join 时直接覆盖.
+    pending_host_peer_id: Option<Vec<u8>>,
 }
 
 impl RoomActor {
@@ -256,6 +273,8 @@ impl RoomActor {
             call_window_ms,
             seed_override,
             mode: crate::net::p2p::RoomMode::Standard,
+            player_peers: HashMap::new(),
+            pending_host_peer_id: None,
         }
     }
 
@@ -296,6 +315,19 @@ impl RoomActor {
                 }
                 tracing::debug!("call window timeout, generation={generation}");
                 self.resolve_call_window();
+            }
+            RoomCmd::SetLocalPeerId { peer_id_bytes } => {
+                self.pending_host_peer_id = Some(peer_id_bytes.clone());
+                // 已 join 的 host slot 立刻关联
+                if let Some(host_id) = self.slots.iter().find(|s| s.is_host).map(|s| s.id) {
+                    self.player_peers.insert(host_id, peer_id_bytes);
+                }
+            }
+            RoomCmd::AssociatePeer {
+                player_id,
+                peer_id_bytes,
+            } => {
+                self.player_peers.insert(player_id, peer_id_bytes);
             }
         }
     }
@@ -368,6 +400,11 @@ impl RoomActor {
             sender: Some(sender.clone()),
             reconnect_token: token,
         });
+        // M5.D.2: host slot 若已有 pending_host_peer_id (spawn_p2p_listener 先发的)
+        // 立即关联. 否则等 SetLocalPeerId 后处理.
+        if is_host && let Some(peer_bytes) = self.pending_host_peer_id.clone() {
+            self.player_peers.insert(id, peer_bytes);
+        }
 
         let room = self.room_view();
         let _ = sender.send(ServerMsg::Welcome {
@@ -495,13 +532,26 @@ impl RoomActor {
             slot.seat = Some(seats[i]);
         }
 
-        // 收集 4 玩家的 peer_id (用 reconnect_token 字节作占位; M5.B.8.2 完整集成
-        // 后会用真实 libp2p PeerId, 由 host swarm 在 Join 时记录).
-        let all_peer_ids: Vec<Vec<u8>> = self
-            .slots
-            .iter()
-            .map(|s| s.reconnect_token.as_bytes().to_vec())
-            .collect();
+        // M5.D.2: 用真 libp2p PeerId 字节填 all_peer_ids.
+        // host_swarm_task 在 Join 时通过 RoomCmd::AssociatePeer 注入加入者 PeerId,
+        // spawn_p2p_listener 通过 RoomCmd::SetLocalPeerId 注入 host 自己的.
+        // 任一 slot 缺 PeerId 时拒绝开局, 让 caller (UI) 重试.
+        let mut all_peer_ids: Vec<Vec<u8>> = Vec::with_capacity(self.slots.len());
+        for slot in &self.slots {
+            match self.player_peers.get(&slot.id) {
+                Some(p) => all_peer_ids.push(p.clone()),
+                None => {
+                    self.send_error(
+                        self.slots[0].id,
+                        &format!(
+                            "ZeroTrust: slot {} (id={}) 缺 libp2p PeerId 关联, 等 P2P 层 ready 再开局",
+                            slot.nickname, slot.id
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
 
         // session_label = SHA-256(room_id || sorted_peer_ids) — 4 方独立算应一致.
         let session_label = compute_session_label(&self.room_id, &all_peer_ids);
@@ -1842,6 +1892,18 @@ mod tests {
         let (p1_id, _, mut rx1) = join_player(&handle, "p1").await;
         let (p2_id, _, mut rx2) = join_player(&handle, "p2").await;
         let (_p3_id, _, mut rx3) = join_player(&handle, "p3").await;
+
+        // M5.D.2: 测试模拟 host swarm 注入 PeerId 关联 (生产环境是
+        // spawn_p2p_listener + host_swarm_task.process_pending_join 注入).
+        for (pid, fake_pid_byte) in [(host_id, 0u8), (p1_id, 1), (p2_id, 2), (_p3_id, 3)] {
+            handle
+                .tx
+                .send(RoomCmd::AssociatePeer {
+                    player_id: pid,
+                    peer_id_bytes: vec![fake_pid_byte; 32],
+                })
+                .unwrap();
+        }
 
         // 非房主玩家 ready (host 自动 ready)
         for pid in [p1_id, p2_id, _p3_id] {
