@@ -109,3 +109,107 @@ impl Default for GameRules {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_starting_25000_target_30000() {
+        let r = GameRules::default();
+        assert_eq!(r.starting_score, 25_000);
+        assert_eq!(r.target_score, 30_000);
+    }
+
+    #[test]
+    fn default_uma_zero_sum() {
+        let r = GameRules::default();
+        let sum: i32 = r.uma.iter().sum();
+        assert_eq!(sum, 0, "uma 应零和");
+    }
+
+    #[test]
+    fn default_uma_descending() {
+        let r = GameRules::default();
+        for i in 1..r.uma.len() {
+            assert!(
+                r.uma[i - 1] >= r.uma[i],
+                "uma[{}]={} 应 ≥ uma[{}]={}",
+                i - 1,
+                r.uma[i - 1],
+                i,
+                r.uma[i]
+            );
+        }
+    }
+
+    #[test]
+    fn default_length_hanchan() {
+        assert_eq!(GameRules::default().length, LengthRule::Hanchan);
+    }
+
+    #[test]
+    fn default_kotekisai_off() {
+        let r = GameRules::default();
+        assert!(!r.kotekisai);
+        assert!(!r.kotekisai_renhou);
+        assert!(!r.kotekisai_sanrenkou);
+        assert!(!r.kotekisai_daichisei);
+    }
+
+    #[test]
+    fn default_call_window_in_range() {
+        let r = GameRules::default();
+        assert!(
+            (3..=10).contains(&r.call_window_secs),
+            "call_window {} 应 ∈ [3, 10]",
+            r.call_window_secs
+        );
+    }
+
+    #[test]
+    fn rules_serde_roundtrip() {
+        let r = GameRules::default();
+        let s = serde_json::to_string(&r).unwrap();
+        let back: GameRules = serde_json::from_str(&s).unwrap();
+        assert_eq!(r.starting_score, back.starting_score);
+        assert_eq!(r.uma, back.uma);
+        assert_eq!(r.length, back.length);
+        assert_eq!(r.multi_ron, back.multi_ron);
+    }
+
+    #[test]
+    fn missing_call_window_uses_default() {
+        // 旧 schema 没 call_window_secs 时 #[serde(default)] 给 5
+        let json = r#"{
+            "kuitan": true, "aka_dora": true, "ippatsu": true, "ura_dora": true,
+            "kazoe_yakuman": true, "double_yakuman": true,
+            "multi_ron": "Atamahane", "length": "Hanchan",
+            "west_round": true, "minus_score_end": false,
+            "kotekisai": false,
+            "kotekisai_renhou": false, "kotekisai_sanrenkou": false,
+            "kotekisai_surenkou": false, "kotekisai_daisharin": false,
+            "kotekisai_daichisei": false, "kotekisai_parenchan": false,
+            "kotekisai_shisanputaa": false,
+            "starting_score": 25000, "target_score": 30000,
+            "uma": [15, 5, -5, -15],
+            "thinking_time_secs": 30
+        }"#;
+        let r: GameRules = serde_json::from_str(json).expect("parse legacy schema");
+        assert_eq!(r.call_window_secs, 5, "缺字段时应取 default 5");
+    }
+
+    #[test]
+    fn multi_ron_variants_distinct() {
+        assert_ne!(MultiRonRule::Atamahane, MultiRonRule::DoubleRon);
+        assert_ne!(MultiRonRule::DoubleRon, MultiRonRule::TripleRon);
+    }
+
+    #[test]
+    fn length_serde() {
+        let s = serde_json::to_string(&LengthRule::Tonpuusen).unwrap();
+        assert!(s.contains("Tonpuusen"));
+        let back: LengthRule = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, LengthRule::Tonpuusen);
+    }
+}

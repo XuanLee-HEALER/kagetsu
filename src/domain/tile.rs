@@ -190,4 +190,205 @@ mod tests {
         assert!(TileIndex(27).is_yaochuu()); // 东
         assert!(TileIndex(33).is_yaochuu()); // 中
     }
+
+    #[test]
+    fn suit_classification() {
+        assert_eq!(TileIndex(0).suit(), Suit::Man);
+        assert_eq!(TileIndex(8).suit(), Suit::Man);
+        assert_eq!(TileIndex(9).suit(), Suit::Pin);
+        assert_eq!(TileIndex(17).suit(), Suit::Pin);
+        assert_eq!(TileIndex(18).suit(), Suit::Sou);
+        assert_eq!(TileIndex(26).suit(), Suit::Sou);
+        assert_eq!(TileIndex(27).suit(), Suit::Wind);
+        assert_eq!(TileIndex(30).suit(), Suit::Wind);
+        assert_eq!(TileIndex(31).suit(), Suit::Dragon);
+        assert_eq!(TileIndex(33).suit(), Suit::Dragon);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid tile index")]
+    fn suit_out_of_range_panics() {
+        let _ = TileIndex(99).suit();
+    }
+
+    #[test]
+    fn rank_returns_1_to_9_for_suupai() {
+        assert_eq!(TileIndex(0).rank(), Some(1)); // 1m
+        assert_eq!(TileIndex(8).rank(), Some(9)); // 9m
+        assert_eq!(TileIndex(9).rank(), Some(1)); // 1p
+        assert_eq!(TileIndex(17).rank(), Some(9));
+        assert_eq!(TileIndex(18).rank(), Some(1)); // 1s
+        assert_eq!(TileIndex(26).rank(), Some(9));
+        assert_eq!(TileIndex(27).rank(), None); // 字牌
+        assert_eq!(TileIndex(33).rank(), None);
+    }
+
+    #[test]
+    fn is_suupai_vs_honor() {
+        for k in 0..27 {
+            assert!(TileIndex(k).is_suupai());
+            assert!(!TileIndex(k).is_honor());
+        }
+        for k in 27..34 {
+            assert!(!TileIndex(k).is_suupai());
+            assert!(TileIndex(k).is_honor());
+        }
+    }
+
+    #[test]
+    fn is_terminal_only_1_or_9() {
+        assert!(TileIndex(0).is_terminal()); // 1m
+        assert!(TileIndex(8).is_terminal()); // 9m
+        assert!(TileIndex(9).is_terminal()); // 1p
+        assert!(TileIndex(26).is_terminal()); // 9s
+        assert!(!TileIndex(1).is_terminal()); // 2m
+        assert!(!TileIndex(7).is_terminal()); // 8m
+        assert!(!TileIndex(27).is_terminal()); // 东 (字牌不是 terminal)
+    }
+
+    #[test]
+    fn is_simple_only_2_to_8() {
+        for k in 0..27 {
+            let r = TileIndex(k).rank().unwrap();
+            assert_eq!(TileIndex(k).is_simple(), (2..=8).contains(&r));
+        }
+        // 字牌不是 simple
+        for k in 27..34 {
+            assert!(!TileIndex(k).is_simple());
+        }
+    }
+
+    #[test]
+    fn is_wind_and_dragon() {
+        for k in 27..=30 {
+            assert!(TileIndex(k).is_wind());
+            assert!(!TileIndex(k).is_dragon());
+        }
+        for k in 31..=33 {
+            assert!(!TileIndex(k).is_wind());
+            assert!(TileIndex(k).is_dragon());
+        }
+        // 数牌都不是
+        assert!(!TileIndex(0).is_wind());
+        assert!(!TileIndex(0).is_dragon());
+    }
+
+    /// 绿一色用牌: 索 2/3/4/6/8 + 發.
+    #[test]
+    fn is_green_set() {
+        // 索 2/3/4/6/8 = TileIndex 19/20/21/23/25
+        for &k in &[19u8, 20, 21, 23, 25, 32] {
+            assert!(TileIndex(k).is_green(), "kind={k} 应为绿");
+        }
+        // 索 1/5/7/9 不是
+        for &k in &[18u8, 22, 24, 26] {
+            assert!(!TileIndex(k).is_green(), "kind={k} 不应为绿");
+        }
+        // 万 / 筒 / 风 / 白中 不是
+        assert!(!TileIndex(0).is_green());
+        assert!(!TileIndex(9).is_green());
+        assert!(!TileIndex(27).is_green());
+        assert!(!TileIndex(31).is_green());
+        assert!(!TileIndex(33).is_green());
+    }
+
+    #[test]
+    fn next_dora_within_suit() {
+        assert_eq!(TileIndex(0).next_dora(), TileIndex(1)); // 1m -> 2m
+        assert_eq!(TileIndex(7).next_dora(), TileIndex(8)); // 8m -> 9m
+        // 风牌 wind 4 项内循环 (东南西北 → 东)
+        assert_eq!(TileIndex(27).next_dora(), TileIndex(28)); // 东 -> 南
+        assert_eq!(TileIndex(28).next_dora(), TileIndex(29));
+        assert_eq!(TileIndex(29).next_dora(), TileIndex(30));
+        // 三元 3 项循环
+        assert_eq!(TileIndex(31).next_dora(), TileIndex(32)); // 白 -> 發
+        assert_eq!(TileIndex(32).next_dora(), TileIndex(33)); // 發 -> 中
+    }
+
+    #[test]
+    fn short_text_format() {
+        assert_eq!(TileIndex(0).short(), "1m");
+        assert_eq!(TileIndex(4).short(), "5m");
+        assert_eq!(TileIndex(13).short(), "5p");
+        assert_eq!(TileIndex(22).short(), "5s");
+        assert_eq!(TileIndex(27).short(), "東");
+        assert_eq!(TileIndex(30).short(), "北");
+        assert_eq!(TileIndex(31).short(), "白");
+        assert_eq!(TileIndex(33).short(), "中");
+    }
+
+    #[test]
+    fn count_by_kind_aggregates() {
+        let tiles = standard_set();
+        let cnts = count_by_kind(&tiles);
+        // 标准 set 每个 kind 4 张
+        for c in &cnts {
+            assert_eq!(*c, 4);
+        }
+        assert_eq!(cnts.iter().map(|c| *c as usize).sum::<usize>(), 136);
+    }
+
+    #[test]
+    fn count_by_kind_partial() {
+        let tiles = vec![
+            Tile {
+                kind: TileIndex(0),
+                red: false,
+                id: 0,
+            },
+            Tile {
+                kind: TileIndex(0),
+                red: false,
+                id: 1,
+            },
+            Tile {
+                kind: TileIndex(33),
+                red: false,
+                id: 2,
+            },
+        ];
+        let cnts = count_by_kind(&tiles);
+        assert_eq!(cnts[0], 2);
+        assert_eq!(cnts[33], 1);
+        assert_eq!(cnts[5], 0);
+    }
+
+    #[test]
+    fn standard_set_each_kind_has_unique_ids() {
+        let tiles = standard_set();
+        // 每 kind 4 张 id 不同
+        for k in 0..34u8 {
+            let ids: Vec<u16> = tiles
+                .iter()
+                .filter(|t| t.kind.0 == k)
+                .map(|t| t.id)
+                .collect();
+            assert_eq!(ids.len(), 4);
+            let mut sorted = ids.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(sorted.len(), 4, "kind={k} ids 应不重复");
+        }
+    }
+
+    #[test]
+    fn standard_set_has_no_aka() {
+        let tiles = standard_set();
+        assert!(tiles.iter().all(|t| !t.red));
+    }
+
+    #[test]
+    fn tile_index_serde_roundtrip() {
+        let t = TileIndex(15);
+        let s = serde_json::to_string(&t).unwrap();
+        let back: TileIndex = serde_json::from_str(&s).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn yaochuu_includes_all_terminals_and_honors() {
+        let yaochuu_kinds: Vec<u8> = (0..34u8).filter(|&k| TileIndex(k).is_yaochuu()).collect();
+        // 1m 9m 1p 9p 1s 9s + 7 字牌 = 13
+        assert_eq!(yaochuu_kinds.len(), 13);
+    }
 }

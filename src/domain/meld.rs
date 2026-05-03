@@ -76,3 +76,133 @@ impl Meld {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::tile::TileIndex;
+
+    fn t(kind: u8, id: u16) -> Tile {
+        Tile {
+            kind: TileIndex(kind),
+            red: false,
+            id,
+        }
+    }
+
+    #[test]
+    fn seat_next_cycles() {
+        assert_eq!(Seat::East.next(), Seat::South);
+        assert_eq!(Seat::South.next(), Seat::West);
+        assert_eq!(Seat::West.next(), Seat::North);
+        assert_eq!(Seat::North.next(), Seat::East);
+    }
+
+    #[test]
+    fn seat_index_matches_all_array() {
+        for (i, s) in Seat::ALL.iter().enumerate() {
+            assert_eq!(s.index(), i);
+        }
+    }
+
+    #[test]
+    fn seat_serde_roundtrip() {
+        for s in Seat::ALL {
+            let json = serde_json::to_string(&s).unwrap();
+            let back: Seat = serde_json::from_str(&json).unwrap();
+            assert_eq!(s, back);
+        }
+    }
+
+    #[test]
+    fn ankan_is_concealed_others_not() {
+        let chi = Meld {
+            kind: MeldKind::Chi {
+                tiles: [t(0, 0), t(1, 1), t(2, 2)],
+            },
+            from: Some(Seat::North),
+        };
+        assert!(!chi.is_concealed());
+        let pon = Meld {
+            kind: MeldKind::Pon {
+                tiles: [t(0, 0), t(0, 1), t(0, 2)],
+            },
+            from: Some(Seat::South),
+        };
+        assert!(!pon.is_concealed());
+        let minkan = Meld {
+            kind: MeldKind::Minkan {
+                tiles: [t(0, 0), t(0, 1), t(0, 2), t(0, 3)],
+            },
+            from: Some(Seat::West),
+        };
+        assert!(!minkan.is_concealed());
+        let shouminkan = Meld {
+            kind: MeldKind::Shouminkan {
+                tiles: [t(0, 0), t(0, 1), t(0, 2), t(0, 3)],
+            },
+            from: Some(Seat::West),
+        };
+        assert!(!shouminkan.is_concealed());
+        let ankan = Meld {
+            kind: MeldKind::Ankan {
+                tiles: [t(0, 0), t(0, 1), t(0, 2), t(0, 3)],
+            },
+            from: None,
+        };
+        assert!(ankan.is_concealed());
+    }
+
+    #[test]
+    fn is_kan_only_for_kan_variants() {
+        let chi = Meld {
+            kind: MeldKind::Chi {
+                tiles: [t(0, 0), t(1, 1), t(2, 2)],
+            },
+            from: Some(Seat::North),
+        };
+        assert!(!chi.is_kan());
+        let pon = Meld {
+            kind: MeldKind::Pon {
+                tiles: [t(0, 0), t(0, 1), t(0, 2)],
+            },
+            from: Some(Seat::South),
+        };
+        assert!(!pon.is_kan());
+        for kk in [
+            MeldKind::Minkan {
+                tiles: [t(0, 0), t(0, 1), t(0, 2), t(0, 3)],
+            },
+            MeldKind::Shouminkan {
+                tiles: [t(0, 0), t(0, 1), t(0, 2), t(0, 3)],
+            },
+            MeldKind::Ankan {
+                tiles: [t(0, 0), t(0, 1), t(0, 2), t(0, 3)],
+            },
+        ] {
+            let m = Meld {
+                kind: kk,
+                from: None,
+            };
+            assert!(m.is_kan());
+        }
+    }
+
+    #[test]
+    fn tiles_returns_correct_slice() {
+        let chi = Meld {
+            kind: MeldKind::Chi {
+                tiles: [t(0, 0), t(1, 1), t(2, 2)],
+            },
+            from: Some(Seat::North),
+        };
+        assert_eq!(chi.tiles().len(), 3);
+        let kan = Meld {
+            kind: MeldKind::Minkan {
+                tiles: [t(0, 0), t(0, 1), t(0, 2), t(0, 3)],
+            },
+            from: Some(Seat::West),
+        };
+        assert_eq!(kan.tiles().len(), 4);
+    }
+}

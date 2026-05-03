@@ -150,4 +150,77 @@ mod tests {
         }
         assert!(got_room_update, "expected RoomUpdate after ready");
     }
+
+    /// from_channels 直接 own channel, send / try_recv 简单回路.
+    #[test]
+    fn from_channels_send_and_try_recv() {
+        use crate::engine::rules::GameRules;
+        use crate::net::protocol::{RoomLifecycle, RoomView};
+
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ClientMsg>();
+        let (in_tx, in_rx) = mpsc::unbounded_channel::<ServerMsg>();
+        let mut sess = NetSession::from_channels(7, Uuid::new_v4(), out_tx, in_rx);
+
+        // try_recv 空 → None
+        assert!(sess.try_recv().is_none());
+
+        // 模拟 server 发 Welcome
+        let token = Uuid::new_v4();
+        let room = Box::new(RoomView {
+            room_id: "r1".into(),
+            host_id: 7,
+            config: GameRules::default(),
+            players: vec![],
+            state: RoomLifecycle::Lobby,
+        });
+        in_tx
+            .send(ServerMsg::Welcome {
+                player_id: 7,
+                reconnect_token: token,
+                room,
+            })
+            .unwrap();
+        match sess.try_recv() {
+            Some(ServerMsg::Welcome {
+                player_id,
+                reconnect_token,
+                ..
+            }) => {
+                assert_eq!(player_id, 7);
+                assert_eq!(reconnect_token, token);
+            }
+            other => panic!("expected Welcome, got {other:?}"),
+        }
+        // 再 try_recv 应空
+        assert!(sess.try_recv().is_none());
+
+        // sess.send 推到 out_rx
+        sess.send(ClientMsg::Ready { ready: true });
+        match out_rx.try_recv() {
+            Ok(ClientMsg::Ready { ready }) => assert!(ready),
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    /// 远端 channel close 后 is_disconnected 应反映.
+    #[test]
+    fn is_disconnected_after_receiver_dropped() {
+        let (out_tx, out_rx) = mpsc::unbounded_channel::<ClientMsg>();
+        let (_in_tx, in_rx) = mpsc::unbounded_channel::<ServerMsg>();
+        let sess = NetSession::from_channels(1, Uuid::new_v4(), out_tx, in_rx);
+        assert!(!sess.is_disconnected());
+        drop(out_rx); // 远端 close
+        assert!(sess.is_disconnected());
+    }
+
+    /// player_id / token 字段保留.
+    #[test]
+    fn player_id_and_token_are_preserved() {
+        let token = Uuid::new_v4();
+        let (out_tx, _) = mpsc::unbounded_channel::<ClientMsg>();
+        let (_, in_rx) = mpsc::unbounded_channel::<ServerMsg>();
+        let sess = NetSession::from_channels(99, token, out_tx, in_rx);
+        assert_eq!(sess.player_id, 99);
+        assert_eq!(sess.token, token);
+    }
 }

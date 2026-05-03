@@ -30,3 +30,81 @@ pub enum Action {
     /// 跳过(对鸣牌/和牌机会放弃).
     Pass,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::tile::TileIndex;
+
+    fn t(kind: u8, id: u16) -> Tile {
+        Tile {
+            kind: TileIndex(kind),
+            red: false,
+            id,
+        }
+    }
+
+    #[test]
+    fn action_equality_distinguishes_variants() {
+        let d1 = Action::Discard(t(0, 0));
+        let d2 = Action::Discard(t(0, 0));
+        assert_eq!(d1, d2);
+        let r = Action::Riichi(t(0, 0));
+        assert_ne!(d1, r);
+    }
+
+    #[test]
+    fn discard_distinguishes_tiles() {
+        let a = Action::Discard(t(0, 0));
+        let b = Action::Discard(t(1, 1));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn pon_with_different_tile_pairs_differ() {
+        let p1 = Action::Pon {
+            tiles: [t(0, 0), t(0, 1)],
+        };
+        let p2 = Action::Pon {
+            tiles: [t(0, 2), t(0, 3)],
+        };
+        assert_ne!(p1, p2);
+        // 同 tiles 同 id 相等
+        let p3 = Action::Pon {
+            tiles: [t(0, 0), t(0, 1)],
+        };
+        assert_eq!(p1, p3);
+    }
+
+    #[test]
+    fn ron_records_target_seat() {
+        let r1 = Action::Ron(crate::domain::meld::Seat::West);
+        let r2 = Action::Ron(crate::domain::meld::Seat::North);
+        assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn pass_and_tsumo_are_unit() {
+        assert_eq!(Action::Pass, Action::Pass);
+        assert_eq!(Action::Tsumo, Action::Tsumo);
+        assert_eq!(Action::KyuushuKyuuhai, Action::KyuushuKyuuhai);
+        assert_eq!(Action::Minkan, Action::Minkan);
+        assert_ne!(Action::Pass, Action::Tsumo);
+    }
+
+    #[test]
+    fn ankan_carries_tile_kind() {
+        let a1 = Action::Ankan(t(0, 0));
+        let a2 = Action::Ankan(t(1, 0));
+        assert_ne!(a1, a2);
+    }
+
+    #[test]
+    fn action_clones_correctly() {
+        let a = Action::Pon {
+            tiles: [t(0, 0), t(0, 1)],
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+}

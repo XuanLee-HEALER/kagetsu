@@ -299,4 +299,102 @@ mod tests {
         let back = round_trip(&msg);
         assert!(matches!(back, NetAction::Pass));
     }
+
+    #[test]
+    fn client_msg_join_with_token_round_trip() {
+        let token = Uuid::new_v4();
+        let msg = ClientMsg::Join {
+            nickname: "Alice".into(),
+            reconnect_token: Some(token),
+        };
+        let back = round_trip(&msg);
+        match back {
+            ClientMsg::Join {
+                nickname,
+                reconnect_token,
+            } => {
+                assert_eq!(nickname, "Alice");
+                assert_eq!(reconnect_token, Some(token));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_msg_ready_round_trip() {
+        let msg = ClientMsg::Ready { ready: true };
+        let back = round_trip(&msg);
+        match back {
+            ClientMsg::Ready { ready } => assert!(ready),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_msg_pong_round_trip() {
+        let msg = ClientMsg::Pong { id: 42 };
+        let back = round_trip(&msg);
+        match back {
+            ClientMsg::Pong { id } => assert_eq!(id, 42),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_msg_uses_snake_case_tag() {
+        let msg = ClientMsg::StartGame;
+        let s = serde_json::to_string(&msg).unwrap();
+        assert!(s.contains("\"start_game\""));
+    }
+
+    #[test]
+    fn client_msg_back_to_room_continue_distinguishable() {
+        let a = ClientMsg::BackToRoom;
+        let b = ClientMsg::ContinueGame;
+        let sa = serde_json::to_string(&a).unwrap();
+        let sb = serde_json::to_string(&b).unwrap();
+        assert_ne!(sa, sb);
+    }
+
+    #[test]
+    fn net_action_kan_variants_round_trip() {
+        let m1 = NetAction::Ankan(TileIndex(0));
+        let m2 = NetAction::Shouminkan(TileIndex(33));
+        let m3 = NetAction::Minkan;
+        let b1 = round_trip(&m1);
+        let b2 = round_trip(&m2);
+        let b3 = round_trip(&m3);
+        match b1 {
+            NetAction::Ankan(k) => assert_eq!(k, TileIndex(0)),
+            _ => panic!(),
+        }
+        match b2 {
+            NetAction::Shouminkan(k) => assert_eq!(k, TileIndex(33)),
+            _ => panic!(),
+        }
+        assert!(matches!(b3, NetAction::Minkan));
+    }
+
+    #[test]
+    fn net_action_chi_with_index_round_trip() {
+        let msg = NetAction::Chi(2);
+        let back = round_trip(&msg);
+        match back {
+            NetAction::Chi(i) => assert_eq!(i, 2),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn room_lifecycle_all_variants_serde() {
+        for v in [
+            RoomLifecycle::Lobby,
+            RoomLifecycle::InGame,
+            RoomLifecycle::GameEnd,
+        ] {
+            let s = serde_json::to_string(&v).unwrap();
+            let back: RoomLifecycle = serde_json::from_str(&s).unwrap();
+            assert_eq!(v, back);
+        }
+    }
 }

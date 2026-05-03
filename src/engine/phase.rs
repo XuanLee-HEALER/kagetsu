@@ -17,3 +17,38 @@ pub enum Phase {
     /// 整场终局.
     GameEnd,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phase_serde_roundtrip() {
+        for p in [
+            Phase::Deal,
+            Phase::Draw,
+            Phase::AwaitDiscard,
+            Phase::AwaitCalls,
+            Phase::RoundEnd,
+            Phase::GameEnd,
+        ] {
+            let s = serde_json::to_string(&p).unwrap();
+            let back: Phase = serde_json::from_str(&s).unwrap();
+            assert_eq!(p, back);
+        }
+    }
+
+    #[test]
+    fn phase_distinct() {
+        assert_ne!(Phase::Deal, Phase::Draw);
+        assert_ne!(Phase::AwaitDiscard, Phase::AwaitCalls);
+        assert_ne!(Phase::RoundEnd, Phase::GameEnd);
+    }
+
+    #[test]
+    fn phase_copy_semantics() {
+        let p = Phase::Draw;
+        let q = p; // Copy
+        assert_eq!(p, q);
+    }
+}
