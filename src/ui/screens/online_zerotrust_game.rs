@@ -420,6 +420,63 @@ impl ZeroTrustGameState {
         });
     }
 
+    /// UI 触发碰. 用 own_drawn 前 2 个 deck_indices + last_discard.deck_index
+    /// 当末位 (Pon 协议要求 from_position_in_meld = 2). 协议层 do_call
+    /// 自动反查 plaintexts. validate 不验 3 张同 kind, 只验 from_player.discarded
+    /// 含 winning_tile 且 plaintext 一致.
+    pub fn trigger_pon(&self) {
+        let Some((from_player, win_idx, _)) = self.ui_table.last_discard else {
+            return;
+        };
+        if from_player == self.args.own_index {
+            return;
+        }
+        let own_two: Vec<u32> = self
+            .ui_table
+            .own_drawn_in_hand
+            .keys()
+            .take(2)
+            .copied()
+            .collect();
+        if own_two.len() < 2 {
+            return;
+        }
+        let mut deck_indices = own_two;
+        deck_indices.push(win_idx);
+        self.send_cmd(MpRoomCmd::Call {
+            call_type: crate::mental_poker::wire::WireCallType::Pon,
+            deck_indices,
+            from_player,
+            from_position_in_meld: 2,
+        });
+    }
+
+    /// UI 触发暗杠. 用 own_drawn 前 4 个 deck_indices, monitor =
+    /// (own_index + 1) % 4. 协议 6 选项 C — monitor 收 plaintexts 验证 4 张同 kind.
+    /// 简化版: 不检查 4 张是否真同 kind (协议层 do_concealed_kan 自动反查
+    /// plaintext + monitor 那边 sanity all_same 验证).
+    pub fn trigger_ankan(&self) {
+        let n = self.args.all_peer_ids.len() as u32;
+        if n != 4 {
+            return;
+        }
+        let four: Vec<u32> = self
+            .ui_table
+            .own_drawn_in_hand
+            .keys()
+            .take(4)
+            .copied()
+            .collect();
+        if four.len() < 4 {
+            return;
+        }
+        let monitor = (self.args.own_index + 1) % n;
+        self.send_cmd(MpRoomCmd::ConcealedKan {
+            deck_indices: [four[0], four[1], four[2], four[3]],
+            monitor_player: monitor,
+        });
+    }
+
     /// 协议 7 验证后赢家 + 是否自摸. None 表示尚未 win.
     pub fn winner(&self) -> Option<(u32, bool)> {
         if self.phase != MpPhase::GameOver {
@@ -471,6 +528,14 @@ impl ZeroTrustGameState {
             }
             KeyCode::Char('n') | KeyCode::Char('N') if self.phase == MpPhase::Playing => {
                 self.trigger_ron();
+                None
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') if self.phase == MpPhase::Playing => {
+                self.trigger_pon();
+                None
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') if self.phase == MpPhase::Playing => {
+                self.trigger_ankan();
                 None
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H')
@@ -697,7 +762,7 @@ impl ZeroTrustGameState {
         // 操作提示
         let hint_text = match self.phase {
             MpPhase::Playing => {
-                "D: 摸  Space: 弃  R: dora  T: 自摸  N: 荣和  ←/→: 移动  Esc/L: 离开"
+                "D 摸 / Space 弃 / R dora / P 碰 / A 暗杠 / T 自摸 / N 荣和 / ←/→ 移动 / Esc 离开"
             }
             _ => "Esc / L: 离开",
         };
@@ -1363,7 +1428,7 @@ mod tests {
         // Step 4: screen[0] 按 N 触发 Ron
         screens[0].trigger_ron();
 
-        let _ = tokio::time::timeout(Duration::from_secs(15), async {
+        let _ = tokio::time::timeout(Duration::from_secs(45), async {
             loop {
                 for s in &mut screens {
                     let _ = s.advance();
@@ -1392,6 +1457,231 @@ mod tests {
                 s.winner(),
                 Some((0, false)),
                 "screen {i} winner() 应为 (0, Ron)"
+            );
+        }
+    }
+
+    /// **M5.E.3 Pon + Ankan e2e**: 4 screen 跑到 Playing → screen[0] 摸 deck[0,1] →
+    /// screen[1] 摸 deck[2] + 弃 → screen[0] 按 P 触发 Pon → 验证 4 screen
+    /// 收 CallApplied (player=0, from=1). 然后 screen[0] 继续摸 deck[3..7] →
+    /// 按 A 触发 Ankan → 4 screen 收 ConcealedKanApplied.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn zerotrust_screen_pon_then_ankan() {
+        use crate::mental_poker::wire::MentalPokerMsg;
+        use crate::net::p2p::mp_swarm::SwarmCommand;
+        use crate::net::session::NetSession;
+        use libp2p::PeerId;
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tokio::sync::mpsc::unbounded_channel;
+        use uuid::Uuid;
+
+        const N: usize = 4;
+        fn fake_peer_id(seed: u8) -> PeerId {
+            let mut bytes = [0u8; 32];
+            bytes[0] = seed;
+            let kp = libp2p::identity::Keypair::ed25519_from_bytes(bytes).expect("kp");
+            PeerId::from(&kp.public())
+        }
+        let peer_ids: Vec<PeerId> = (0..N as u8).map(fake_peer_id).collect();
+        let peer_to_idx: HashMap<PeerId, usize> =
+            peer_ids.iter().enumerate().map(|(i, p)| (*p, i)).collect();
+
+        let mut session_inbound_txs: Vec<
+            tokio::sync::mpsc::UnboundedSender<(PeerId, MentalPokerMsg)>,
+        > = Vec::with_capacity(N);
+        let mut cmd_rxs = Vec::with_capacity(N);
+        let mut sessions = Vec::with_capacity(N);
+        for i in 0..N {
+            let (out_tx, _out_rx) = unbounded_channel::<crate::net::protocol::ClientMsg>();
+            let (_in_tx, in_rx) = unbounded_channel::<crate::net::protocol::ServerMsg>();
+            let (mp_cmd_tx, mp_cmd_rx) = unbounded_channel::<SwarmCommand>();
+            let (mp_in_tx, mp_in_rx) = unbounded_channel::<(PeerId, MentalPokerMsg)>();
+            let session = NetSession::from_channels(i as u32, Uuid::new_v4(), out_tx, in_rx)
+                .with_mp_handles(mp_cmd_tx, mp_in_rx);
+            sessions.push(session);
+            cmd_rxs.push(mp_cmd_rx);
+            session_inbound_txs.push(mp_in_tx);
+        }
+
+        let session_label = vec![0xEEu8; 32];
+        let mut screens = Vec::with_capacity(N);
+        for (i, sess) in sessions.into_iter().enumerate() {
+            let args = MpStartArgs {
+                all_peer_ids: peer_ids.iter().map(|p| p.to_bytes()).collect(),
+                own_index: i as u32,
+                session_label: session_label.clone(),
+                deck_size: 16,
+                cnc_k_rounds: 8,
+            };
+            screens.push(ZeroTrustGameState::new(sess, args));
+        }
+
+        for i in 0..N {
+            let mut cmd_rx = cmd_rxs.remove(0);
+            let inbound_txs = session_inbound_txs.clone();
+            let peer_to_idx_clone = peer_to_idx.clone();
+            let peer_ids_clone = peer_ids.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = cmd_rx.recv().await {
+                    match cmd {
+                        SwarmCommand::Broadcast { topic: _, msg } => {
+                            for (idx, tx) in inbound_txs.iter().enumerate() {
+                                if idx == i {
+                                    continue;
+                                }
+                                let _ = tx.send((peer_ids_clone[i], msg.clone()));
+                            }
+                        }
+                        SwarmCommand::Unicast { target, msg } => {
+                            if let Some(&t_idx) = peer_to_idx_clone.get(&target) {
+                                let _ = inbound_txs[t_idx].send((peer_ids_clone[i], msg));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Step 1: all in Playing
+        let _ = tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens.iter().all(|s| s.phase == MpPhase::Playing) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(screens.iter().all(|s| s.phase == MpPhase::Playing));
+
+        // Step 2: screen[0] 摸 deck[0,1]
+        for _ in 0..2 {
+            screens[0].trigger_draw_next();
+            let target = screens[0].ui_table.own_drawn_in_hand.len() + 1;
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    for s in &mut screens {
+                        let _ = s.advance();
+                    }
+                    if screens[0].ui_table.own_drawn_in_hand.len() == target {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+        }
+
+        // Step 3: screen[1] 摸 deck[2] + 弃
+        screens[1].trigger_draw_next();
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if !screens[1].ui_table.own_drawn_in_hand.is_empty() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        screens[1].discard_cursor();
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens
+                    .iter()
+                    .all(|s| s.ui_table.last_discard.map(|(p, _, _)| p) == Some(1))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        // Step 4: screen[0] 按 P 触发 Pon
+        screens[0].trigger_pon();
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens
+                    .iter()
+                    .all(|s| s.ui_table.own_melds.is_empty() == (s.args.own_index != 0))
+                    && !screens[0].ui_table.own_melds.is_empty()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert_eq!(
+            screens[0].ui_table.own_melds.len(),
+            1,
+            "screen[0] 应有 1 副 Pon"
+        );
+
+        // 4 screen 都看到 CallApplied 在 event_log
+        for s in &screens {
+            assert!(
+                s.event_log.iter().any(|l| l.contains("called Pon from 1")),
+                "应有 'called Pon from 1' log"
+            );
+        }
+
+        // Step 5: screen[0] 继续摸 deck[3..7] 凑 4 张暗杠 (此时 own_drawn 是 0 → 4 张)
+        for _ in 0..4 {
+            screens[0].trigger_draw_next();
+            let target = screens[0].ui_table.own_drawn_in_hand.len() + 1;
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    for s in &mut screens {
+                        let _ = s.advance();
+                    }
+                    if screens[0].ui_table.own_drawn_in_hand.len() == target {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+        }
+        assert_eq!(screens[0].ui_table.own_drawn_in_hand.len(), 4);
+
+        // Step 6: screen[0] 按 A 触发 Ankan
+        screens[0].trigger_ankan();
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens.iter().all(|s| {
+                    s.event_log
+                        .iter()
+                        .any(|l| l.contains("Player 0 concealed kan"))
+                }) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        for s in &screens {
+            assert!(
+                s.event_log
+                    .iter()
+                    .any(|l| l.contains("Player 0 concealed kan")),
+                "应有 'Player 0 concealed kan' log"
             );
         }
     }
