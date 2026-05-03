@@ -2,7 +2,7 @@
 
 > 工作摸鱼专用。一个终端窗口，一局麻将，老板看过来就 `Ctrl+L` 假装清屏。
 
-基于比赛规则（WRC 2022 主基）的日麻 TUI 实现，Rust + ratatui 写的。全角中文牌张，纯快捷键操作，两套主题。
+基于比赛规则（WRC 2022 主基）的日麻 TUI 实现，Rust + ratatui 写的。全角中文牌张，纯快捷键操作，两套主题。**v2.0 起支持 ZeroTrust 模式** —— 4 玩家用 libp2p mental poker 协议对等联机，无需信任房主。
 
 ## 截图
 
@@ -19,22 +19,55 @@
 - **操作计时**：每步思考时长可配（10-60 秒 / 不限时），超时执行默认动作
 - **自动适配终端**：Windows 走 `wt.exe`，macOS 优先 iTerm2（fallback Terminal.app），启动开新窗口跑游戏不污染当前终端
 
-## 多人游戏（局域网）
+## 多人游戏
 
-主菜单选 **局域网游戏** 即可。架构是房主即 server 的 P2P：房主进程同时跑 axum WebSocket server + 自己的 client，其它玩家通过 ws 连进来。空缺座位自动补 AI。
+主菜单选 **局域网游戏** 进入大厅，房主创建房间时可选 **Standard** 或 **ZeroTrust** 模式。
 
-- **mDNS 自动发现**：同 LAN 下其他人的房间会自动出现在大厅列表，5 秒刷新一次
-- **手动 IP fallback**：mDNS 在企业 Wi-Fi / VLAN 隔离下失效时，直接输入 `192.168.1.5:port` 加入
-- **空 slot AI 补满**：人不够 4 个，剩下的座位由 AI 接管，开局即可
+### Standard 模式（房主权威）
+
+房主即 server 的 P2P 架构：房主进程同时跑 libp2p swarm + 自己的 client，其他玩家通过 request-response 协议连进来。空缺座位自动补 AI。
+
+- **mDNS + gossipsub 自动发现**：同 LAN 下其他人的房间会自动出现在大厅列表，5 秒刷新一次
+- **NAT 穿透**：QUIC + TCP 双 transport，autonat 探测自己是否公网可达，relay-server / dcutr 升级直连
+- **手动 multiaddr fallback**：mDNS 失效时直接粘贴 `/ip4/.../udp/.../quic-v1/p2p/...` 加入
+- **空 slot AI 补满**：人不够 4 个，剩下的座位由 AI 接管
 - **断线重连**：客户端拿到 `reconnect_token`，30 秒内重新连上恢复座位
 - **鸣牌优先级裁决**：切牌后 500ms 收响应窗口，按 Ron > Pon=Kan > Chi 头跳裁决
-- **房主即 server**：房主退出 = 房间解散，其他人退出 = 回房间
 
-跑过完整 4 人协议级集成测试 + 端到端 ws 双 client 连接。
+### ZeroTrust 模式（P2P mental poker）
+
+**v2.0 新增。** 4 个真人玩家用零信任的 mental poker 协议对等跑一手麻将 —— 牌山由 4 方联合洗牌，谁也不知道全部牌序，每张牌通过门限 ElGamal 解密只让"该看到的人"看到。**不需要信任房主**。
+
+协议层实现：
+- **协议 0** —— 4 方 keygen + Schnorr DLEQ 验证联合公钥
+- **协议 1** —— Sako-Killian Cut-and-Choose 联合洗牌（K=80，Fiat-Shamir transcript）
+- **协议 2** —— 摸牌（DrawShareRequest/Response + threshold 解密）
+- **协议 3** —— 公开揭示（dora indicator）
+- **协议 4** —— 弃牌（plaintext 公开广播）
+- **协议 5** —— 鸣牌（吃 / 碰 / 明杠）
+- **协议 6** —— 暗杠（选项 C：监督方反查 plaintext 验证 4 张同 kind）
+- **协议 7** —— 和牌（Tsumo / Ron + ownership 验证）
+- **加杠** —— 已碰刻子加自摸第 4 张升级 Kan
+
+底层用 [ark-bls12-381](https://github.com/arkworks-rs/algebra) G1 椭圆曲线 + ChaCha20 RNG。所有 ZK 证明（DLEQ / Schnorr / cnc shuffle）走 Fiat-Shamir 非交互式。
+
+UI 渲染：4 家弃牌池 / 自家手牌 cursor / 副露 / dora 指示 / 协议进度 / 事件日志 / 和牌详情（含 yaku 算分）。
+
+约束：
+- ZeroTrust 模式必须 4 个真人玩家（mental poker 协议无法跟 AI 协作 —— AI 没私钥）
+- 单局耗时较 Standard 模式略长（联合洗牌 + cnc proof 验证需要 ~10s）
+
+跑过完整 4 swarm libp2p 集成测试 + 16 个 ZeroTrust UI e2e 测试。
 
 ## 安装
 
-需要 Rust 工具链（`rustup` + `cargo`）：
+[crates.io](https://crates.io/crates/tui-majo) 装：
+
+```sh
+cargo install tui-majo
+```
+
+或者从源码：
 
 ```sh
 git clone https://github.com/XuanLee-HEALER/tui-majo.git
@@ -66,7 +99,7 @@ just ci            # fmt + clippy + test
 
 ## 操作
 
-游戏界面快捷键：
+### 单人 / Standard 模式游戏内
 
 | 键 | 动作 |
 |---|---|
@@ -82,7 +115,25 @@ just ci            # fmt + clippy + test
 | `N` | 下一局 / 整庄结束按这个走完 |
 | `m` | 唤起 Action Modal |
 
-全局键：
+### ZeroTrust 模式游戏内
+
+| 键 | 动作 |
+|---|---|
+| `D` | 摸下一张 |
+| `Space` / `Enter` | 弃 cursor 牌 |
+| `R` | 揭示下一张 dora |
+| `C` | 吃 |
+| `P` | 碰 |
+| `K` | 明杠 |
+| `X` | 加杠（升级已碰 Pon → Kan） |
+| `A` | 暗杠 |
+| `I` | 立直 |
+| `T` | 自摸 |
+| `N` | 荣和 |
+| `←/→` (`h/j`) | 移动手牌 cursor |
+| `Esc` / `L` | 离开 |
+
+### 全局键
 
 | 键 | 动作 |
 |---|---|
@@ -109,32 +160,40 @@ just ci            # fmt + clippy + test
 
 需要至少 **144 × 40** 字符。启动时会尝试 `SetSize(144, 40)` 让终端自动放大。不够就显示提示屏，拉大窗口自动恢复。
 
+## 架构
+
+```text
+src/
+├── domain/         # 牌 / 副露 / 役 / 算分 / 拆解
+├── engine/         # 游戏状态机 / 规则 / 牌山 / 事件
+├── mental_poker/   # ZeroTrust 协议 0-7 + Sako-Killian shuffle + ElGamal/DLEQ/Schnorr
+├── net/
+│   ├── room.rs     # RoomActor (Standard 房主权威 + ZeroTrust 路由)
+│   ├── session.rs  # NetSession (统一 client 抽象 + mp 边带)
+│   ├── mp/         # MpPlayerActor (ZeroTrust 协议状态机)
+│   └── p2p/        # libp2p swarm + mp_bridge + mp_swarm
+├── ui/             # ratatui 屏 + ZeroTrustGameState
+├── ai/             # AI 决策 (Standard 模式空座位补)
+└── replay/         # 天凤 mjlog 解析 + 重放
+```
+
 ## 规则参考
 
-- [docs/spec/README.md](docs/spec/README.md) — 规则索引
+- [docs/spec/README.md](docs/spec/README.md) —— 规则索引
 - 来源：维基百科 EN/ZH，WRC 2022 规则，灰机 wiki / 凌上开花 wiki
-
-## 路线图
-
-- [x] 单人 vs 3 AI
-- [x] 完整役种 + 役满
-- [x] Action Modal + 同 kind 牌联动高亮 + 多吃法 picker
-- [x] 两套主题 (暗/亮) + 牌张分色 (实物麻将经典配色)
-- [x] 操作计时
-- [x] 终局 uma + oka 结算
-- [x] 局域网联机（mDNS 发现 + 手动 IP fallback + 断线重连 + AI 补位）
-- [ ] 互联网联机 / 房间密码 / TLS
-- [ ] 振听强制
-- [ ] 立直牌横置渲染
-- [ ] 中途流局（九种九牌 / 四风连打 / 四杠散了 / 四家立直）
-- [ ] 牌谱回放
-- [ ] 更聪明的 AI（当前是摸切 + 能和就和）
+- ZeroTrust 协议参考：Bayer-Groth shuffle、Sako-Killian cut-and-choose、threshold ElGamal
 
 ## 测试
 
-- **算法回归**：`cargo test --lib` 71 个单元测试（役 / 符 / 分解 / 分数分配 / 网络协议）
-- **真实牌谱验证**：tests/replay/fixtures/ 下 10 局天凤 mjlog → 解析 → 重放 → 99 局 fu/han/yaku 全对齐 mjx-project 标准
-- **协议级集成**：testkit 框架跑 4-player 全流程（lobby / 鸣牌 / 断线 / e2e ws 双客户端）
+- **算法回归**：`cargo test --lib` 403 个单元测试（牌型 / 役 / 符 / 分解 / 分数分配 / mental poker 协议 / actor 状态机 / UI 状态机）
+- **真实牌谱验证**：`tests/replay/fixtures/` 下 10 局天凤 mjlog → 解析 → 重放 → 99 局 fu/han/yaku 全对齐 mjx-project 标准
+- **协议级集成**：4 player 全流程（lobby / 鸣牌 / 断线 / e2e ws 双客户端）
+- **ZeroTrust e2e** 16 个测试 4 层覆盖：
+  - actor 协议 0-7 mpsc 直连一手 e2e
+  - mp_bridge MockTransport 抽象层一手 e2e
+  - SwarmTransport in-memory dispatcher 一手 e2e
+  - **真 libp2p 4-swarm TCP localhost** 集成 e2e（噪声加密 + yamux 复用 + gossipsub mesh + rr_mp protocol）
+  - UI ZeroTrustGameState 完整 gameplay e2e（摸 / 弃 / 吃碰杠 / 立直 / 自摸荣和 / 加杠 / 多回合 / yaku 算分）
 - **Property-based fuzz**：`PROPTEST_CASES=1000` 跑 1000 局随机会话验证分数守恒等不变量
 
 ## 参与开发
