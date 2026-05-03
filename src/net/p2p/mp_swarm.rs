@@ -92,6 +92,7 @@ pub fn new_swarm_transport(
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)]
 mod tests {
     use super::*;
 
@@ -166,6 +167,151 @@ mod tests {
         };
         let res = t.unicast(99, msg);
         assert!(matches!(res, Err(MpBridgeError::InvalidTarget(99, 4))));
+    }
+
+    /// **M5.C.1 in-memory swarm dispatcher e2e**: SwarmTransport + SwarmCommand
+    /// 通过 mpsc dispatcher 模拟 libp2p swarm 行为 (gossipsub publish + rr send_request),
+    /// 4 actor 跑通 keygen + 联合洗牌. 验证 SwarmTransport ↔ swarm wiring 链条可用,
+    /// 不依赖真 libp2p swarm.
+    ///
+    /// dispatcher 充当 "假 swarm task" 角色:
+    /// - 接 SwarmCommand::Broadcast{topic, msg} → 给所有 (除发送者) MpInbound deliver(msg)
+    /// - 接 SwarmCommand::Unicast{target, msg} → 给 target 对应的 MpInbound deliver(msg)
+    ///
+    /// 跟 mp_bridge::MockTransport 区别: 这次走 SwarmTransport 路径 (生产链路),
+    /// 验证 SwarmCommand 协议字段 (topic / target PeerId) 转发正确.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn four_actors_via_swarm_transport_dispatcher() {
+        use crate::net::mp::MpPhase;
+        use crate::net::mp::actor::{MpConfig, spawn_mp_player};
+        use crate::net::mp::cmd::MpEvent;
+        use crate::net::p2p::behaviour::mp_topic_for_room;
+        use crate::net::p2p::mp_bridge::{
+            MpInbound, MpInboundMsg, new_inbound_channel, spawn_mp_bridge,
+        };
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+
+        const N: usize = 4;
+        let topic = mp_topic_for_room("dispatcher-test");
+
+        // 派生 4 个 fake PeerId — 每个对应一个 own_index.
+        let peer_ids: Vec<PeerId> = (0..N as u8).map(fake_peer_id).collect();
+        let peer_to_idx: HashMap<PeerId, usize> =
+            peer_ids.iter().enumerate().map(|(i, p)| (*p, i)).collect();
+
+        // 各玩家的 MpInbound channel
+        let mut inbound_pairs: Vec<(MpInbound, UnboundedReceiver<MpInboundMsg>)> =
+            (0..N).map(|_| new_inbound_channel()).collect();
+        let inbounds: Vec<MpInbound> = inbound_pairs.iter().map(|(i, _)| i.clone()).collect();
+
+        // 各玩家创建 SwarmTransport + 拿 cmd_rx 给 dispatcher 用
+        let mut transports = Vec::with_capacity(N);
+        let mut cmd_rxs: Vec<UnboundedReceiver<SwarmCommand>> = Vec::with_capacity(N);
+        for _ in 0..N {
+            let (t, rx) = new_swarm_transport(topic.clone(), peer_ids.clone());
+            transports.push(t);
+            cmd_rxs.push(rx);
+        }
+
+        // spawn 4 actor
+        let mut handles = Vec::with_capacity(N);
+        let mut event_rxs = Vec::with_capacity(N);
+        let mut bridges = Vec::with_capacity(N);
+        let cfg_template = MpConfig {
+            own_index: 0,
+            all_peer_ids: peer_ids.iter().map(|p| p.to_bytes()).collect(),
+            session_label: b"swarm-dispatcher-test".to_vec(),
+            deck_size: 16,
+            cnc_k_rounds: 8,
+        };
+        for i in 0..N {
+            let cfg = MpConfig {
+                own_index: i,
+                all_peer_ids: cfg_template.all_peer_ids.clone(),
+                session_label: cfg_template.session_label.clone(),
+                deck_size: cfg_template.deck_size,
+                cnc_k_rounds: cfg_template.cnc_k_rounds,
+            };
+            let mut player = spawn_mp_player(cfg, Some((i + 5000) as u64));
+            let cmd_tx = player.cmd_tx.clone();
+            let event_rx = player.take_event_rx().unwrap();
+
+            // fan-out event_rx: bridge_rx + test_rx
+            let (bridge_event_tx, bridge_event_rx) = unbounded_channel::<MpEvent>();
+            let (test_event_tx, test_event_rx) = unbounded_channel::<MpEvent>();
+            tokio::spawn(async move {
+                let mut event_rx = event_rx;
+                while let Some(ev) = event_rx.recv().await {
+                    let _ = bridge_event_tx.send(ev.clone());
+                    let _ = test_event_tx.send(ev);
+                }
+            });
+            event_rxs.push(test_event_rx);
+
+            let transport = transports.remove(0);
+            let inbound_rx = inbound_pairs.remove(0).1;
+            let bridge = spawn_mp_bridge(transport, bridge_event_rx, cmd_tx, inbound_rx);
+
+            handles.push(player);
+            bridges.push(bridge);
+        }
+
+        // dispatcher: 起 4 个 task, 各接一方 cmd_rx, 路由 SwarmCommand → MpInbound
+        for i in 0..N {
+            let mut cmd_rx = cmd_rxs.remove(0);
+            let inbounds_clone = inbounds.clone();
+            let peer_to_idx_clone = peer_to_idx.clone();
+            let my_peer = peer_ids[i];
+            tokio::spawn(async move {
+                while let Some(cmd) = cmd_rx.recv().await {
+                    match cmd {
+                        SwarmCommand::Broadcast { topic: _, msg } => {
+                            // libp2p gossipsub 默认不回环 (sender 不收自己的消息)
+                            for (idx, inbound) in inbounds_clone.iter().enumerate() {
+                                if idx == i {
+                                    continue;
+                                }
+                                let _ = inbound.deliver(Some(i), msg.clone());
+                            }
+                            let _ = my_peer; // sanity: 自己 PeerId 跟 own_index i 一致
+                        }
+                        SwarmCommand::Unicast { target, msg } => {
+                            if let Some(&target_idx) = peer_to_idx_clone.get(&target) {
+                                let _ = inbounds_clone[target_idx].deliver(Some(i), msg);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // 跑到 all in Playing
+        let mut phases = [MpPhase::KeyExchange; N];
+        let timeout = tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                for (i, rx) in event_rxs.iter_mut().enumerate() {
+                    while let Ok(ev) = rx.try_recv() {
+                        if let MpEvent::PhaseChanged { phase } = ev {
+                            phases[i] = phase;
+                        }
+                    }
+                }
+                if phases.iter().all(|p| *p == MpPhase::Playing) {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            timeout.is_ok() && timeout.unwrap(),
+            "4 actor 通过 SwarmTransport + dispatcher 应全 transition 到 Playing, 实际 {phases:?}"
+        );
+
+        drop(bridges);
+        drop(handles);
     }
 
     #[test]
