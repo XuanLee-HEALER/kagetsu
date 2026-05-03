@@ -169,6 +169,25 @@ impl SlotEntry {
 
 const MAX_PLAYERS: usize = 4;
 
+/// 计算 ZeroTrust session_label = SHA-256(room_id || sorted_peer_ids).
+///
+/// 4 方独立算结果一致 (peer_ids 排序保证). 用作 mental poker 协议 1
+/// cut-and-choose Fiat-Shamir transcript 一部分, 防 cross-session replay.
+fn compute_session_label(room_id: &str, peer_ids: &[Vec<u8>]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<&Vec<u8>> = peer_ids.iter().collect();
+    sorted.sort();
+    let mut h = Sha256::new();
+    h.update(b"tui-majo/mp/session/v1\0");
+    h.update(room_id.as_bytes());
+    h.update([0u8]);
+    for pid in &sorted {
+        h.update((pid.len() as u32).to_le_bytes());
+        h.update(pid);
+    }
+    h.finalize().to_vec()
+}
+
 /// 当前 unix 毫秒. 失败时返回 0.
 fn chrono_now_unix_ms() -> i64 {
     std::time::SystemTime::now()
@@ -421,6 +440,15 @@ impl RoomActor {
             return;
         }
 
+        // ZeroTrust 模式必须 4 真人 (mental poker 协议 AI 无法参与).
+        if self.mode == crate::net::p2p::RoomMode::ZeroTrust {
+            if n != MAX_PLAYERS {
+                self.send_error(player_id, "ZeroTrust 模式需要 4 个真人玩家");
+                return;
+            }
+            return self.start_zerotrust_game();
+        }
+
         // 分配座位 (东南西北顺序)
         let seats = [Seat::East, Seat::South, Seat::West, Seat::North];
         for (i, slot) in self.slots.iter_mut().enumerate() {
@@ -453,6 +481,50 @@ impl RoomActor {
 
         self.broadcast_room_update();
         self.broadcast_state_view();
+    }
+
+    /// ZeroTrust 模式开局 (M5.B.8). 给 4 真人玩家各发一条 [`ServerMsg::MpStart`],
+    /// 各自 spawn MpPlayerActor 接管协议层. RoomActor 进 InGame 状态但不再
+    /// 处理 ClientMsg::Action — game 命令走 P2P (mental poker 消息).
+    ///
+    /// 调用前已 verify: state=Lobby, is_host, all_ready, n=4.
+    fn start_zerotrust_game(&mut self) {
+        // 分配座位 (东南西北 = own_index 0..3, 跟 Standard 一致).
+        let seats = [Seat::East, Seat::South, Seat::West, Seat::North];
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            slot.seat = Some(seats[i]);
+        }
+
+        // 收集 4 玩家的 peer_id (用 reconnect_token 字节作占位; M5.B.8.2 完整集成
+        // 后会用真实 libp2p PeerId, 由 host swarm 在 Join 时记录).
+        let all_peer_ids: Vec<Vec<u8>> = self
+            .slots
+            .iter()
+            .map(|s| s.reconnect_token.as_bytes().to_vec())
+            .collect();
+
+        // session_label = SHA-256(room_id || sorted_peer_ids) — 4 方独立算应一致.
+        let session_label = compute_session_label(&self.room_id, &all_peer_ids);
+
+        // 牌山大小 + cnc K 从 GameRules 派生 (生产 = 136 / 80, 测试可缩).
+        let deck_size: u32 = 136;
+        let cnc_k_rounds: u32 = 80;
+
+        // 给每个真人玩家发 MpStart, own_index = slot index.
+        for (idx, slot) in self.slots.iter().enumerate() {
+            if let Some(sender) = &slot.sender {
+                let _ = sender.send(ServerMsg::MpStart {
+                    all_peer_ids: all_peer_ids.clone(),
+                    own_index: idx as u32,
+                    session_label: session_label.clone(),
+                    deck_size,
+                    cnc_k_rounds,
+                });
+            }
+        }
+
+        self.state = RoomLifecycle::InGame;
+        self.broadcast_room_update();
     }
 
     fn handle_back_to_room(&mut self, _player_id: u32) {
@@ -1722,5 +1794,113 @@ mod tests {
             Some(crate::net::p2p::RoomMode::ZeroTrust),
             "spawn_room_with_mode(ZeroTrust) 应反映到 RoomView.mode"
         );
+    }
+
+    /// M5.B.8.0: ZeroTrust + n<4 → StartGame 应被拒绝, 不发 MpStart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zerotrust_starts_only_with_4_humans() {
+        let handle = spawn_room_with_mode(
+            "h".into(),
+            GameRules::default(),
+            crate::net::p2p::RoomMode::ZeroTrust,
+        );
+        let (host_id, _, mut host_rx) = join_player(&handle, "h").await;
+        // 仅 1 真人, host 自动 ready, 触发 StartGame
+        handle
+            .tx
+            .send(RoomCmd::PlayerMsg {
+                player_id: host_id,
+                msg: ClientMsg::StartGame,
+            })
+            .unwrap();
+        yield_actor().await;
+
+        let mut got_error = false;
+        let mut got_mp_start = false;
+        while let Ok(msg) = host_rx.try_recv() {
+            match msg {
+                ServerMsg::Error { message } if message.contains("ZeroTrust") => {
+                    got_error = true;
+                }
+                ServerMsg::MpStart { .. } => got_mp_start = true,
+                _ => {}
+            }
+        }
+        assert!(got_error, "应收到 ZeroTrust 4 真人要求的错误");
+        assert!(!got_mp_start, "n<4 不应发 MpStart");
+    }
+
+    /// M5.B.8.0: ZeroTrust + 4 真人 ready → 4 玩家收 MpStart, own_index 0..3 各异.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zerotrust_4_humans_emits_mp_start() {
+        let handle = spawn_room_with_mode(
+            "h".into(),
+            GameRules::default(),
+            crate::net::p2p::RoomMode::ZeroTrust,
+        );
+        let (host_id, _, mut rx0) = join_player(&handle, "p0").await;
+        let (p1_id, _, mut rx1) = join_player(&handle, "p1").await;
+        let (p2_id, _, mut rx2) = join_player(&handle, "p2").await;
+        let (_p3_id, _, mut rx3) = join_player(&handle, "p3").await;
+
+        // 非房主玩家 ready (host 自动 ready)
+        for pid in [p1_id, p2_id, _p3_id] {
+            handle
+                .tx
+                .send(RoomCmd::PlayerMsg {
+                    player_id: pid,
+                    msg: ClientMsg::Ready { ready: true },
+                })
+                .unwrap();
+        }
+        yield_actor().await;
+
+        // host 触发开局
+        handle
+            .tx
+            .send(RoomCmd::PlayerMsg {
+                player_id: host_id,
+                msg: ClientMsg::StartGame,
+            })
+            .unwrap();
+        yield_actor().await;
+
+        // 各 client 应收到 MpStart, own_index 跟 join 顺序一致
+        let collect_mp_start =
+            |rx: &mut UnboundedReceiver<ServerMsg>| -> Option<(u32, Vec<Vec<u8>>, Vec<u8>)> {
+                while let Ok(msg) = rx.try_recv() {
+                    if let ServerMsg::MpStart {
+                        own_index,
+                        all_peer_ids,
+                        session_label,
+                        ..
+                    } = msg
+                    {
+                        return Some((own_index, all_peer_ids, session_label));
+                    }
+                }
+                None
+            };
+        let mp0 = collect_mp_start(&mut rx0).expect("p0 应收 MpStart");
+        let mp1 = collect_mp_start(&mut rx1).expect("p1 应收 MpStart");
+        let mp2 = collect_mp_start(&mut rx2).expect("p2 应收 MpStart");
+        let mp3 = collect_mp_start(&mut rx3).expect("p3 应收 MpStart");
+
+        assert_eq!(mp0.0, 0);
+        assert_eq!(mp1.0, 1);
+        assert_eq!(mp2.0, 2);
+        assert_eq!(mp3.0, 3);
+
+        // 4 玩家看到的 all_peer_ids 一致
+        assert_eq!(mp0.1, mp1.1);
+        assert_eq!(mp1.1, mp2.1);
+        assert_eq!(mp2.1, mp3.1);
+        assert_eq!(mp0.1.len(), 4);
+
+        // 4 玩家看到的 session_label 一致 + 长度 = 32 (SHA-256)
+        assert_eq!(mp0.2, mp1.2);
+        assert_eq!(mp1.2, mp2.2);
+        assert_eq!(mp2.2, mp3.2);
+        assert_eq!(mp0.2.len(), 32);
     }
 }

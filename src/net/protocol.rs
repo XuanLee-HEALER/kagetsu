@@ -106,6 +106,21 @@ pub enum ServerMsg {
     Error { message: String },
     /// 心跳.
     Ping { id: u64 },
+    /// ZeroTrust 模式开局信号 (M5.B.8). 房主决定 StartGame + mode=ZeroTrust 时,
+    /// RoomActor 给 4 个真人玩家各发一条 MpStart, own_index 不同, 其他字段一致.
+    /// client 收到后 spawn MpPlayerActor(cfg) 接管协议层, RoomActor 退到旁观.
+    MpStart {
+        /// 4 玩家 PeerId 字节 (按 own_index 0..3 顺序).
+        all_peer_ids: Vec<Vec<u8>>,
+        /// 本 client 在 4 玩家中的 own_index.
+        own_index: u32,
+        /// 4 方共享的 session_label = hash(room_id || sorted_peer_ids).
+        session_label: Vec<u8>,
+        /// 牌山大小 (常规一手 = 136).
+        deck_size: u32,
+        /// Cut-and-Choose K (协议 1 安全参数, 默认 80).
+        cnc_k_rounds: u32,
+    },
 }
 
 // ============================================================================
