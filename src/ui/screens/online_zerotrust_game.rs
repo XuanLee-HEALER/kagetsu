@@ -373,6 +373,41 @@ impl ZeroTrustGameState {
         });
     }
 
+    /// UI 触发自摸和牌. 用 own_drawn_in_hand 全部 deck_indices 当 hand,
+    /// 最大 deck_index (最后摸的) 当 winning_tile.
+    /// 协议 7 validate 不验 yaku, 只验 ownership — 当前 hand 所有 indices
+    /// 都在 own_drawn 内 + winning_tile 在 hand 内, 自动通过.
+    /// 真实 gameplay 应用层加 yaku.rs 检查后才允许触发, 这里 minimum viable.
+    pub fn trigger_tsumo(&self) {
+        let hand: Vec<u32> = self.ui_table.own_drawn_in_hand.keys().copied().collect();
+        if hand.is_empty() {
+            return;
+        }
+        let winning = *hand.last().unwrap();
+        self.send_cmd(MpRoomCmd::Tsumo {
+            hand_indices: hand,
+            winning_tile_index: winning,
+        });
+    }
+
+    /// 协议 7 验证后赢家 + 是否自摸. None 表示尚未 win.
+    pub fn winner(&self) -> Option<(u32, bool)> {
+        if self.phase != MpPhase::GameOver {
+            return None;
+        }
+        // 从 event_log 反查最后一条 "Player {p} won (Tsumo|Ron)"
+        for line in self.event_log.iter().rev() {
+            if let Some(rest) = line.strip_prefix("Player ")
+                && let Some((player_str, tail)) = rest.split_once(" won (")
+                && let Ok(player) = player_str.parse::<u32>()
+            {
+                let is_tsumo = tail.starts_with("Tsumo");
+                return Some((player, is_tsumo));
+            }
+        }
+        None
+    }
+
     pub fn cursor_left(&mut self) {
         if self.hand_cursor > 0 {
             self.hand_cursor -= 1;
@@ -398,6 +433,10 @@ impl ZeroTrustGameState {
             }
             KeyCode::Char('r') | KeyCode::Char('R') if self.phase == MpPhase::Playing => {
                 self.trigger_reveal_next();
+                None
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') if self.phase == MpPhase::Playing => {
+                self.trigger_tsumo();
                 None
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H')
@@ -591,19 +630,24 @@ impl ZeroTrustGameState {
         f.render_widget(log, chunks[4]);
 
         // 状态 banner
-        let banner_text = if self.message.is_empty() {
-            if self.actor.is_some() {
-                "actor + bridge 已 spawn".to_string()
-            } else {
-                "ZeroTrust 协议层未启动 (NetSession 缺 mp 边带)".to_string()
-            }
-        } else {
+        let banner_text = if !self.message.is_empty() {
             self.message.clone()
-        };
-        let banner_color = if self.message.is_empty() {
-            theme.info
+        } else if let Some((player, is_tsumo)) = self.winner() {
+            format!(
+                "★ Player {player} 和牌 ({}) ★",
+                if is_tsumo { "自摸" } else { "荣和" }
+            )
+        } else if self.actor.is_some() {
+            "actor + bridge 已 spawn".to_string()
         } else {
+            "ZeroTrust 协议层未启动 (NetSession 缺 mp 边带)".to_string()
+        };
+        let banner_color = if !self.message.is_empty() {
             theme.danger
+        } else if self.winner().is_some() {
+            theme.ok
+        } else {
+            theme.info
         };
         let banner = Paragraph::new(banner_text)
             .alignment(Alignment::Center)
@@ -618,9 +662,7 @@ impl ZeroTrustGameState {
 
         // 操作提示
         let hint_text = match self.phase {
-            MpPhase::Playing => {
-                "D: 摸下张  Space/Enter: 弃 cursor  R: 揭示 dora  ←/→: 移动 cursor  Esc/L: 离开"
-            }
+            MpPhase::Playing => "D: 摸  Space: 弃  R: dora  T: 自摸  ←/→: 移动  Esc/L: 离开",
             _ => "Esc / L: 离开",
         };
         let hint = Paragraph::new(hint_text)
@@ -987,6 +1029,154 @@ mod tests {
             0,
             "screen[0] 弃后 own_drawn_in_hand 应为空"
         );
+    }
+
+    /// **M5.E.1 Tsumo e2e**: 4 screen 跑到 Playing → screen[0] 摸 3 张 → 按 T 自摸
+    /// → 验证 4 screen 进 GameOver + winner() 返回 (0, true).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn zerotrust_screen_tsumo_triggers_winvalidated() {
+        use crate::mental_poker::wire::MentalPokerMsg;
+        use crate::net::p2p::mp_swarm::SwarmCommand;
+        use crate::net::session::NetSession;
+        use libp2p::PeerId;
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tokio::sync::mpsc::unbounded_channel;
+        use uuid::Uuid;
+
+        const N: usize = 4;
+        fn fake_peer_id(seed: u8) -> PeerId {
+            let mut bytes = [0u8; 32];
+            bytes[0] = seed;
+            let kp = libp2p::identity::Keypair::ed25519_from_bytes(bytes).expect("kp");
+            PeerId::from(&kp.public())
+        }
+        let peer_ids: Vec<PeerId> = (0..N as u8).map(fake_peer_id).collect();
+        let peer_to_idx: HashMap<PeerId, usize> =
+            peer_ids.iter().enumerate().map(|(i, p)| (*p, i)).collect();
+
+        let mut session_inbound_txs: Vec<
+            tokio::sync::mpsc::UnboundedSender<(PeerId, MentalPokerMsg)>,
+        > = Vec::with_capacity(N);
+        let mut cmd_rxs = Vec::with_capacity(N);
+        let mut sessions = Vec::with_capacity(N);
+        for i in 0..N {
+            let (out_tx, _out_rx) = unbounded_channel::<crate::net::protocol::ClientMsg>();
+            let (_in_tx, in_rx) = unbounded_channel::<crate::net::protocol::ServerMsg>();
+            let (mp_cmd_tx, mp_cmd_rx) = unbounded_channel::<SwarmCommand>();
+            let (mp_in_tx, mp_in_rx) = unbounded_channel::<(PeerId, MentalPokerMsg)>();
+            let session = NetSession::from_channels(i as u32, Uuid::new_v4(), out_tx, in_rx)
+                .with_mp_handles(mp_cmd_tx, mp_in_rx);
+            sessions.push(session);
+            cmd_rxs.push(mp_cmd_rx);
+            session_inbound_txs.push(mp_in_tx);
+        }
+
+        let session_label = vec![0xCCu8; 32];
+        let mut screens = Vec::with_capacity(N);
+        for (i, sess) in sessions.into_iter().enumerate() {
+            let args = MpStartArgs {
+                all_peer_ids: peer_ids.iter().map(|p| p.to_bytes()).collect(),
+                own_index: i as u32,
+                session_label: session_label.clone(),
+                deck_size: 16,
+                cnc_k_rounds: 8,
+            };
+            screens.push(ZeroTrustGameState::new(sess, args));
+        }
+
+        for i in 0..N {
+            let mut cmd_rx = cmd_rxs.remove(0);
+            let inbound_txs = session_inbound_txs.clone();
+            let peer_to_idx_clone = peer_to_idx.clone();
+            let peer_ids_clone = peer_ids.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = cmd_rx.recv().await {
+                    match cmd {
+                        SwarmCommand::Broadcast { topic: _, msg } => {
+                            for (idx, tx) in inbound_txs.iter().enumerate() {
+                                if idx == i {
+                                    continue;
+                                }
+                                let _ = tx.send((peer_ids_clone[i], msg.clone()));
+                            }
+                        }
+                        SwarmCommand::Unicast { target, msg } => {
+                            if let Some(&t_idx) = peer_to_idx_clone.get(&target) {
+                                let _ = inbound_txs[t_idx].send((peer_ids_clone[i], msg));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Step 1: all in Playing
+        let _ = tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens.iter().all(|s| s.phase == MpPhase::Playing) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(screens.iter().all(|s| s.phase == MpPhase::Playing));
+
+        // Step 2: screen[0] 摸 3 张 (deck[0..3])
+        for _ in 0..3 {
+            screens[0].trigger_draw_next();
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                let target = screens[0].ui_table.own_drawn_in_hand.len() + 1;
+                loop {
+                    for s in &mut screens {
+                        let _ = s.advance();
+                    }
+                    if screens[0].ui_table.own_drawn_in_hand.len() == target {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+        }
+        assert_eq!(
+            screens[0].ui_table.own_drawn_in_hand.len(),
+            3,
+            "screen[0] 应摸到 3 张"
+        );
+
+        // Step 3: screen[0] 按 T 触发 Tsumo
+        screens[0].trigger_tsumo();
+
+        // 等 4 screen 都进 GameOver 且 winner() = Some((0, true))
+        let _ = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens
+                    .iter()
+                    .all(|s| s.phase == MpPhase::GameOver && s.winner() == Some((0, true)))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        for (i, s) in screens.iter().enumerate() {
+            assert_eq!(s.phase, MpPhase::GameOver, "screen {i} 应 GameOver");
+            assert_eq!(
+                s.winner(),
+                Some((0, true)),
+                "screen {i} winner() 应为 (0, true)"
+            );
+        }
     }
 
     #[test]
