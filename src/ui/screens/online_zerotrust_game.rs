@@ -91,6 +91,11 @@ pub struct ZeroTrustGameState {
     /// 下一次 TriggerDraw 用的 deck_index counter. 简化 wall pointer:
     /// 收到 DrawComplete / DiscardApplied / CallApplied 时取 max.
     pub next_deck_index: u32,
+    /// M6.A: 自家是否已立直. UI 自家状态, 不通过 mental poker 协议广播 (协议层
+    /// 只关心密码学正确, 立直是 application 规则层). 影响 yaku 算分 ctx.is_riichi.
+    pub my_riichi: bool,
+    /// 立直宣告时 next_deck_index. M6.C 一发判断用 (立直后到下次摸牌前 Tsumo/Ron).
+    pub my_riichi_at: Option<u32>,
 
     /// MpPlayerActor handle. None = spawn 失败.
     actor: Option<MpPlayerHandle>,
@@ -111,6 +116,8 @@ impl ZeroTrustGameState {
             ui_table: UiTable::default(),
             hand_cursor: 0,
             next_deck_index: 0,
+            my_riichi: false,
+            my_riichi_at: None,
             actor: None,
             _bridge: None,
             _inbound_forward: None,
@@ -536,6 +543,22 @@ impl ZeroTrustGameState {
         self.ui_table.last_win.as_ref()
     }
 
+    /// M6.A: UI 触发立直. 简化 — 仅设置 my_riichi flag + 记录 deck_index.
+    /// 实际游戏立直需:听牌 + 1000 点 + 门清 + wall 余 4 张以上, 这些 application
+    /// 检查留 yaku 算分时验证 (yaku::detect_yaku 用 ctx.is_riichi).
+    /// 不广播协议消息 (mental poker 协议层不管立直, 是 application 规则).
+    pub fn declare_riichi(&mut self) {
+        if self.phase != MpPhase::Playing || self.my_riichi {
+            return;
+        }
+        self.my_riichi = true;
+        self.my_riichi_at = Some(self.next_deck_index);
+        self.event_log.push(format!(
+            "★ 立直宣告 (deck pointer = {})",
+            self.next_deck_index
+        ));
+    }
+
     pub fn cursor_left(&mut self) {
         if self.hand_cursor > 0 {
             self.hand_cursor -= 1;
@@ -585,6 +608,10 @@ impl ZeroTrustGameState {
             }
             KeyCode::Char('a') | KeyCode::Char('A') if self.phase == MpPhase::Playing => {
                 self.trigger_ankan();
+                None
+            }
+            KeyCode::Char('i') | KeyCode::Char('I') if self.phase == MpPhase::Playing => {
+                self.declare_riichi();
                 None
             }
             KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H')
@@ -639,8 +666,9 @@ impl ZeroTrustGameState {
                 .collect();
             format!(" · 宝牌指示: {}", s.join(" "))
         };
+        let riichi_str = if self.my_riichi { " · 立直 ★" } else { "" };
         let title = Paragraph::new(format!(
-            "ZeroTrust · own_index={} · phase={:?}{dora_str}",
+            "ZeroTrust · own_index={} · phase={:?}{riichi_str}{dora_str}",
             self.args.own_index, self.phase,
         ))
         .alignment(Alignment::Center)
@@ -869,7 +897,7 @@ impl ZeroTrustGameState {
         // 操作提示
         let hint_text = match self.phase {
             MpPhase::Playing => {
-                "D 摸 / Space 弃 / R dora / C 吃 / P 碰 / K 明杠 / A 暗杠 / T 自摸 / N 荣和 / Esc"
+                "D 摸 / Space 弃 / R dora / C 吃 / P 碰 / K 明杠 / A 暗杠 / I 立直 / T 自摸 / N 荣和 / Esc"
             }
             _ => "Esc / L: 离开",
         };
@@ -2330,6 +2358,47 @@ mod tests {
     fn tile_label_t_for_test_deck() {
         assert_eq!(tile_label(0, 16), "t0");
         assert_eq!(tile_label(7, 16), "t7");
+    }
+
+    /// **M6.A Riichi 单测**: declare_riichi() 设 my_riichi flag + my_riichi_at,
+    /// 重复调用 idempotent. Playing phase 之外 noop.
+    #[test]
+    fn declare_riichi_sets_flag_and_records_deck_index() {
+        use crate::net::session::NetSession;
+        use tokio::sync::mpsc::unbounded_channel;
+        use uuid::Uuid;
+
+        let (out_tx, _out_rx) = unbounded_channel::<crate::net::protocol::ClientMsg>();
+        let (_in_tx, in_rx) = unbounded_channel::<crate::net::protocol::ServerMsg>();
+        let session = NetSession::from_channels(0, Uuid::new_v4(), out_tx, in_rx);
+        let args = MpStartArgs {
+            all_peer_ids: vec![vec![1; 32], vec![2; 32], vec![3; 32], vec![4; 32]],
+            own_index: 0,
+            session_label: vec![0xAB; 32],
+            deck_size: 16,
+            cnc_k_rounds: 8,
+        };
+        let mut state = ZeroTrustGameState::new(session, args);
+        // 默认非 Playing phase, declare_riichi noop
+        assert!(!state.my_riichi);
+        state.declare_riichi();
+        assert!(!state.my_riichi, "非 Playing phase 不能立直");
+
+        // 模拟 transition Playing
+        state.phase = MpPhase::Playing;
+        state.next_deck_index = 7;
+        state.declare_riichi();
+        assert!(state.my_riichi);
+        assert_eq!(state.my_riichi_at, Some(7));
+        assert!(
+            state.event_log.iter().any(|l| l.contains("立直宣告")),
+            "应有立直宣告 log"
+        );
+
+        // idempotent: 重复 declare 不再写 log
+        let log_count = state.event_log.len();
+        state.declare_riichi();
+        assert_eq!(state.event_log.len(), log_count, "重复立直应 noop");
     }
 
     /// **M5.F.2 win_summary 单测**: WinValidated event 应累积到 ui_table.last_win,
