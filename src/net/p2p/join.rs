@@ -12,7 +12,7 @@ use libp2p::gossipsub;
 
 use crate::mental_poker::wire::MentalPokerMsg;
 use crate::net::p2p::behaviour::{Ack, MP_TOPIC_PREFIX, P2pBehaviour, P2pBehaviourEvent};
-use crate::net::p2p::mp_swarm::SwarmCommand;
+use crate::net::p2p::mp_swarm::{SwarmCommand, dispatch_swarm_command};
 use crate::net::p2p::swarm::{build_swarm, new_keypair};
 use crate::net::protocol::{ClientMsg, ServerMsg};
 use crate::net::session::NetSession;
@@ -202,30 +202,7 @@ fn handle_mp_command(
     cmd: SwarmCommand,
     subscribed_topics: &mut std::collections::HashSet<String>,
 ) {
-    match cmd {
-        SwarmCommand::Broadcast { topic, msg } => {
-            if subscribed_topics.insert(topic.clone()) {
-                let ident = gossipsub::IdentTopic::new(&topic);
-                if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&ident) {
-                    tracing::warn!("mp_topic={topic} 订阅失败: {e}");
-                }
-            }
-            let payload = match serde_json::to_vec(&msg) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!("mp Broadcast json encode 失败: {e}");
-                    return;
-                }
-            };
-            let ident = gossipsub::IdentTopic::new(&topic);
-            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ident, payload) {
-                tracing::debug!("mp publish to {topic} pending: {e}");
-            }
-        }
-        SwarmCommand::Unicast { target, msg } => {
-            swarm.behaviour_mut().rr_mp.send_request(&target, msg);
-        }
-    }
+    dispatch_swarm_command(swarm, cmd, subscribed_topics);
 }
 
 async fn handle_event(

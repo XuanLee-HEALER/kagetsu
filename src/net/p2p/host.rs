@@ -23,7 +23,7 @@ use crate::net::p2p::behaviour::{
     Ack, LOBBY_TOPIC, LobbyAnnouncement, MP_TOPIC_PREFIX, P2pBehaviour, P2pBehaviourEvent,
     RELAYS_TOPIC, RelayAnnouncement,
 };
-use crate::net::p2p::mp_swarm::SwarmCommand;
+use crate::net::p2p::mp_swarm::{SwarmCommand, dispatch_swarm_command};
 use crate::net::p2p::swarm::{build_swarm, new_keypair};
 use crate::net::protocol::{ClientMsg, ServerMsg};
 use crate::net::room::{RoomCmd, RoomHandle};
@@ -344,38 +344,13 @@ async fn host_swarm_task(
     }
 }
 
-/// M5.D.0 mp 命令 dispatch: SwarmTransport → libp2p swarm 出口.
+/// M5.D.0 mp 命令 dispatch — 调 mp_swarm::dispatch_swarm_command 共用实现.
 fn handle_mp_command(
     swarm: &mut Swarm<P2pBehaviour>,
     cmd: SwarmCommand,
     subscribed_topics: &mut std::collections::HashSet<String>,
 ) {
-    match cmd {
-        SwarmCommand::Broadcast { topic, msg } => {
-            // lazy 订阅: 第一次 publish 此 topic 时同时 subscribe (确保自己也能
-            // forward mesh 消息 — gossipsub 默认不回环到自己, 但订阅是 mesh 必要).
-            if subscribed_topics.insert(topic.clone()) {
-                let ident = gossipsub::IdentTopic::new(&topic);
-                if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&ident) {
-                    tracing::warn!("mp_topic={topic} 订阅失败: {e}");
-                }
-            }
-            let payload = match serde_json::to_vec(&msg) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!("mp Broadcast cbor encode 失败: {e}");
-                    return;
-                }
-            };
-            let ident = gossipsub::IdentTopic::new(&topic);
-            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ident, payload) {
-                tracing::debug!("mp publish to {topic} pending: {e}");
-            }
-        }
-        SwarmCommand::Unicast { target, msg } => {
-            swarm.behaviour_mut().rr_mp.send_request(&target, msg);
-        }
-    }
+    dispatch_swarm_command(swarm, cmd, subscribed_topics);
 }
 
 /// 把当前房间状态序列化为 JSON 后通过 gossipsub publish 到 LOBBY_TOPIC.
