@@ -43,6 +43,20 @@ pub struct MpStartArgs {
     pub cnc_k_rounds: u32,
 }
 
+/// UI table 镜像 — ZeroTrustGameState 从 MpEvent 累积出的可渲染状态.
+/// 不重复 actor 内部 Table (那个 actor 持有, 不跨线程), UI 自己保留必要的视图.
+#[derive(Debug, Default, Clone)]
+pub struct UiTable {
+    /// 4 家弃牌池: 各家弃过的 tile_id (按 discard 顺序).
+    pub discarded_pools: [Vec<usize>; 4],
+    /// 自家手牌 (deck_index → tile_id). 摸 + 弃 + 鸣 + 杠时增删.
+    pub own_drawn_in_hand: std::collections::BTreeMap<u32, usize>,
+    /// 自家副露 (Pon/Chi/Minkan/Ankan). 简化为 (call_type, tile_ids) tuple.
+    pub own_melds: Vec<(crate::mental_poker::wire::WireCallType, Vec<usize>)>,
+    /// 已揭示的 dora indicator tile_id 列表.
+    pub dora_indicators: Vec<usize>,
+}
+
 pub struct ZeroTrustGameState {
     pub session: NetSession,
     pub args: MpStartArgs,
@@ -54,16 +68,20 @@ pub struct ZeroTrustGameState {
     pub phase: MpPhase,
     /// shuffle 进度 (completed / total). KeyExchange 阶段都是 0.
     pub shuffle_progress: (u32, u32),
-    /// 累积的事件 banner (e.g. "Drew deck[5] = tile 12", "Player 1 discarded tile 3").
+    /// 累积的事件 banner.
     pub event_log: Vec<String>,
+    /// UI table 镜像 (从 MpEvent 累积).
+    pub ui_table: UiTable,
+    /// 自家手牌 cursor (own_drawn_in_hand 中 BTreeMap 的索引位置, 0..N).
+    pub hand_cursor: usize,
+    /// 下一次 TriggerDraw 用的 deck_index counter. 简化 wall pointer:
+    /// 收到 DrawComplete / DiscardApplied / CallApplied 时取 max.
+    pub next_deck_index: u32,
 
-    /// MpPlayerActor handle. None = spawn 失败 (e.g. NetSession.mp_command_tx 缺失).
+    /// MpPlayerActor handle. None = spawn 失败.
     actor: Option<MpPlayerHandle>,
-    /// mp_bridge handle (drop 时 abort).
     _bridge: Option<MpBridgeHandle>,
-    /// inbound forward task handle (drop 时 abort).
     _inbound_forward: Option<JoinHandle<()>>,
-    /// UI 侧 event drain rx.
     ui_event_rx: Option<UnboundedReceiver<MpEvent>>,
 }
 
@@ -76,6 +94,9 @@ impl ZeroTrustGameState {
             phase: MpPhase::KeyExchange,
             shuffle_progress: (0, 4),
             event_log: Vec::new(),
+            ui_table: UiTable::default(),
+            hand_cursor: 0,
+            next_deck_index: 0,
             actor: None,
             _bridge: None,
             _inbound_forward: None,
@@ -225,6 +246,8 @@ impl ZeroTrustGameState {
                 tile_id,
                 ..
             } => {
+                self.ui_table.own_drawn_in_hand.insert(deck_index, tile_id);
+                self.next_deck_index = self.next_deck_index.max(deck_index + 1);
                 self.event_log
                     .push(format!("Drew deck[{deck_index}] = tile {tile_id}"));
             }
@@ -232,6 +255,8 @@ impl ZeroTrustGameState {
                 deck_index,
                 tile_id,
             } => {
+                self.ui_table.dora_indicators.push(tile_id);
+                self.next_deck_index = self.next_deck_index.max(deck_index + 1);
                 self.event_log
                     .push(format!("Revealed deck[{deck_index}] = tile {tile_id}"));
             }
@@ -240,6 +265,17 @@ impl ZeroTrustGameState {
                 deck_index,
                 tile_id,
             } => {
+                if (player as usize) < 4 {
+                    self.ui_table.discarded_pools[player as usize].push(tile_id);
+                }
+                if player == self.args.own_index {
+                    self.ui_table.own_drawn_in_hand.remove(&deck_index);
+                    let len = self.ui_table.own_drawn_in_hand.len();
+                    if self.hand_cursor >= len && self.hand_cursor > 0 {
+                        self.hand_cursor = len.saturating_sub(1);
+                    }
+                }
+                self.next_deck_index = self.next_deck_index.max(deck_index + 1);
                 self.event_log.push(format!(
                     "Player {player} discarded deck[{deck_index}] (tile {tile_id})"
                 ));
@@ -247,12 +283,44 @@ impl ZeroTrustGameState {
             MpEvent::CallApplied {
                 player,
                 from_player,
+                deck_indices,
+                tile_ids,
+                call_type,
+            } => {
+                if player == self.args.own_index {
+                    for &di in &deck_indices {
+                        self.ui_table.own_drawn_in_hand.remove(&di);
+                    }
+                    self.ui_table.own_melds.push((call_type, tile_ids.clone()));
+                    let len = self.ui_table.own_drawn_in_hand.len();
+                    if self.hand_cursor >= len && self.hand_cursor > 0 {
+                        self.hand_cursor = len.saturating_sub(1);
+                    }
+                }
+                if let Some(&max_di) = deck_indices.iter().max() {
+                    self.next_deck_index = self.next_deck_index.max(max_di + 1);
+                }
+                self.event_log.push(format!(
+                    "Player {player} called {call_type:?} from {from_player}"
+                ));
+            }
+            MpEvent::ConcealedKanApplied {
+                player,
+                deck_indices,
                 ..
             } => {
-                self.event_log
-                    .push(format!("Player {player} called from {from_player}"));
-            }
-            MpEvent::ConcealedKanApplied { player, .. } => {
+                if player == self.args.own_index {
+                    for &di in &deck_indices {
+                        self.ui_table.own_drawn_in_hand.remove(&di);
+                    }
+                    let len = self.ui_table.own_drawn_in_hand.len();
+                    if self.hand_cursor >= len && self.hand_cursor > 0 {
+                        self.hand_cursor = len.saturating_sub(1);
+                    }
+                }
+                if let Some(&max_di) = deck_indices.iter().max() {
+                    self.next_deck_index = self.next_deck_index.max(max_di + 1);
+                }
                 self.event_log
                     .push(format!("Player {player} concealed kan"));
             }
@@ -280,8 +348,70 @@ impl ZeroTrustGameState {
         }
     }
 
+    /// UI 触发摸下一张牌. wall pointer 用 next_deck_index counter.
+    pub fn trigger_draw_next(&self) {
+        self.send_cmd(MpRoomCmd::TriggerDraw {
+            deck_index: self.next_deck_index,
+        });
+    }
+
+    /// UI 触发弃当前 cursor 指的牌.
+    pub fn discard_cursor(&self) {
+        let Some((deck_index, _)) = self.ui_table.own_drawn_in_hand.iter().nth(self.hand_cursor)
+        else {
+            return;
+        };
+        self.send_cmd(MpRoomCmd::Discard {
+            deck_index: *deck_index,
+        });
+    }
+
+    /// UI 触发揭示下一张 dora indicator.
+    pub fn trigger_reveal_next(&self) {
+        self.send_cmd(MpRoomCmd::TriggerReveal {
+            deck_index: self.next_deck_index,
+        });
+    }
+
+    pub fn cursor_left(&mut self) {
+        if self.hand_cursor > 0 {
+            self.hand_cursor -= 1;
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        let max = self.ui_table.own_drawn_in_hand.len().saturating_sub(1);
+        if self.hand_cursor < max {
+            self.hand_cursor += 1;
+        }
+    }
+
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
         match key.code {
+            KeyCode::Char('d') | KeyCode::Char('D') if self.phase == MpPhase::Playing => {
+                self.trigger_draw_next();
+                None
+            }
+            KeyCode::Char(' ') | KeyCode::Enter if self.phase == MpPhase::Playing => {
+                self.discard_cursor();
+                None
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') if self.phase == MpPhase::Playing => {
+                self.trigger_reveal_next();
+                None
+            }
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('H')
+                if self.phase == MpPhase::Playing =>
+            {
+                self.cursor_left();
+                None
+            }
+            KeyCode::Right | KeyCode::Char('j') | KeyCode::Char('J')
+                if self.phase == MpPhase::Playing =>
+            {
+                self.cursor_right();
+                None
+            }
             KeyCode::Esc | KeyCode::Char('l') | KeyCode::Char('L') => {
                 Some(Transition::RequestConfirm {
                     modal: Box::new(crate::ui::confirm::ConfirmModal::new(
@@ -300,18 +430,30 @@ impl ZeroTrustGameState {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // 标题
-                Constraint::Length(7), // MpStart 参数
-                Constraint::Length(3), // phase + shuffle 进度
-                Constraint::Min(3),    // event log
-                Constraint::Length(3), // 状态 banner
-                Constraint::Length(3), // 操作提示
+                Constraint::Length(3),  // 标题
+                Constraint::Length(3),  // 协议进度
+                Constraint::Length(10), // 4 家弃牌池
+                Constraint::Length(5),  // 自家手牌
+                Constraint::Min(3),     // 事件日志
+                Constraint::Length(3),  // 状态 banner
+                Constraint::Length(3),  // 操作提示
             ])
             .split(area);
 
         // 标题
+        let dora_str = if self.ui_table.dora_indicators.is_empty() {
+            String::new()
+        } else {
+            let s: Vec<String> = self
+                .ui_table
+                .dora_indicators
+                .iter()
+                .map(|&t| tile_label(t, self.args.deck_size))
+                .collect();
+            format!(" · 宝牌指示: {}", s.join(" "))
+        };
         let title = Paragraph::new(format!(
-            "ZeroTrust · own_index={} · phase={:?}",
+            "ZeroTrust · own_index={} · phase={:?}{dora_str}",
             self.args.own_index, self.phase,
         ))
         .alignment(Alignment::Center)
@@ -323,54 +465,17 @@ impl ZeroTrustGameState {
         );
         f.render_widget(title, chunks[0]);
 
-        // MpStart 参数
-        let label_hex = hex_short(&self.args.session_label);
-        let peer_lines: Vec<Line> = self
-            .args
-            .all_peer_ids
-            .iter()
-            .enumerate()
-            .map(|(i, pid)| {
-                let marker = if i as u32 == self.args.own_index {
-                    " ← 你"
-                } else {
-                    ""
-                };
-                Line::from(vec![
-                    Span::raw(format!("  player[{i}] = {}", hex_short(pid))),
-                    Span::styled(marker, Style::default().fg(theme.accent)),
-                ])
-            })
-            .collect();
-        let mut info_lines = vec![
-            Line::from(vec![
-                Span::raw("session_label = "),
-                Span::styled(label_hex, Style::default().fg(theme.accent)),
-            ]),
-            Line::from(format!(
-                "deck_size = {} · cnc_k_rounds = {}",
-                self.args.deck_size, self.args.cnc_k_rounds
-            )),
-        ];
-        info_lines.extend(peer_lines);
-        let info = Paragraph::new(info_lines)
-            .style(Style::default().fg(theme.fg).bg(theme.bg))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Mp 协议参数")
-                    .style(Style::default().bg(theme.bg)),
-            );
-        f.render_widget(info, chunks[1]);
-
-        // phase + shuffle 进度
+        // 协议进度
         let progress_text = match self.phase {
             MpPhase::KeyExchange => "等待 4 方 keygen + Schnorr DLEQ 验证...".to_string(),
             MpPhase::Shuffling => format!(
                 "联合洗牌中 · {} / {} 轮 (每轮 cut-and-choose proof 验证)",
                 self.shuffle_progress.0, self.shuffle_progress.1
             ),
-            MpPhase::Playing => "游戏进行中".to_string(),
+            MpPhase::Playing => format!(
+                "游戏进行中 · 牌山指针 = {} / {}",
+                self.next_deck_index, self.args.deck_size
+            ),
             MpPhase::GameOver => "局已结束".to_string(),
         };
         let progress = Paragraph::new(progress_text)
@@ -382,9 +487,91 @@ impl ZeroTrustGameState {
                     .title("协议进度")
                     .style(Style::default().bg(theme.bg)),
             );
-        f.render_widget(progress, chunks[2]);
+        f.render_widget(progress, chunks[1]);
 
-        // event log
+        // 4 家弃牌池
+        let pool_lines: Vec<Line> = (0..4)
+            .map(|i| {
+                let me = if i == self.args.own_index as usize {
+                    "→ "
+                } else {
+                    "  "
+                };
+                let tiles_str: Vec<String> = self.ui_table.discarded_pools[i]
+                    .iter()
+                    .map(|&t| tile_label(t, self.args.deck_size))
+                    .collect();
+                Line::from(vec![
+                    Span::styled(
+                        format!("{me}player[{i}] ({:>2}): ", tiles_str.len()),
+                        Style::default().fg(if i == self.args.own_index as usize {
+                            theme.accent
+                        } else {
+                            theme.fg
+                        }),
+                    ),
+                    Span::raw(tiles_str.join(" ")),
+                ])
+            })
+            .collect();
+        let pools = Paragraph::new(pool_lines)
+            .style(Style::default().fg(theme.fg).bg(theme.bg))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("弃牌池")
+                    .style(Style::default().bg(theme.bg)),
+            );
+        f.render_widget(pools, chunks[2]);
+
+        // 自家手牌 + cursor
+        let hand_entries: Vec<(u32, usize)> = self
+            .ui_table
+            .own_drawn_in_hand
+            .iter()
+            .map(|(&di, &tid)| (di, tid))
+            .collect();
+        let mut hand_spans: Vec<Span> = Vec::with_capacity(hand_entries.len() * 2);
+        for (i, (di, tid)) in hand_entries.iter().enumerate() {
+            let label = tile_label(*tid, self.args.deck_size);
+            let style = if i == self.hand_cursor {
+                Style::default()
+                    .fg(theme.bg)
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg).bg(theme.bg)
+            };
+            hand_spans.push(Span::styled(format!("[{label}#{di}]"), style));
+            hand_spans.push(Span::raw(" "));
+        }
+        let melds_str: Vec<String> = self
+            .ui_table
+            .own_melds
+            .iter()
+            .map(|(ct, ids)| {
+                let labels: Vec<String> = ids
+                    .iter()
+                    .map(|&t| tile_label(t, self.args.deck_size))
+                    .collect();
+                format!("{ct:?}({})", labels.join(""))
+            })
+            .collect();
+        let hand_lines = vec![
+            Line::from(hand_spans),
+            Line::from(format!("副露: {}", melds_str.join(" "))),
+        ];
+        let hand = Paragraph::new(hand_lines)
+            .style(Style::default().fg(theme.fg).bg(theme.bg))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("自家手牌")
+                    .style(Style::default().bg(theme.bg)),
+            );
+        f.render_widget(hand, chunks[3]);
+
+        // 事件日志
         let log_lines: Vec<Line> = self
             .event_log
             .iter()
@@ -401,12 +588,12 @@ impl ZeroTrustGameState {
                     .title("事件日志")
                     .style(Style::default().bg(theme.bg)),
             );
-        f.render_widget(log, chunks[3]);
+        f.render_widget(log, chunks[4]);
 
         // 状态 banner
         let banner_text = if self.message.is_empty() {
             if self.actor.is_some() {
-                "ZeroTrust 协议层已 spawn — actor + bridge 跑 mental poker 协议".to_string()
+                "actor + bridge 已 spawn".to_string()
             } else {
                 "ZeroTrust 协议层未启动 (NetSession 缺 mp 边带)".to_string()
             }
@@ -427,10 +614,16 @@ impl ZeroTrustGameState {
                     .title("状态")
                     .style(Style::default().bg(theme.bg)),
             );
-        f.render_widget(banner, chunks[4]);
+        f.render_widget(banner, chunks[5]);
 
         // 操作提示
-        let hint = Paragraph::new("Esc / L: 离开")
+        let hint_text = match self.phase {
+            MpPhase::Playing => {
+                "D: 摸下张  Space/Enter: 弃 cursor  R: 揭示 dora  ←/→: 移动 cursor  Esc/L: 离开"
+            }
+            _ => "Esc / L: 离开",
+        };
+        let hint = Paragraph::new(hint_text)
             .alignment(Alignment::Center)
             .style(Style::default().fg(theme.dim).bg(theme.bg))
             .block(
@@ -438,7 +631,31 @@ impl ZeroTrustGameState {
                     .borders(Borders::ALL)
                     .style(Style::default().bg(theme.bg)),
             );
-        f.render_widget(hint, chunks[5]);
+        f.render_widget(hint, chunks[6]);
+    }
+}
+
+/// tile_id → 显示标签. 生产 deck_size=136 时按 standard_set 顺序映射 mahjong
+/// label (1m..9m, 1p..9p, 1s..9s, 东南西北白发中); 测试 deck_size<136 时直接
+/// 显示 t{id}.
+fn tile_label(tile_id: usize, deck_size: u32) -> String {
+    if deck_size == 136 {
+        let kind = (tile_id / 4) as u8;
+        if kind < 9 {
+            format!("{}m", kind + 1)
+        } else if kind < 18 {
+            format!("{}p", kind - 8)
+        } else if kind < 27 {
+            format!("{}s", kind - 17)
+        } else {
+            ["东", "南", "西", "北", "白", "发", "中"]
+                .get((kind - 27) as usize)
+                .copied()
+                .unwrap_or("?")
+                .to_string()
+        }
+    } else {
+        format!("t{tile_id}")
     }
 }
 
@@ -603,5 +820,188 @@ mod tests {
                 "screen {i} log 应含 Playing transition"
             );
         }
+    }
+
+    /// **M5.E.0 ZeroTrustGameState gameplay e2e**: 4 screen 跑到 Playing 后,
+    /// screen[0] trigger_draw_next() → 等 DrawComplete → discard_cursor() →
+    /// 验证 4 screen 的 ui_table.discarded_pools[0] 长度 = 1, screen[0]
+    /// 的 own_drawn_in_hand 减回 0.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn zerotrust_screen_draw_then_discard_updates_ui_table() {
+        use crate::mental_poker::wire::MentalPokerMsg;
+        use crate::net::p2p::mp_swarm::SwarmCommand;
+        use crate::net::session::NetSession;
+        use libp2p::PeerId;
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tokio::sync::mpsc::unbounded_channel;
+        use uuid::Uuid;
+
+        const N: usize = 4;
+
+        fn fake_peer_id(seed: u8) -> PeerId {
+            let mut bytes = [0u8; 32];
+            bytes[0] = seed;
+            let kp = libp2p::identity::Keypair::ed25519_from_bytes(bytes).expect("kp");
+            PeerId::from(&kp.public())
+        }
+        let peer_ids: Vec<PeerId> = (0..N as u8).map(fake_peer_id).collect();
+        let peer_to_idx: HashMap<PeerId, usize> =
+            peer_ids.iter().enumerate().map(|(i, p)| (*p, i)).collect();
+
+        let mut session_inbound_txs: Vec<
+            tokio::sync::mpsc::UnboundedSender<(PeerId, MentalPokerMsg)>,
+        > = Vec::with_capacity(N);
+        let mut cmd_rxs = Vec::with_capacity(N);
+        let mut sessions = Vec::with_capacity(N);
+        for i in 0..N {
+            let (out_tx, _out_rx) = unbounded_channel::<crate::net::protocol::ClientMsg>();
+            let (_in_tx, in_rx) = unbounded_channel::<crate::net::protocol::ServerMsg>();
+            let (mp_cmd_tx, mp_cmd_rx) = unbounded_channel::<SwarmCommand>();
+            let (mp_in_tx, mp_in_rx) = unbounded_channel::<(PeerId, MentalPokerMsg)>();
+            let session = NetSession::from_channels(i as u32, Uuid::new_v4(), out_tx, in_rx)
+                .with_mp_handles(mp_cmd_tx, mp_in_rx);
+            sessions.push(session);
+            cmd_rxs.push(mp_cmd_rx);
+            session_inbound_txs.push(mp_in_tx);
+        }
+
+        let session_label = vec![0x88u8; 32];
+        let mut screens = Vec::with_capacity(N);
+        for (i, sess) in sessions.into_iter().enumerate() {
+            let args = MpStartArgs {
+                all_peer_ids: peer_ids.iter().map(|p| p.to_bytes()).collect(),
+                own_index: i as u32,
+                session_label: session_label.clone(),
+                deck_size: 16,
+                cnc_k_rounds: 8,
+            };
+            screens.push(ZeroTrustGameState::new(sess, args));
+        }
+
+        for i in 0..N {
+            let mut cmd_rx = cmd_rxs.remove(0);
+            let inbound_txs = session_inbound_txs.clone();
+            let peer_to_idx_clone = peer_to_idx.clone();
+            let peer_ids_clone = peer_ids.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = cmd_rx.recv().await {
+                    match cmd {
+                        SwarmCommand::Broadcast { topic: _, msg } => {
+                            for (idx, tx) in inbound_txs.iter().enumerate() {
+                                if idx == i {
+                                    continue;
+                                }
+                                let _ = tx.send((peer_ids_clone[i], msg.clone()));
+                            }
+                        }
+                        SwarmCommand::Unicast { target, msg } => {
+                            if let Some(&t_idx) = peer_to_idx_clone.get(&target) {
+                                let _ = inbound_txs[t_idx].send((peer_ids_clone[i], msg));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Step 1: 等 all in Playing
+        let _ = tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens.iter().all(|s| s.phase == MpPhase::Playing) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        for (i, s) in screens.iter().enumerate() {
+            assert_eq!(s.phase, MpPhase::Playing, "screen {i} 应 Playing");
+        }
+
+        // Step 2: screen[0] 摸下一张 (deck_index = 0, next_deck_index 初始 0)
+        screens[0].trigger_draw_next();
+
+        // 等 screen[0].own_drawn_in_hand 含 deck[0]
+        let _ = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if !screens[0].ui_table.own_drawn_in_hand.is_empty() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert_eq!(
+            screens[0].ui_table.own_drawn_in_hand.len(),
+            1,
+            "screen[0] 摸 1 张应入 own_drawn_in_hand"
+        );
+        let drew_tile_id = *screens[0]
+            .ui_table
+            .own_drawn_in_hand
+            .values()
+            .next()
+            .unwrap();
+
+        // Step 3: screen[0] 弃 cursor 指的牌
+        screens[0].discard_cursor();
+
+        // 等 4 screen 都收 DiscardApplied → ui_table.discarded_pools[0] 长度 = 1
+        let _ = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens
+                    .iter()
+                    .all(|s| s.ui_table.discarded_pools[0].len() == 1)
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        for (i, s) in screens.iter().enumerate() {
+            assert_eq!(
+                s.ui_table.discarded_pools[0].len(),
+                1,
+                "screen {i} 应看到 player 0 弃 1 张"
+            );
+            assert_eq!(
+                s.ui_table.discarded_pools[0][0], drew_tile_id,
+                "screen {i} 看到的弃牌 tile_id 应跟 screen[0] 摸的一致"
+            );
+        }
+        // screen[0] 自家手牌减回 0
+        assert_eq!(
+            screens[0].ui_table.own_drawn_in_hand.len(),
+            0,
+            "screen[0] 弃后 own_drawn_in_hand 应为空"
+        );
+    }
+
+    #[test]
+    fn tile_label_mahjong_for_full_deck() {
+        assert_eq!(tile_label(0, 136), "1m");
+        assert_eq!(tile_label(35, 136), "9m"); // 8 * 4 + 3
+        assert_eq!(tile_label(36, 136), "1p");
+        assert_eq!(tile_label(72, 136), "1s");
+        assert_eq!(tile_label(108, 136), "东");
+        assert_eq!(tile_label(132, 136), "中");
+    }
+
+    #[test]
+    fn tile_label_t_for_test_deck() {
+        assert_eq!(tile_label(0, 16), "t0");
+        assert_eq!(tile_label(7, 16), "t7");
     }
 }
