@@ -233,6 +233,15 @@ impl MpPlayerActor {
                 self.do_discard(deck_index);
                 true
             }
+            MpRoomCmd::Call {
+                call_type,
+                deck_indices,
+                from_player,
+                from_position_in_meld,
+            } => {
+                self.do_call(call_type, deck_indices, from_player, from_position_in_meld);
+                true
+            }
             MpRoomCmd::Tsumo {
                 hand_indices,
                 winning_tile_index,
@@ -294,6 +303,23 @@ impl MpPlayerActor {
                 plaintext,
             } if self.phase == MpPhase::Playing => {
                 self.handle_discard_msg(player, deck_index, plaintext);
+            }
+            MentalPokerMsg::Call {
+                player,
+                call_type,
+                deck_indices,
+                plaintexts,
+                from_player,
+                from_position_in_meld,
+            } if self.phase == MpPhase::Playing => {
+                self.handle_call_msg(
+                    player,
+                    call_type,
+                    deck_indices,
+                    plaintexts,
+                    from_player,
+                    from_position_in_meld,
+                );
             }
             MentalPokerMsg::Win {
                 player,
@@ -958,6 +984,148 @@ impl MpPlayerActor {
         });
     }
 
+    /// 协议 5 自己鸣牌 (吃/碰/明杠).
+    fn do_call(
+        &mut self,
+        call_type: crate::mental_poker::wire::WireCallType,
+        deck_indices: Vec<u32>,
+        from_player: u32,
+        from_position_in_meld: u32,
+    ) {
+        if self.phase != MpPhase::Playing {
+            return;
+        }
+        // 反查 plaintexts (自己 hand 部分用 own_drawn, from_position 用 from_player.discarded)
+        let mut plaintexts: Vec<crate::mental_poker::Curve> =
+            Vec::with_capacity(deck_indices.len());
+        for (i, &idx) in deck_indices.iter().enumerate() {
+            let pt = if i == from_position_in_meld as usize {
+                // from_player 弃牌 — 从 table 拿
+                match self
+                    .table
+                    .hand(from_player as usize)
+                    .discarded_plaintext(idx as usize)
+                {
+                    Some(p) => *p,
+                    None => {
+                        self.emit_protocol_error(
+                            None,
+                            format!("Call: from_player={from_player} 没弃过 deck_index={idx}"),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                // 自己 hand
+                let Some(&tid) = self.own_drawn.get(&idx) else {
+                    self.emit_protocol_error(
+                        None,
+                        format!("Call: deck_index={idx} 不在 own_drawn"),
+                    );
+                    return;
+                };
+                self.card_mapping.encode(tid)
+            };
+            plaintexts.push(pt);
+        }
+
+        let ann = crate::mental_poker::protocol_call::CallAnnouncement {
+            player: self.cfg.own_index,
+            call_type: call_type.into(),
+            deck_indices: deck_indices.iter().map(|&i| i as usize).collect(),
+            plaintexts: plaintexts.clone(),
+            from_player: from_player as usize,
+            from_position_in_meld: from_position_in_meld as usize,
+        };
+        if let Err(e) = ann.apply(&mut self.table) {
+            self.emit_protocol_error(None, format!("自己 Call apply 失败: {e}"));
+            return;
+        }
+        // 广播
+        let plaintexts_bytes: Vec<Vec<u8>> = plaintexts
+            .iter()
+            .map(crate::mental_poker::wire::encode_curve)
+            .collect();
+        let msg = MentalPokerMsg::Call {
+            player: self.cfg.own_index as u32,
+            call_type,
+            deck_indices: deck_indices.clone(),
+            plaintexts: plaintexts_bytes,
+            from_player,
+            from_position_in_meld,
+        };
+        let _ = self.event_tx.send(MpEvent::OutboundMsg { to: None, msg });
+        // tile_ids 给 UI
+        let tile_ids: Vec<usize> = plaintexts
+            .iter()
+            .map(|p| self.card_mapping.decode(p).unwrap_or(usize::MAX))
+            .collect();
+        let _ = self.event_tx.send(MpEvent::CallApplied {
+            player: self.cfg.own_index as u32,
+            call_type,
+            deck_indices,
+            tile_ids,
+            from_player,
+        });
+    }
+
+    /// 协议 5 远端鸣牌. 反查 plaintexts → tile_ids, validate + apply.
+    #[allow(clippy::too_many_arguments)]
+    fn handle_call_msg(
+        &mut self,
+        player: u32,
+        call_type: crate::mental_poker::wire::WireCallType,
+        deck_indices: Vec<u32>,
+        plaintexts_bytes: Vec<Vec<u8>>,
+        from_player: u32,
+        from_position_in_meld: u32,
+    ) {
+        if (player as usize) >= self.cfg.n_players() {
+            self.emit_protocol_error(None, format!("Call player={player} 越界"));
+            return;
+        }
+        if (player as usize) == self.cfg.own_index {
+            return;
+        }
+        let mut plaintexts: Vec<crate::mental_poker::Curve> =
+            Vec::with_capacity(plaintexts_bytes.len());
+        for b in &plaintexts_bytes {
+            match wire::decode_curve(b) {
+                Ok(p) => plaintexts.push(p),
+                Err(e) => {
+                    self.emit_protocol_error(
+                        Some(player as usize),
+                        format!("Call plaintext decode: {e}"),
+                    );
+                    return;
+                }
+            }
+        }
+        let ann = crate::mental_poker::protocol_call::CallAnnouncement {
+            player: player as usize,
+            call_type: call_type.into(),
+            deck_indices: deck_indices.iter().map(|&i| i as usize).collect(),
+            plaintexts: plaintexts.clone(),
+            from_player: from_player as usize,
+            from_position_in_meld: from_position_in_meld as usize,
+        };
+        if let Err(e) = ann.apply(&mut self.table) {
+            self.emit_protocol_error(Some(player as usize), format!("Call apply 失败: {e}"));
+            return;
+        }
+        let tile_ids: Vec<usize> = plaintexts
+            .iter()
+            .map(|p| self.card_mapping.decode(p).unwrap_or(usize::MAX))
+            .collect();
+        let _ = self.event_tx.send(MpEvent::CallApplied {
+            player,
+            call_type,
+            deck_indices,
+            tile_ids,
+            from_player,
+        });
+    }
+
     /// 协议 7 自己宣告和牌 (Tsumo / Ron). validate 本地 + 广播 (不 apply 到
     /// Table 因为 Win 是终局事件不修改 state).
     fn do_win(
@@ -1405,6 +1573,7 @@ mod tests {
                         MpEvent::ShuffleProgress { .. }
                         | MpEvent::GameOver { .. }
                         | MpEvent::DiscardApplied { .. }
+                        | MpEvent::CallApplied { .. }
                         | MpEvent::WinValidated { .. } => {}
                     }
                 }
@@ -1477,6 +1646,7 @@ mod tests {
                         | MpEvent::DrawComplete { .. }
                         | MpEvent::RevealComplete { .. }
                         | MpEvent::DiscardApplied { .. }
+                        | MpEvent::CallApplied { .. }
                         | MpEvent::WinValidated { .. } => {}
                     }
                 }

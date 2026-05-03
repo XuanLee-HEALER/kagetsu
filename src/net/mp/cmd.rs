@@ -32,6 +32,18 @@ pub enum MpRoomCmd {
     /// 主动弃牌 (协议 4): caller 指定要弃的 deck_index. 必须是自己之前摸过 +
     /// 未弃过 + 未鸣过的位置.
     Discard { deck_index: u32 },
+    /// 主动鸣牌 (协议 5: 吃 / 碰 / 明杠). caller 指定:
+    /// - call_type: Chi(3) / Pon(3) / Kan(4)
+    /// - deck_indices: 副露牌的 deck_index 列表 (含 from_player 的弃牌位置)
+    /// - from_player: 鸣谁的弃牌
+    /// - from_position_in_meld: from_player 弃牌在 deck_indices 中的位置 (e.g.
+    ///   末尾)
+    Call {
+        call_type: crate::mental_poker::wire::WireCallType,
+        deck_indices: Vec<u32>,
+        from_player: u32,
+        from_position_in_meld: u32,
+    },
     /// 主动自摸和 (协议 7): caller 指定完整手牌的 deck_indices + winning_tile.
     /// actor 跟据本地状态广播 WinAnnouncement (Tsumo).
     Tsumo {
@@ -89,6 +101,14 @@ pub enum MpEvent {
         deck_index: u32,
         /// plaintext 反查后的 tile_id (UI 渲染弃牌池时用).
         tile_id: usize,
+    },
+    /// 协议 5 鸣牌应用到本地 Table 镜像. UI 渲染副露用.
+    CallApplied {
+        player: u32,
+        call_type: crate::mental_poker::wire::WireCallType,
+        deck_indices: Vec<u32>,
+        tile_ids: Vec<usize>,
+        from_player: u32,
     },
     /// 协议 7 和牌 (Tsumo / Ron) validate 通过 (4 方都收, 同 player + winning_tile).
     /// caller (上层 GameState) 拿 hand_indices 反查 Tile + 算分 (yaku.rs).
