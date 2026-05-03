@@ -8,7 +8,11 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::net::p2p::behaviour::{Ack, P2pBehaviour, P2pBehaviourEvent};
+use libp2p::gossipsub;
+
+use crate::mental_poker::wire::MentalPokerMsg;
+use crate::net::p2p::behaviour::{Ack, MP_TOPIC_PREFIX, P2pBehaviour, P2pBehaviourEvent};
+use crate::net::p2p::mp_swarm::SwarmCommand;
 use crate::net::p2p::swarm::{build_swarm, new_keypair};
 use crate::net::protocol::{ClientMsg, ServerMsg};
 use crate::net::session::NetSession;
@@ -93,13 +97,25 @@ pub async fn join_remote(
     // 构造 NetSession 双向 channel.
     let (out_tx, out_rx) = mpsc::unbounded_channel::<ClientMsg>();
     let (in_tx, in_rx) = mpsc::unbounded_channel::<ServerMsg>();
+    // M5.D.0: mp 边带 channel — UI ZeroTrustGameState 通过它跟 swarm task
+    // 走 mental poker 协议消息.
+    let (mp_command_tx, mp_command_rx) = mpsc::unbounded_channel::<SwarmCommand>();
+    let (mp_inbound_tx, mp_inbound_rx) = mpsc::unbounded_channel::<(PeerId, MentalPokerMsg)>();
 
     // 把已收到的 Welcome 推进 in_rx 让 UI 消费.
     let _ = in_tx.send(welcome);
 
-    tokio::spawn(client_swarm_task(swarm, host_peer_id, out_rx, in_tx));
+    tokio::spawn(client_swarm_task(
+        swarm,
+        host_peer_id,
+        out_rx,
+        in_tx,
+        mp_command_rx,
+        mp_inbound_tx,
+    ));
 
-    Ok(NetSession::from_channels(player_id, token, out_tx, in_rx))
+    Ok(NetSession::from_channels(player_id, token, out_tx, in_rx)
+        .with_mp_handles(mp_command_tx, mp_inbound_rx))
 }
 
 fn extract_peer_id(addr: &Multiaddr) -> Option<PeerId> {
@@ -151,9 +167,12 @@ async fn client_swarm_task(
     host_peer_id: PeerId,
     mut out_rx: mpsc::UnboundedReceiver<ClientMsg>,
     in_tx: mpsc::UnboundedSender<ServerMsg>,
+    mut mp_command_rx: mpsc::UnboundedReceiver<SwarmCommand>,
+    mp_inbound_tx: mpsc::UnboundedSender<(PeerId, MentalPokerMsg)>,
 ) {
-    // hard-coded reconnect_token persistence 简化为运行时 (M1 不持久化磁盘).
     let mut _last_token: Option<Uuid> = None;
+    let mut mp_subscribed_topics: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     loop {
         tokio::select! {
@@ -165,12 +184,46 @@ async fn client_swarm_task(
                 };
                 swarm.behaviour_mut().rr_c2s.send_request(&host_peer_id, msg);
             }
+            Some(cmd) = mp_command_rx.recv() => {
+                handle_mp_command(&mut swarm, cmd, &mut mp_subscribed_topics);
+            }
             event = swarm.select_next_some() => {
-                handle_event(&mut swarm, event, host_peer_id, &in_tx, &mut _last_token).await;
+                handle_event(&mut swarm, event, host_peer_id, &in_tx, &mut _last_token, &mp_inbound_tx).await;
                 if in_tx.is_closed() {
                     break;
                 }
             }
+        }
+    }
+}
+
+fn handle_mp_command(
+    swarm: &mut Swarm<P2pBehaviour>,
+    cmd: SwarmCommand,
+    subscribed_topics: &mut std::collections::HashSet<String>,
+) {
+    match cmd {
+        SwarmCommand::Broadcast { topic, msg } => {
+            if subscribed_topics.insert(topic.clone()) {
+                let ident = gossipsub::IdentTopic::new(&topic);
+                if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&ident) {
+                    tracing::warn!("mp_topic={topic} 订阅失败: {e}");
+                }
+            }
+            let payload = match serde_json::to_vec(&msg) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("mp Broadcast json encode 失败: {e}");
+                    return;
+                }
+            };
+            let ident = gossipsub::IdentTopic::new(&topic);
+            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ident, payload) {
+                tracing::debug!("mp publish to {topic} pending: {e}");
+            }
+        }
+        SwarmCommand::Unicast { target, msg } => {
+            swarm.behaviour_mut().rr_mp.send_request(&target, msg);
         }
     }
 }
@@ -181,6 +234,7 @@ async fn handle_event(
     host_peer_id: PeerId,
     in_tx: &mpsc::UnboundedSender<ServerMsg>,
     last_token: &mut Option<Uuid>,
+    mp_inbound_tx: &mpsc::UnboundedSender<(PeerId, MentalPokerMsg)>,
 ) {
     match event {
         SwarmEvent::Behaviour(P2pBehaviourEvent::RrS2c(rr_event)) => {
@@ -211,10 +265,37 @@ async fn handle_event(
             // 加入者收到 c2s 入站 request 不应发生, 但收到了立即 ack.
             let _ = swarm.behaviour_mut().rr_c2s.send_response(channel, Ack);
         }
+        SwarmEvent::Behaviour(P2pBehaviourEvent::RrMp(request_response::Event::Message {
+            peer,
+            message:
+                request_response::Message::Request {
+                    request, channel, ..
+                },
+            ..
+        })) => {
+            // M5.D.0: ZeroTrust mp unicast 入站. 立即 Ack 避免对方阻塞.
+            let _ = swarm.behaviour_mut().rr_mp.send_response(channel, Ack);
+            let _ = mp_inbound_tx.send((peer, request));
+        }
+        SwarmEvent::Behaviour(P2pBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+            propagation_source,
+            message,
+            ..
+        })) if message.topic.as_str().starts_with(MP_TOPIC_PREFIX) => {
+            // M5.D.0: ZeroTrust mp broadcast 入站. 解 json 后推 mp_inbound_tx.
+            match serde_json::from_slice::<MentalPokerMsg>(&message.data) {
+                Ok(msg) => {
+                    let _ = mp_inbound_tx.send((propagation_source, msg));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "mp gossipsub message from {propagation_source} decode 失败: {e}"
+                    );
+                }
+            }
+        }
         SwarmEvent::ConnectionClosed { peer_id, .. } if peer_id == host_peer_id => {
             tracing::warn!("host 连接关闭");
-            // in_tx drop 时 NetSession 会发现 (try_recv 返回 None).
-            // 显式不发任何 ServerMsg, 由 UI 自己 timeout.
         }
         _ => {}
     }

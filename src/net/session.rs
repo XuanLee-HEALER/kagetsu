@@ -11,23 +11,35 @@
 //! [`OnlineGameState`]: crate::ui::screens::online_game::OnlineGameState
 //! [`RoomHandle`]: crate::net::room::RoomHandle
 
+use libp2p::PeerId;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, error::TryRecvError};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::mental_poker::wire::MentalPokerMsg;
+use crate::net::p2p::mp_swarm::SwarmCommand;
 use crate::net::protocol::{ClientMsg, ServerMsg};
 use crate::net::room::{JoinError, JoinResult, RoomCmd, RoomHandle};
 
 /// 简化抽象: UI 屏 own 一个 NetSession, send ClientMsg / try_recv ServerMsg.
+///
+/// ZeroTrust 模式还会带可选的 mp 边带 (M5.D.0): swarm task 暴露的
+/// [`SwarmCommand`] 出口跟 P2P 入站消息流, ZeroTrustGameState 用它跑
+/// mental poker 协议. Standard 模式两字段都 None.
 pub struct NetSession {
     pub player_id: u32,
     pub token: Uuid,
     out_tx: UnboundedSender<ClientMsg>,
     in_rx: UnboundedReceiver<ServerMsg>,
+    /// ZeroTrust mp 出口 (None = Standard 模式或未集成 P2P).
+    pub mp_command_tx: Option<UnboundedSender<SwarmCommand>>,
+    /// ZeroTrust mp 入站 (None = Standard 模式或已 take). take 后变 None.
+    pub mp_inbound_rx: Option<UnboundedReceiver<(PeerId, MentalPokerMsg)>>,
 }
 
 impl NetSession {
-    /// 直接用现成 channel 构造 (测试用, server bridge 内部用).
+    /// 直接用现成 channel 构造 (测试用, server bridge 内部用). Standard 模式 —
+    /// 不带 mp 边带.
     pub fn from_channels(
         player_id: u32,
         token: Uuid,
@@ -39,7 +51,20 @@ impl NetSession {
             token,
             out_tx,
             in_rx,
+            mp_command_tx: None,
+            mp_inbound_rx: None,
         }
+    }
+
+    /// 注入 mp 边带 (远程 join_remote 内部调). caller 之后可 take mp_inbound_rx.
+    pub fn with_mp_handles(
+        mut self,
+        mp_command_tx: UnboundedSender<SwarmCommand>,
+        mp_inbound_rx: UnboundedReceiver<(PeerId, MentalPokerMsg)>,
+    ) -> Self {
+        self.mp_command_tx = Some(mp_command_tx);
+        self.mp_inbound_rx = Some(mp_inbound_rx);
+        self
     }
 
     pub fn send(&self, msg: ClientMsg) {
@@ -108,6 +133,8 @@ pub async fn spawn_local_session(
         token: join.reconnect_token,
         out_tx,
         in_rx,
+        mp_command_tx: None,
+        mp_inbound_rx: None,
     })
 }
 

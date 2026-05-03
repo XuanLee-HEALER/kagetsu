@@ -18,10 +18,12 @@ use libp2p::{
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::mental_poker::wire::MentalPokerMsg;
 use crate::net::p2p::behaviour::{
-    Ack, LOBBY_TOPIC, LobbyAnnouncement, P2pBehaviour, P2pBehaviourEvent, RELAYS_TOPIC,
-    RelayAnnouncement,
+    Ack, LOBBY_TOPIC, LobbyAnnouncement, MP_TOPIC_PREFIX, P2pBehaviour, P2pBehaviourEvent,
+    RELAYS_TOPIC, RelayAnnouncement,
 };
+use crate::net::p2p::mp_swarm::SwarmCommand;
 use crate::net::p2p::swarm::{build_swarm, new_keypair};
 use crate::net::protocol::{ClientMsg, ServerMsg};
 use crate::net::room::{RoomCmd, RoomHandle};
@@ -138,6 +140,10 @@ pub async fn spawn_p2p_listener(
 
     let (event_tx, event_rx) = mpsc::unbounded_channel::<HostEvent>();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    // M5.D.0: mp 命令 + 入站 channel — UI ZeroTrustGameState 通过 mp_command_tx
+    // 发 SwarmCommand, 通过 mp_inbound_rx 接 (PeerId, MentalPokerMsg) 入站消息.
+    let (mp_command_tx, mp_command_rx) = mpsc::unbounded_channel::<SwarmCommand>();
+    let (mp_inbound_tx, mp_inbound_rx) = mpsc::unbounded_channel::<(PeerId, MentalPokerMsg)>();
 
     tokio::spawn(host_swarm_task(
         swarm,
@@ -147,12 +153,16 @@ pub async fn spawn_p2p_listener(
         pending_circuit_listens,
         lobby_meta,
         local_peer_id,
+        mp_command_rx,
+        mp_inbound_tx,
     ));
 
     Ok(HostHandle {
         dial_addr,
         event_rx,
         _shutdown: Some(shutdown_tx),
+        mp_command_tx,
+        mp_inbound_rx: Some(mp_inbound_rx),
     })
 }
 
@@ -165,6 +175,14 @@ pub struct HostHandle {
     pub event_rx: mpsc::UnboundedReceiver<HostEvent>,
     /// drop 时通过此 sender close, 通知 swarm task 退出.
     _shutdown: Option<oneshot::Sender<()>>,
+    /// M5.D.0: ZeroTrust 模式 mp 命令出口 — UI 通过此 channel 发
+    /// [`SwarmCommand`] (Broadcast / Unicast) 让 swarm task 调
+    /// `gossipsub.publish` / `rr_mp.send_request`. clone 给 SwarmTransport.
+    pub mp_command_tx: mpsc::UnboundedSender<SwarmCommand>,
+    /// M5.D.0: ZeroTrust 模式 mp 入站消息 — swarm task 收 RrMp Request 或
+    /// Gossipsub Message (mp topic) 后推这里. UI 拿走后做 PeerId → own_index
+    /// 反查并 [`MpInbound::deliver`]. take 后变 None (一次性).
+    pub mp_inbound_rx: Option<mpsc::UnboundedReceiver<(PeerId, MentalPokerMsg)>>,
 }
 
 /// 房主 swarm 向 UI 推送的事件.
@@ -213,6 +231,7 @@ struct PeerSlot {
     player_id: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn host_swarm_task(
     mut swarm: Swarm<P2pBehaviour>,
     room_handle: RoomHandle,
@@ -221,6 +240,8 @@ async fn host_swarm_task(
     mut pending_circuit_listens: HashMap<PeerId, Multiaddr>,
     lobby_meta: LobbyMeta,
     local_peer_id: PeerId,
+    mut mp_command_rx: mpsc::UnboundedReceiver<SwarmCommand>,
+    mp_inbound_tx: mpsc::UnboundedSender<(PeerId, MentalPokerMsg)>,
 ) {
     let mut peers: HashMap<PeerId, PeerSlot> = HashMap::new();
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<(PeerId, ServerMsg)>();
@@ -229,6 +250,9 @@ async fn host_swarm_task(
     // M3.D: 自己 AutoNAT 探测到 Public 后启用 relay 池 publish.
     // 内容是 AutoNAT 确认的公网 multiaddr (不含 /p2p-circuit/, 不含 LAN/loopback).
     let mut public_addrs: Vec<Multiaddr> = Vec::new();
+    // M5.D.0: 已订阅的 mp gossipsub topic 集 — Broadcast 命令时按需 lazy 订阅.
+    let mut mp_subscribed_topics: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // 每 5 秒 publish lobby + relays announcement.
     let mut publish_interval = tokio::time::interval(Duration::from_secs(5));
@@ -247,6 +271,9 @@ async fn host_swarm_task(
                 if peers.contains_key(&peer_id) {
                     swarm.behaviour_mut().rr_s2c.send_request(&peer_id, msg);
                 }
+            }
+            Some(cmd) = mp_command_rx.recv() => {
+                handle_mp_command(&mut swarm, cmd, &mut mp_subscribed_topics);
             }
             _ = publish_interval.tick() => {
                 publish_lobby(&mut swarm, &topic, &lobby_meta, local_peer_id, &my_listen_addrs);
@@ -303,8 +330,43 @@ async fn host_swarm_task(
                     &outbox_tx,
                     &event_tx,
                     &mut pending_circuit_listens,
+                    &mp_inbound_tx,
                 ).await;
             }
+        }
+    }
+}
+
+/// M5.D.0 mp 命令 dispatch: SwarmTransport → libp2p swarm 出口.
+fn handle_mp_command(
+    swarm: &mut Swarm<P2pBehaviour>,
+    cmd: SwarmCommand,
+    subscribed_topics: &mut std::collections::HashSet<String>,
+) {
+    match cmd {
+        SwarmCommand::Broadcast { topic, msg } => {
+            // lazy 订阅: 第一次 publish 此 topic 时同时 subscribe (确保自己也能
+            // forward mesh 消息 — gossipsub 默认不回环到自己, 但订阅是 mesh 必要).
+            if subscribed_topics.insert(topic.clone()) {
+                let ident = gossipsub::IdentTopic::new(&topic);
+                if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&ident) {
+                    tracing::warn!("mp_topic={topic} 订阅失败: {e}");
+                }
+            }
+            let payload = match serde_json::to_vec(&msg) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!("mp Broadcast cbor encode 失败: {e}");
+                    return;
+                }
+            };
+            let ident = gossipsub::IdentTopic::new(&topic);
+            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ident, payload) {
+                tracing::debug!("mp publish to {topic} pending: {e}");
+            }
+        }
+        SwarmCommand::Unicast { target, msg } => {
+            swarm.behaviour_mut().rr_mp.send_request(&target, msg);
         }
     }
 }
@@ -399,6 +461,7 @@ fn publish_relays(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_swarm_event(
     swarm: &mut Swarm<P2pBehaviour>,
     event: SwarmEvent<P2pBehaviourEvent>,
@@ -407,6 +470,7 @@ async fn handle_swarm_event(
     outbox_tx: &mpsc::UnboundedSender<(PeerId, ServerMsg)>,
     event_tx: &mpsc::UnboundedSender<HostEvent>,
     pending_circuit_listens: &mut HashMap<PeerId, Multiaddr>,
+    mp_inbound_tx: &mpsc::UnboundedSender<(PeerId, MentalPokerMsg)>,
 ) {
     match event {
         SwarmEvent::Behaviour(P2pBehaviourEvent::RrC2s(rr_event)) => {
@@ -418,6 +482,37 @@ async fn handle_swarm_event(
         })) => {
             // 入站 ServerMsg request 不应发生 (server 只发不收), 立即 ack 避免对方阻塞.
             let _ = swarm.behaviour_mut().rr_s2c.send_response(channel, Ack);
+        }
+        SwarmEvent::Behaviour(P2pBehaviourEvent::RrMp(request_response::Event::Message {
+            peer,
+            message:
+                request_response::Message::Request {
+                    request, channel, ..
+                },
+            ..
+        })) => {
+            // M5.D.0: ZeroTrust 模式 mp unicast 入站 (e.g. DrawShareRequest /
+            // DrawShareResponse / ConcealedKanReveal). 立即 Ack 避免对方阻塞.
+            let _ = swarm.behaviour_mut().rr_mp.send_response(channel, Ack);
+            let _ = mp_inbound_tx.send((peer, request));
+        }
+        SwarmEvent::Behaviour(P2pBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+            propagation_source,
+            message,
+            ..
+        })) if message.topic.as_str().starts_with(MP_TOPIC_PREFIX) => {
+            // M5.D.0: ZeroTrust 模式 mp broadcast 入站 (KeyShare / Shuffle /
+            // Discard / Call / Win 等). 解 cbor 后推 mp_inbound_tx.
+            match serde_json::from_slice::<MentalPokerMsg>(&message.data) {
+                Ok(msg) => {
+                    let _ = mp_inbound_tx.send((propagation_source, msg));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "mp gossipsub message from {propagation_source} decode 失败: {e}"
+                    );
+                }
+            }
         }
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
             if let Some(slot) = peers.remove(&peer_id) {
