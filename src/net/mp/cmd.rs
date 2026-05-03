@@ -24,6 +24,11 @@ pub enum MpRoomCmd {
     /// 本玩家 UI 触发的游戏动作 (Discard / Pon / Tsumo / Ron 等). Standard 模式
     /// 走 RoomActor 验证, ZeroTrust 模式 actor 自己 validate + broadcast.
     LocalAction(Action),
+    /// 主动触发摸牌 (协议 2): 自己当前回合, 摸 deck_index 这张. 仅 Playing phase
+    /// 自己的 turn 时合法; 其他时调用 actor 忽略.
+    TriggerDraw { deck_index: u32 },
+    /// 主动触发公开揭示 (协议 3): 通常 dora indicator. caller 决定揭示哪张.
+    TriggerReveal { deck_index: u32 },
     /// 主动断线 / 退房间.
     Disconnect,
     /// 收到本地 sub-actor (e.g. shuffle session timeout) 触发的 tick.
@@ -53,6 +58,16 @@ pub enum MpEvent {
         offender: Option<usize>,
         reason: String,
     },
+    /// 协议 2 摸牌完成 (仅摸牌方自己 actor 收到此 event).
+    /// `tile_id` 是 [`crate::mental_poker::card_mapping`] 反查后的 0-based 索引,
+    /// caller (UI / 上层 GameState 同步层) 用此 ID 反查 Tile 实例.
+    DrawComplete {
+        request_id: uuid::Uuid,
+        deck_index: u32,
+        tile_id: usize,
+    },
+    /// 协议 3 公开揭示完成 (所有 actor 都会收, 同 plaintext / tile_id).
+    RevealComplete { deck_index: u32, tile_id: usize },
     /// 一局结束 (流局 / 和牌).
     GameOver { reason: String },
 }

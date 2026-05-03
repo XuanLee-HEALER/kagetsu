@@ -22,14 +22,18 @@ use crate::mental_poker::card_mapping::CardMapping;
 use crate::mental_poker::cut_and_choose::{self, ShuffleProof};
 use crate::mental_poker::elgamal::{Ciphertext, SecretKey, keygen, mask_with_r};
 use crate::mental_poker::joint_key::{JointPublicKey, aggregate};
-use crate::mental_poker::protocol_reveal::MemberInfo;
+use crate::mental_poker::protocol_draw::{self, DecryptionShare};
+use crate::mental_poker::protocol_reveal::{self, MemberInfo, RevealShare};
 use crate::mental_poker::protocol_state::Table;
 use crate::mental_poker::schnorr::{self, DlogProof};
+use crate::mental_poker::session::RevealSession;
 use crate::mental_poker::shuffle::shuffle_and_remask;
 use crate::mental_poker::wire::{self, MentalPokerMsg};
 
 use super::cmd::{MpEvent, MpRoomCmd};
 use super::phase::MpPhase;
+use std::collections::HashMap;
+use uuid::Uuid;
 
 /// MpPlayerActor 配置 (spawn 时一次性传入).
 #[derive(Debug, Clone)]
@@ -81,6 +85,11 @@ pub struct MpPlayerActor {
     shuffle_decks: Vec<Vec<Ciphertext>>,
     /// 协议 1 shuffle round 累积的 proofs (cnc verify 通过后 push).
     shuffle_proofs: Vec<ShuffleProof>,
+    /// 协议 2 摸牌进行中的 session (key = request_id). 摸牌方收齐 N-1 个
+    /// share 后 + 自己 share → combine. 收齐后清理.
+    draw_sessions: HashMap<Uuid, PendingDraw>,
+    /// 协议 3 公开揭示进行中的 session (key = deck_index).
+    reveal_sessions: HashMap<u32, PendingReveal>,
     /// Cmd 接收 channel.
     rx: UnboundedReceiver<MpRoomCmd>,
     /// 事件发送 channel (上层 UI / P2P 桥).
@@ -144,6 +153,8 @@ impl MpPlayerActor {
             table,
             shuffle_decks: Vec::new(),
             shuffle_proofs: Vec::new(),
+            draw_sessions: HashMap::new(),
+            reveal_sessions: HashMap::new(),
             rx,
             event_tx,
             shutdown_rx,
@@ -205,6 +216,14 @@ impl MpPlayerActor {
                 );
                 true
             }
+            MpRoomCmd::TriggerDraw { deck_index } => {
+                self.start_draw(deck_index);
+                true
+            }
+            MpRoomCmd::TriggerReveal { deck_index } => {
+                self.start_reveal(deck_index);
+                true
+            }
             MpRoomCmd::Tick => true,
         }
     }
@@ -222,6 +241,23 @@ impl MpPlayerActor {
                 proof,
             } if self.phase == MpPhase::Shuffling => {
                 self.handle_shuffle_round(round_idx, new_deck, proof);
+            }
+            MentalPokerMsg::DrawShareRequest {
+                request_id,
+                ct,
+                deck_index,
+            } if self.phase == MpPhase::Playing => {
+                self.handle_draw_share_request(from, request_id, ct, deck_index);
+            }
+            MentalPokerMsg::DrawShareResponse {
+                request_id,
+                share,
+                proof,
+            } if self.phase == MpPhase::Playing => {
+                self.handle_draw_share_response(from, request_id, share, proof);
+            }
+            MentalPokerMsg::RevealShare { ct, share, proof } if self.phase == MpPhase::Playing => {
+                self.handle_reveal_share(from, ct, share, proof);
             }
             other => {
                 tracing::debug!(
@@ -436,6 +472,333 @@ impl MpPlayerActor {
             .send(MpEvent::PhaseChanged { phase: self.phase });
     }
 
+    /// 协议 2 摸牌发起 (caller TriggerDraw cmd). 仅在 Playing phase 合法.
+    fn start_draw(&mut self, deck_index: u32) {
+        if self.phase != MpPhase::Playing {
+            tracing::warn!(
+                "MpPlayerActor[{}] TriggerDraw ignored: phase={:?}",
+                self.cfg.own_index,
+                self.phase
+            );
+            return;
+        }
+        let final_deck = self
+            .shuffle_decks
+            .last()
+            .expect("Playing phase 应有 final_deck");
+        let Some(ct) = final_deck.get(deck_index as usize).copied() else {
+            self.emit_protocol_error(None, format!("deck_index {deck_index} 越界"));
+            return;
+        };
+        let request_id = Uuid::new_v4();
+        // 自己先算自己 share, 不广播给自己
+        let own_peer_id = self.cfg.all_peer_ids[self.cfg.own_index].clone();
+        let (own_share, _own_proof) = protocol_draw::compute_share(
+            &mut self.rng,
+            &self.own_sk,
+            &self.own_pk,
+            &ct,
+            &own_peer_id,
+        );
+        let mut received = HashMap::new();
+        received.insert(self.cfg.own_index, own_share);
+
+        // store pending
+        self.draw_sessions.insert(
+            request_id,
+            PendingDraw {
+                request_id,
+                deck_index,
+                ct,
+                received,
+            },
+        );
+
+        // 广播 DrawShareRequest 给其他人
+        let msg = MentalPokerMsg::DrawShareRequest {
+            request_id,
+            ct: wire::encode_ciphertext(&ct),
+            deck_index,
+        };
+        let _ = self.event_tx.send(MpEvent::OutboundMsg { to: None, msg });
+    }
+
+    fn handle_draw_share_request(
+        &mut self,
+        from: Option<usize>,
+        request_id: Uuid,
+        ct_bytes: Vec<u8>,
+        deck_index: u32,
+    ) {
+        let Some(requester_idx) = from else {
+            self.emit_protocol_error(None, "DrawShareRequest 缺 from".into());
+            return;
+        };
+        let ct = match wire::decode_ciphertext(&ct_bytes) {
+            Ok(c) => c,
+            Err(e) => {
+                self.emit_protocol_error(Some(requester_idx), format!("ct decode: {e}"));
+                return;
+            }
+        };
+        // 验证 ct 跟自己 final_deck[deck_index] 一致 (防作弊摸牌位置)
+        let final_deck = self.shuffle_decks.last().expect("Playing 应有 final_deck");
+        let expected = final_deck.get(deck_index as usize).copied();
+        if expected != Some(ct) {
+            self.emit_protocol_error(
+                Some(requester_idx),
+                format!("DrawShareRequest ct 跟本地 final_deck[{deck_index}] 不一致"),
+            );
+            return;
+        }
+        // 计算自己 share (用 self peer_id 作 ctx)
+        let own_peer_id = self.cfg.all_peer_ids[self.cfg.own_index].clone();
+        let (share, proof) = protocol_draw::compute_share(
+            &mut self.rng,
+            &self.own_sk,
+            &self.own_pk,
+            &ct,
+            &own_peer_id,
+        );
+        let response = MentalPokerMsg::DrawShareResponse {
+            request_id,
+            share: wire::encode_share(&share),
+            proof: wire::encode_dleq_proof(&proof),
+        };
+        // 单播给 requester
+        let _ = self.event_tx.send(MpEvent::OutboundMsg {
+            to: Some(requester_idx),
+            msg: response,
+        });
+    }
+
+    fn handle_draw_share_response(
+        &mut self,
+        from: Option<usize>,
+        request_id: Uuid,
+        share_bytes: Vec<u8>,
+        proof_bytes: Vec<u8>,
+    ) {
+        let Some(sender_idx) = from else {
+            self.emit_protocol_error(None, "DrawShareResponse 缺 from".into());
+            return;
+        };
+        let Some(pending) = self.draw_sessions.get_mut(&request_id) else {
+            tracing::debug!(
+                "MpPlayerActor[{}] DrawShareResponse 没找到 pending {request_id}",
+                self.cfg.own_index
+            );
+            return;
+        };
+        let share = match wire::decode_share(&share_bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                self.emit_protocol_error(Some(sender_idx), format!("share decode: {e}"));
+                return;
+            }
+        };
+        let proof = match wire::decode_dleq_proof(&proof_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                self.emit_protocol_error(Some(sender_idx), format!("proof decode: {e}"));
+                return;
+            }
+        };
+        // 验证 share + DLEQ proof
+        let sender_peer_id = self.cfg.all_peer_ids[sender_idx].clone();
+        let sender_pk = match self.members[sender_idx].as_ref() {
+            Some(m) => m.pk,
+            None => {
+                self.emit_protocol_error(
+                    Some(sender_idx),
+                    "sender pk 不在 members (协议 0 未完成)".into(),
+                );
+                return;
+            }
+        };
+        if !protocol_draw::verify_share(&sender_pk, &pending.ct, &share, &proof, &sender_peer_id) {
+            self.emit_protocol_error(
+                Some(sender_idx),
+                format!("DrawShare DLEQ verify 失败 (request_id={request_id})"),
+            );
+            return;
+        }
+        pending.received.insert(sender_idx, share);
+        // 收齐?
+        if pending.received.len() != self.cfg.n_players() {
+            return;
+        }
+        // combine
+        let shares: Vec<DecryptionShare> = (0..self.cfg.n_players())
+            .map(|i| pending.received[&i])
+            .collect();
+        let plaintext = protocol_draw::combine_shares(&pending.ct, &shares);
+        // 反查 CardMapping
+        let Some(tile_id) = self.card_mapping.decode(&plaintext) else {
+            self.emit_protocol_error(
+                None,
+                "draw plaintext 不在 card_mapping (协议层 bug?)".into(),
+            );
+            return;
+        };
+        let deck_index = pending.deck_index;
+        self.draw_sessions.remove(&request_id);
+        let _ = self.event_tx.send(MpEvent::DrawComplete {
+            request_id,
+            deck_index,
+            tile_id,
+        });
+    }
+
+    /// 协议 3 公开揭示发起 (caller TriggerReveal cmd).
+    fn start_reveal(&mut self, deck_index: u32) {
+        if self.phase != MpPhase::Playing {
+            return;
+        }
+        let final_deck = self.shuffle_decks.last().expect("Playing 应有 final_deck");
+        let Some(ct) = final_deck.get(deck_index as usize).copied() else {
+            self.emit_protocol_error(None, format!("reveal deck_index {deck_index} 越界"));
+            return;
+        };
+        // 准备 members 结构 (跟 RevealSession 期望一致)
+        let members: Vec<MemberInfo> = (0..self.cfg.n_players())
+            .map(|i| self.members[i].as_ref().expect("协议 0 完成").clone())
+            .collect();
+        let mut session = RevealSession::new(members.clone(), ct);
+        // 自己先算 + submit 自己
+        let own_peer_id = self.cfg.all_peer_ids[self.cfg.own_index].clone();
+        let own_contribution = protocol_reveal::prepare_share(
+            &mut self.rng,
+            &self.own_sk,
+            &self.own_pk,
+            &ct,
+            &own_peer_id,
+        );
+        let _ = session.submit(self.cfg.own_index, own_contribution);
+
+        self.reveal_sessions.insert(
+            deck_index,
+            PendingReveal {
+                deck_index,
+                ct,
+                session,
+            },
+        );
+
+        // 广播 RevealShare (协议 3 是 broadcast, 自己也"广播"自己的 share)
+        let msg = MentalPokerMsg::RevealShare {
+            ct: wire::encode_ciphertext(&ct),
+            share: wire::encode_share(&own_contribution.share),
+            proof: wire::encode_dleq_proof(&own_contribution.proof),
+        };
+        let _ = self.event_tx.send(MpEvent::OutboundMsg { to: None, msg });
+
+        self.try_complete_reveal(deck_index);
+    }
+
+    fn handle_reveal_share(
+        &mut self,
+        from: Option<usize>,
+        ct_bytes: Vec<u8>,
+        share_bytes: Vec<u8>,
+        proof_bytes: Vec<u8>,
+    ) {
+        let Some(sender_idx) = from else {
+            self.emit_protocol_error(None, "RevealShare 缺 from".into());
+            return;
+        };
+        let ct = match wire::decode_ciphertext(&ct_bytes) {
+            Ok(c) => c,
+            Err(e) => {
+                self.emit_protocol_error(Some(sender_idx), format!("reveal ct decode: {e}"));
+                return;
+            }
+        };
+        // 找对应 deck_index
+        let final_deck = self.shuffle_decks.last().expect("Playing 应有 final_deck");
+        let Some(deck_index) = final_deck.iter().position(|c| *c == ct) else {
+            self.emit_protocol_error(Some(sender_idx), "RevealShare 的 ct 不在 final_deck".into());
+            return;
+        };
+        let deck_index = deck_index as u32;
+
+        // 没 pending? — 自动 init + 算自己 share 并广播 (协议 3: 任何 actor 第一次
+        // 见到这个 ct 都要参与 N-broadcast).
+        let needs_init = !self.reveal_sessions.contains_key(&deck_index);
+        if needs_init {
+            let members: Vec<MemberInfo> = (0..self.cfg.n_players())
+                .map(|i| self.members[i].as_ref().expect("协议 0 完成").clone())
+                .collect();
+            let mut session = RevealSession::new(members, ct);
+            // 自己也算 share + submit 自己
+            let own_peer_id = self.cfg.all_peer_ids[self.cfg.own_index].clone();
+            let own_contribution = protocol_reveal::prepare_share(
+                &mut self.rng,
+                &self.own_sk,
+                &self.own_pk,
+                &ct,
+                &own_peer_id,
+            );
+            let _ = session.submit(self.cfg.own_index, own_contribution);
+            self.reveal_sessions.insert(
+                deck_index,
+                PendingReveal {
+                    deck_index,
+                    ct,
+                    session,
+                },
+            );
+            // 广播自己的 share, 让其他 actor 也能收齐 (含没主动 trigger 的)
+            let msg = MentalPokerMsg::RevealShare {
+                ct: wire::encode_ciphertext(&ct),
+                share: wire::encode_share(&own_contribution.share),
+                proof: wire::encode_dleq_proof(&own_contribution.proof),
+            };
+            let _ = self.event_tx.send(MpEvent::OutboundMsg { to: None, msg });
+        }
+
+        // submit 远端 share
+        let share = match wire::decode_share(&share_bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                self.emit_protocol_error(Some(sender_idx), format!("share decode: {e}"));
+                return;
+            }
+        };
+        let proof = match wire::decode_dleq_proof(&proof_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                self.emit_protocol_error(Some(sender_idx), format!("proof decode: {e}"));
+                return;
+            }
+        };
+        let pending = self.reveal_sessions.get_mut(&deck_index).unwrap();
+        let contribution = RevealShare { share, proof };
+        if let Err(e) = pending.session.submit(sender_idx, contribution) {
+            self.emit_protocol_error(Some(sender_idx), format!("RevealSession submit: {e}"));
+            return;
+        }
+        self.try_complete_reveal(deck_index);
+    }
+
+    fn try_complete_reveal(&mut self, deck_index: u32) {
+        let Some(pending) = self.reveal_sessions.get(&deck_index) else {
+            return;
+        };
+        let Some(plaintext) = pending.session.try_combine() else {
+            return;
+        };
+        let Some(tile_id) = self.card_mapping.decode(&plaintext) else {
+            self.emit_protocol_error(None, "reveal plaintext 不在 card_mapping".into());
+            return;
+        };
+        self.reveal_sessions.remove(&deck_index);
+        let _ = self.event_tx.send(MpEvent::RevealComplete {
+            deck_index,
+            tile_id,
+        });
+    }
+
     fn emit_protocol_error(&self, offender: Option<usize>, reason: String) {
         let _ = self.event_tx.send(MpEvent::ProtocolError {
             offender,
@@ -449,6 +812,24 @@ impl MpPlayerActor {
 
     // M5.B.5+ 添加: handle_draw_request / handle_reveal_share / handle_discard /
     // handle_call / handle_concealed_kan / handle_win
+}
+
+/// 摸牌方进行中的 session 状态. 收齐 N-1 个 share + 自己算第 N 个 → combine.
+#[allow(dead_code)] // request_id 字段供 future debugging / error reporting
+struct PendingDraw {
+    request_id: Uuid,
+    deck_index: u32,
+    ct: Ciphertext,
+    /// 已收的 share (key = sender index in members).
+    received: HashMap<usize, DecryptionShare>,
+}
+
+/// 公开揭示进行中. 收齐 N 个 share (含自己) → combine, emit RevealComplete.
+#[allow(dead_code)] // deck_index/ct 字段供 future debugging / error reporting
+struct PendingReveal {
+    deck_index: u32,
+    ct: Ciphertext,
+    session: RevealSession,
 }
 
 fn hex_short(bytes: &[u8]) -> String {
@@ -497,6 +878,7 @@ pub fn spawn_mp_player(cfg: MpConfig, seed_hint: Option<u64>) -> MpPlayerHandle 
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop)]
 mod tests {
     use super::*;
 
@@ -605,6 +987,82 @@ mod tests {
         assert!(got_keyshare, "spawn 后应 emit KeyShare 给 broadcast");
     }
 
+    /// 桥: 4 actor mpsc 互联, 把 OutboundMsg 路由给其他 actor 作 PeerMsg.
+    /// 跑直到 stop_when 返回 true (达到目标 phase) 或 max_steps 到.
+    /// 返回 (final_phases, drawn_tile_ids, revealed_tile_ids) 给 caller assert.
+    #[allow(clippy::type_complexity)]
+    async fn run_bridge<F>(
+        handles: &mut [MpPlayerHandle],
+        rxs: &mut [tokio::sync::mpsc::UnboundedReceiver<MpEvent>],
+        max_steps: usize,
+        mut stop_when: F,
+    ) -> (
+        Vec<MpPhase>,
+        Vec<(usize, u32, usize)>, // (actor_idx, deck_index, tile_id) draw
+        Vec<(usize, u32, usize)>, // (actor_idx, deck_index, tile_id) reveal
+    )
+    where
+        F: FnMut(&[MpPhase]) -> bool,
+    {
+        let n = handles.len();
+        let mut phases = vec![MpPhase::KeyExchange; n];
+        let mut draws: Vec<(usize, u32, usize)> = Vec::new();
+        let mut reveals: Vec<(usize, u32, usize)> = Vec::new();
+        for _step in 0usize..max_steps {
+            let mut any_progress = false;
+            for src in 0..n {
+                while let Ok(ev) = rxs[src].try_recv() {
+                    any_progress = true;
+                    match ev {
+                        MpEvent::PhaseChanged { phase } => {
+                            phases[src] = phase;
+                        }
+                        MpEvent::OutboundMsg { to, msg } => {
+                            let targets: Vec<usize> = match to {
+                                None => (0..n).filter(|&i| i != src).collect(),
+                                Some(idx) => vec![idx],
+                            };
+                            for t in targets {
+                                handles[t]
+                                    .send(MpRoomCmd::PeerMsg {
+                                        from: Some(src),
+                                        msg: msg.clone(),
+                                    })
+                                    .unwrap();
+                            }
+                        }
+                        MpEvent::DrawComplete {
+                            deck_index,
+                            tile_id,
+                            ..
+                        } => {
+                            draws.push((src, deck_index, tile_id));
+                        }
+                        MpEvent::RevealComplete {
+                            deck_index,
+                            tile_id,
+                        } => {
+                            reveals.push((src, deck_index, tile_id));
+                        }
+                        MpEvent::ProtocolError { offender, reason } => {
+                            panic!(
+                                "actor {src} reported ProtocolError offender={offender:?}: {reason}"
+                            );
+                        }
+                        MpEvent::ShuffleProgress { .. } | MpEvent::GameOver { .. } => {}
+                    }
+                }
+            }
+            if stop_when(&phases) {
+                return (phases, draws, reveals);
+            }
+            if !any_progress {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        (phases, draws, reveals)
+    }
+
     /// **M5.B.4 核心 e2e**: 4 actor 用 mpsc 桥接, 跑通协议 0 (keygen) + 协议 1
     /// (联合洗牌). 各 actor 应 transition KeyExchange → Shuffling → Playing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -659,7 +1117,9 @@ mod tests {
                                 "actor {src} reported ProtocolError offender={offender:?}: {reason}"
                             );
                         }
-                        MpEvent::GameOver { .. } => {}
+                        MpEvent::GameOver { .. }
+                        | MpEvent::DrawComplete { .. }
+                        | MpEvent::RevealComplete { .. } => {}
                     }
                 }
             }
@@ -688,6 +1148,175 @@ mod tests {
         }
 
         // 清理
+        for h in &handles {
+            h.send(MpRoomCmd::Disconnect).ok();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    /// **M5.B.5 e2e**: 4 actor 完成协议 0+1, 进 Playing 后 actor 0 摸 deck[0]
+    /// (协议 2). 验证 DrawComplete event 含合法 tile_id, 且其他 actor 不
+    /// 收到 DrawComplete (协议 2 仅摸牌方知 plaintext).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn protocol_2_actor_0_draws_deck_0() {
+        const N: usize = 4;
+        let mut handles: Vec<MpPlayerHandle> = (0..N)
+            .map(|i| spawn_mp_player(test_cfg(i), Some((i + 100) as u64)))
+            .collect();
+        let mut rxs: Vec<_> = handles
+            .iter_mut()
+            .map(|h| h.take_event_rx().unwrap())
+            .collect();
+
+        // 跑到 all in Playing
+        let (phases, _, _) = run_bridge(&mut handles, &mut rxs, 200, |p| {
+            p.iter().all(|x| *x == MpPhase::Playing)
+        })
+        .await;
+        assert!(
+            phases.iter().all(|p| *p == MpPhase::Playing),
+            "phases={phases:?}"
+        );
+
+        // actor 0 触发摸 deck[0]
+        handles[0]
+            .send(MpRoomCmd::TriggerDraw { deck_index: 0 })
+            .unwrap();
+
+        // 跑直到 actor 0 收到 DrawComplete (drews.len() >= 1)
+        let mut all_draws: Vec<(usize, u32, usize)> = Vec::new();
+        for _step in 0..200usize {
+            let mut any = false;
+            for src in 0..N {
+                while let Ok(ev) = rxs[src].try_recv() {
+                    any = true;
+                    match ev {
+                        MpEvent::OutboundMsg { to, msg } => {
+                            let targets: Vec<usize> = match to {
+                                None => (0..N).filter(|&i| i != src).collect(),
+                                Some(idx) => vec![idx],
+                            };
+                            for t in targets {
+                                handles[t]
+                                    .send(MpRoomCmd::PeerMsg {
+                                        from: Some(src),
+                                        msg: msg.clone(),
+                                    })
+                                    .unwrap();
+                            }
+                        }
+                        MpEvent::DrawComplete {
+                            deck_index,
+                            tile_id,
+                            ..
+                        } => {
+                            all_draws.push((src, deck_index, tile_id));
+                        }
+                        MpEvent::ProtocolError { offender, reason } => {
+                            panic!("actor {src} ProtocolError offender={offender:?}: {reason}");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !all_draws.is_empty() {
+                break;
+            }
+            if !any {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        // 仅 actor 0 收到 DrawComplete (协议 2 仅摸牌方知)
+        assert_eq!(
+            all_draws.len(),
+            1,
+            "应仅 1 个 DrawComplete, 实际 {all_draws:?}"
+        );
+        let (drawer, deck_idx, tile_id) = all_draws[0];
+        assert_eq!(drawer, 0);
+        assert_eq!(deck_idx, 0);
+        assert!(tile_id < test_cfg(0).deck_size);
+
+        for h in &handles {
+            h.send(MpRoomCmd::Disconnect).ok();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    /// **M5.B.5 e2e**: 协议 3 公开揭示 deck[1]. 4 actor 都应收 RevealComplete
+    /// 含同 tile_id.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn protocol_3_all_actors_reveal_same_tile() {
+        const N: usize = 4;
+        let mut handles: Vec<MpPlayerHandle> = (0..N)
+            .map(|i| spawn_mp_player(test_cfg(i), Some((i + 200) as u64)))
+            .collect();
+        let mut rxs: Vec<_> = handles
+            .iter_mut()
+            .map(|h| h.take_event_rx().unwrap())
+            .collect();
+
+        // 跑到 all in Playing
+        let (phases, _, _) = run_bridge(&mut handles, &mut rxs, 200, |p| {
+            p.iter().all(|x| *x == MpPhase::Playing)
+        })
+        .await;
+        assert!(phases.iter().all(|p| *p == MpPhase::Playing));
+
+        // 任一 actor (e.g. 玩家 0) 触发揭示 deck[1]
+        handles[0]
+            .send(MpRoomCmd::TriggerReveal { deck_index: 1 })
+            .unwrap();
+
+        let mut reveals: Vec<(usize, u32, usize)> = Vec::new();
+        for _step in 0..200usize {
+            let mut any = false;
+            for src in 0..N {
+                while let Ok(ev) = rxs[src].try_recv() {
+                    any = true;
+                    match ev {
+                        MpEvent::OutboundMsg { to, msg } => {
+                            let targets: Vec<usize> = match to {
+                                None => (0..N).filter(|&i| i != src).collect(),
+                                Some(idx) => vec![idx],
+                            };
+                            for t in targets {
+                                handles[t]
+                                    .send(MpRoomCmd::PeerMsg {
+                                        from: Some(src),
+                                        msg: msg.clone(),
+                                    })
+                                    .unwrap();
+                            }
+                        }
+                        MpEvent::RevealComplete {
+                            deck_index,
+                            tile_id,
+                        } => {
+                            reveals.push((src, deck_index, tile_id));
+                        }
+                        MpEvent::ProtocolError { offender, reason } => {
+                            panic!("actor {src} ProtocolError offender={offender:?}: {reason}");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if reveals.len() == N {
+                break;
+            }
+            if !any {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        assert_eq!(reveals.len(), N, "4 actor 都应收 RevealComplete");
+        // 全部 tile_id 相同 (公开揭示同一张)
+        let first_tile = reveals[0].2;
+        for (_src, deck_idx, tile_id) in &reveals {
+            assert_eq!(*deck_idx, 1);
+            assert_eq!(*tile_id, first_tile);
+        }
+
         for h in &handles {
             h.send(MpRoomCmd::Disconnect).ok();
         }
