@@ -36,6 +36,7 @@ pub mod discovery;
 pub mod host;
 pub mod join;
 pub mod mode;
+pub mod mp_bridge;
 pub mod region;
 pub mod swarm;
 

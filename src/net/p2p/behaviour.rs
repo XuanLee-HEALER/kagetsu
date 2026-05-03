@@ -18,6 +18,7 @@ use libp2p::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::mental_poker::wire::MentalPokerMsg;
 use crate::net::p2p::mode::RoomMode;
 use crate::net::p2p::region::Region;
 use crate::net::protocol::{ClientMsg, ServerMsg};
@@ -26,10 +27,16 @@ use crate::net::protocol::{ClientMsg, ServerMsg};
 pub const PROTOCOL_C2S: StreamProtocol = StreamProtocol::new("/tui-majo/c2s/1");
 /// 协议名: server → client.
 pub const PROTOCOL_S2C: StreamProtocol = StreamProtocol::new("/tui-majo/s2c/1");
+/// 协议名: ZeroTrust 模式 P2P 对等通信 (M5.B.8). 用于 unicast (DrawShareRequest /
+/// Response, ConcealedKanReveal). broadcast 走 gossipsub mp_topic.
+pub const PROTOCOL_MP: StreamProtocol = StreamProtocol::new("/tui-majo/mp/1");
 /// identify 协议 agent_version 前缀, 后跟房间 metadata k=v;k=v 字符串.
 pub const AGENT_PREFIX: &str = "tui-majo/";
 /// gossipsub topic: 在线房间广播.
 pub const LOBBY_TOPIC: &str = "tui-majo/lobby/v1";
+/// gossipsub topic 前缀: ZeroTrust 模式 mental poker broadcast (M5.B.8).
+/// 完整 topic = `tui-majo/mp/<room_id>/v1`, 4 玩家在 MpStart 后订阅.
+pub const MP_TOPIC_PREFIX: &str = "tui-majo/mp/";
 /// gossipsub topic: Tier 2 玩家 relay 贡献池广播.
 ///
 /// 公网可达 (AutoNAT 探测确认 Public) 的房主在 host swarm 周期 publish
@@ -51,6 +58,10 @@ pub struct P2pBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub rr_c2s: cbor::Behaviour<ClientMsg, Ack>,
     pub rr_s2c: cbor::Behaviour<ServerMsg, Ack>,
+    /// ZeroTrust mental poker P2P unicast (M5.B.8). 用于 DrawShareRequest /
+    /// Response, ConcealedKanReveal 等需要点对点的协议消息. broadcast (KeyShare,
+    /// Shuffle, Discard 等) 走 gossipsub mp topic.
+    pub rr_mp: cbor::Behaviour<MentalPokerMsg, Ack>,
 }
 
 /// 空响应 ack. 应用层不依赖 ack 内容, 仅用于 libp2p 内部请求闭环.
@@ -144,6 +155,15 @@ impl P2pBehaviour {
                 [(PROTOCOL_S2C, ProtocolSupport::Full)],
                 request_response::Config::default(),
             ),
+            rr_mp: cbor::Behaviour::new(
+                [(PROTOCOL_MP, ProtocolSupport::Full)],
+                request_response::Config::default(),
+            ),
         }
     }
+}
+
+/// 计算 ZeroTrust 房间的 gossipsub mp topic 名: `tui-majo/mp/<room_id>/v1`.
+pub fn mp_topic_for_room(room_id: &str) -> String {
+    format!("{MP_TOPIC_PREFIX}{room_id}/v1")
 }
