@@ -177,6 +177,17 @@ impl OnlineRoomState {
             format!("房间 ID: {}", self.room_view.room_id),
             Style::default().fg(Color::Yellow),
         )));
+        // M5.E.2: 显示房间模式 (Standard / ZeroTrust).
+        let (mode_label, mode_color) = match self.room_view.mode {
+            crate::net::p2p::RoomMode::Standard => ("Standard (房主权威)", Color::Cyan),
+            crate::net::p2p::RoomMode::ZeroTrust => {
+                ("ZeroTrust (P2P mental poker, 需 4 真人)", Color::Magenta)
+            }
+        };
+        lines.push(Line::from(vec![
+            Span::raw("模式: "),
+            Span::styled(mode_label, Style::default().fg(mode_color)),
+        ]));
 
         // 房主端额外显示 NAT 状态 + dial multiaddr (给加入者复制).
         if self.is_host() {
@@ -247,9 +258,13 @@ impl OnlineRoomState {
         }
 
         let empty = 4usize.saturating_sub(self.room_view.players.len());
+        let empty_label = match self.room_view.mode {
+            crate::net::p2p::RoomMode::Standard => "(开局补 AI)",
+            crate::net::p2p::RoomMode::ZeroTrust => "(等真人加入, ZeroTrust 不允许 AI)",
+        };
         for i in 0..empty {
             lines.push(Line::from(Span::styled(
-                format!("  - 空座位 {} (开局补 AI)", i + 1),
+                format!("  - 空座位 {} {}", i + 1, empty_label),
                 Style::default().fg(Color::DarkGray),
             )));
         }

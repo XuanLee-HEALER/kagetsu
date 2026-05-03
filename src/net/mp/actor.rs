@@ -918,7 +918,11 @@ impl MpPlayerActor {
                 Some(player as usize),
                 format!("DrawAnnouncement record_draw 失败: {e}"),
             );
+            return;
         }
+        let _ = self
+            .event_tx
+            .send(MpEvent::RemoteDrawObserved { player, deck_index });
     }
 
     /// 协议 4 自己弃牌. 验证 + apply 本地 + 广播.
@@ -1773,6 +1777,7 @@ mod tests {
                         | MpEvent::CallApplied { .. }
                         | MpEvent::ConcealedKanApplied { .. }
                         | MpEvent::MonitorVerified { .. }
+                        | MpEvent::RemoteDrawObserved { .. }
                         | MpEvent::WinValidated { .. } => {}
                     }
                 }
@@ -1848,6 +1853,7 @@ mod tests {
                         | MpEvent::CallApplied { .. }
                         | MpEvent::ConcealedKanApplied { .. }
                         | MpEvent::MonitorVerified { .. }
+                        | MpEvent::RemoteDrawObserved { .. }
                         | MpEvent::WinValidated { .. } => {}
                     }
                 }

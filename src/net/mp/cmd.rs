@@ -99,6 +99,10 @@ pub enum MpEvent {
         deck_index: u32,
         tile_id: usize,
     },
+    /// 协议 2 远端摸牌 announcement 已应用到本地 Table 镜像 (4 actor 都收 — 含
+    /// 摸牌方自己, 但摸牌方走 DrawComplete 路径; 其他 3 actor 走此路径).
+    /// UI 用它同步 wall pointer (next_deck_index) 不至于跟其他玩家摸同一 deck_index.
+    RemoteDrawObserved { player: u32, deck_index: u32 },
     /// 协议 3 公开揭示完成 (所有 actor 都会收, 同 plaintext / tile_id).
     RevealComplete { deck_index: u32, tile_id: usize },
     /// 协议 4 弃牌应用到本地 Table 镜像 (含自己 + 远端).
