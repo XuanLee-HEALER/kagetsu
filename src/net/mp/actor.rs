@@ -242,6 +242,13 @@ impl MpPlayerActor {
                 self.do_call(call_type, deck_indices, from_player, from_position_in_meld);
                 true
             }
+            MpRoomCmd::ConcealedKan {
+                deck_indices,
+                monitor_player,
+            } => {
+                self.do_concealed_kan(deck_indices, monitor_player);
+                true
+            }
             MpRoomCmd::Tsumo {
                 hand_indices,
                 winning_tile_index,
@@ -320,6 +327,16 @@ impl MpPlayerActor {
                     from_player,
                     from_position_in_meld,
                 );
+            }
+            MentalPokerMsg::ConcealedKanAnnounce {
+                player,
+                deck_indices,
+                monitor_player,
+            } if self.phase == MpPhase::Playing => {
+                self.handle_concealed_kan_announce(player, deck_indices, monitor_player);
+            }
+            MentalPokerMsg::ConcealedKanReveal { plaintexts } if self.phase == MpPhase::Playing => {
+                self.handle_concealed_kan_reveal(from, plaintexts);
             }
             MentalPokerMsg::Win {
                 player,
@@ -1126,6 +1143,186 @@ impl MpPlayerActor {
         });
     }
 
+    /// 协议 6 自己暗杠. 公开广播 ConcealedKanAnnounce + 私发 ConcealedKanReveal
+    /// 给 monitor.
+    fn do_concealed_kan(&mut self, deck_indices: [u32; 4], monitor_player: u32) {
+        if self.phase != MpPhase::Playing {
+            return;
+        }
+        if (monitor_player as usize) >= self.cfg.n_players()
+            || (monitor_player as usize) == self.cfg.own_index
+        {
+            self.emit_protocol_error(
+                None,
+                format!("ConcealedKan: 非法 monitor_player {monitor_player}"),
+            );
+            return;
+        }
+        // 反查 4 张 plaintext from own_drawn
+        let mut tile_ids: [usize; 4] = [0; 4];
+        let mut plaintexts: [crate::mental_poker::Curve; 4] =
+            [crate::mental_poker::Curve::default(); 4];
+        for (i, &idx) in deck_indices.iter().enumerate() {
+            let Some(&tid) = self.own_drawn.get(&idx) else {
+                self.emit_protocol_error(
+                    None,
+                    format!("ConcealedKan: deck_index={idx} 不在 own_drawn"),
+                );
+                return;
+            };
+            tile_ids[i] = tid;
+            plaintexts[i] = self.card_mapping.encode(tid);
+        }
+        // apply public part to own table
+        let kan = crate::mental_poker::protocol_concealed_kan::ConcealedKanAnnouncement {
+            player: self.cfg.own_index,
+            deck_indices: deck_indices.map(|i| i as usize),
+            monitor_player: monitor_player as usize,
+        };
+        if let Err(e) = kan.apply(&mut self.table) {
+            self.emit_protocol_error(None, format!("自己 ConcealedKan apply 失败: {e}"));
+            return;
+        }
+        // 广播 announce
+        let announce_msg = MentalPokerMsg::ConcealedKanAnnounce {
+            player: self.cfg.own_index as u32,
+            deck_indices,
+            monitor_player,
+        };
+        let _ = self.event_tx.send(MpEvent::OutboundMsg {
+            to: None,
+            msg: announce_msg,
+        });
+        // 私发 reveal 给 monitor
+        let plaintexts_bytes: [Vec<u8>; 4] = [
+            wire::encode_curve(&plaintexts[0]),
+            wire::encode_curve(&plaintexts[1]),
+            wire::encode_curve(&plaintexts[2]),
+            wire::encode_curve(&plaintexts[3]),
+        ];
+        let reveal_msg = MentalPokerMsg::ConcealedKanReveal {
+            plaintexts: plaintexts_bytes,
+        };
+        let _ = self.event_tx.send(MpEvent::OutboundMsg {
+            to: Some(monitor_player as usize),
+            msg: reveal_msg,
+        });
+        // 自己 emit applied event
+        let _ = self.event_tx.send(MpEvent::ConcealedKanApplied {
+            player: self.cfg.own_index as u32,
+            deck_indices,
+            monitor_player,
+        });
+    }
+
+    /// 协议 6 远端公开 announcement: apply 到本地 table.
+    fn handle_concealed_kan_announce(
+        &mut self,
+        player: u32,
+        deck_indices: [u32; 4],
+        monitor_player: u32,
+    ) {
+        if (player as usize) >= self.cfg.n_players() {
+            self.emit_protocol_error(None, format!("ConcealedKan player={player} 越界"));
+            return;
+        }
+        if (player as usize) == self.cfg.own_index {
+            return; // 自己 echo
+        }
+        let kan = crate::mental_poker::protocol_concealed_kan::ConcealedKanAnnouncement {
+            player: player as usize,
+            deck_indices: deck_indices.map(|i| i as usize),
+            monitor_player: monitor_player as usize,
+        };
+        if let Err(e) = kan.apply(&mut self.table) {
+            self.emit_protocol_error(
+                Some(player as usize),
+                format!("ConcealedKan apply 失败: {e}"),
+            );
+            return;
+        }
+        let _ = self.event_tx.send(MpEvent::ConcealedKanApplied {
+            player,
+            deck_indices,
+            monitor_player,
+        });
+    }
+
+    /// 协议 6 monitor 收到 reveal. 反查 4 张 tile_id, 验证 all-same kind.
+    /// 选项 C: 仅 monitor 看到 plaintext, monitor 自行决定是否上报.
+    fn handle_concealed_kan_reveal(&mut self, from: Option<usize>, plaintexts_bytes: [Vec<u8>; 4]) {
+        let Some(player) = from else {
+            self.emit_protocol_error(None, "ConcealedKanReveal 缺 from".into());
+            return;
+        };
+        if player == self.cfg.own_index {
+            return; // 自己发的, 已经处理
+        }
+        // 反查 tile_ids
+        let mut tile_ids: [usize; 4] = [0; 4];
+        for (i, b) in plaintexts_bytes.iter().enumerate() {
+            let pt = match wire::decode_curve(b) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.emit_protocol_error(
+                        Some(player),
+                        format!("ConcealedKanReveal plaintext decode: {e}"),
+                    );
+                    return;
+                }
+            };
+            let Some(tid) = self.card_mapping.decode(&pt) else {
+                self.emit_protocol_error(
+                    Some(player),
+                    "ConcealedKanReveal plaintext 不在 card_mapping".into(),
+                );
+                return;
+            };
+            tile_ids[i] = tid;
+        }
+        // 验证 all_same: 协议层只做"全相等" sanity (具体 kind 模式留 application).
+        // mental poker 选项 C 下 monitor 验证: 4 个 tile 应同 kind, 否则上报作弊.
+        // tile_id == card_mapping index, 跟 Tile.kind 不直接对应 (mapping 是 0..136
+        // = TILE_KINDS * 4 张). 如果 mapping 是按 standard_set() 顺序生成, tile_id /
+        // 4 = kind. 但 application 层可能用其他 mapping. 协议层仅做 all-equal sanity
+        // (4 张 mapping 索引相同).
+        let all_same = tile_ids.iter().all(|t| *t == tile_ids[0]);
+        let _ = self.event_tx.send(MpEvent::MonitorVerified {
+            player: player as u32,
+            deck_indices: [
+                // monitor 不知 deck_indices 直接 — 但之前 announce 已 apply 到 table,
+                // 可从 last concealed_kan record 拿. 简化: monitor 先收 announce 后收
+                // reveal, table.hand(player).concealed_kans().last() 给 indices.
+                self.table
+                    .hand(player)
+                    .concealed_kans()
+                    .last()
+                    .map(|k| k.deck_indices[0] as u32)
+                    .unwrap_or(u32::MAX),
+                self.table
+                    .hand(player)
+                    .concealed_kans()
+                    .last()
+                    .map(|k| k.deck_indices[1] as u32)
+                    .unwrap_or(u32::MAX),
+                self.table
+                    .hand(player)
+                    .concealed_kans()
+                    .last()
+                    .map(|k| k.deck_indices[2] as u32)
+                    .unwrap_or(u32::MAX),
+                self.table
+                    .hand(player)
+                    .concealed_kans()
+                    .last()
+                    .map(|k| k.deck_indices[3] as u32)
+                    .unwrap_or(u32::MAX),
+            ],
+            tile_ids,
+            all_same,
+        });
+    }
+
     /// 协议 7 自己宣告和牌 (Tsumo / Ron). validate 本地 + 广播 (不 apply 到
     /// Table 因为 Win 是终局事件不修改 state).
     fn do_win(
@@ -1574,6 +1771,8 @@ mod tests {
                         | MpEvent::GameOver { .. }
                         | MpEvent::DiscardApplied { .. }
                         | MpEvent::CallApplied { .. }
+                        | MpEvent::ConcealedKanApplied { .. }
+                        | MpEvent::MonitorVerified { .. }
                         | MpEvent::WinValidated { .. } => {}
                     }
                 }
@@ -1647,6 +1846,8 @@ mod tests {
                         | MpEvent::RevealComplete { .. }
                         | MpEvent::DiscardApplied { .. }
                         | MpEvent::CallApplied { .. }
+                        | MpEvent::ConcealedKanApplied { .. }
+                        | MpEvent::MonitorVerified { .. }
                         | MpEvent::WinValidated { .. } => {}
                     }
                 }

@@ -44,6 +44,12 @@ pub enum MpRoomCmd {
         from_player: u32,
         from_position_in_meld: u32,
     },
+    /// 主动暗杠 (协议 6 选项 C). caller 指定 4 张 deck_indices + 监督方 index.
+    /// actor 公开广播 indices, 私发 plaintexts 给 monitor.
+    ConcealedKan {
+        deck_indices: [u32; 4],
+        monitor_player: u32,
+    },
     /// 主动自摸和 (协议 7): caller 指定完整手牌的 deck_indices + winning_tile.
     /// actor 跟据本地状态广播 WinAnnouncement (Tsumo).
     Tsumo {
@@ -109,6 +115,24 @@ pub enum MpEvent {
         deck_indices: Vec<u32>,
         tile_ids: Vec<usize>,
         from_player: u32,
+    },
+    /// 协议 6 暗杠 announcement 应用到本地 Table (4 actor 都收, 含 monitor).
+    /// 仅 monitor 还会另收 [`MpEvent::MonitorVerified`] 含 4 张 plaintext 验证结果.
+    ConcealedKanApplied {
+        player: u32,
+        deck_indices: [u32; 4],
+        monitor_player: u32,
+    },
+    /// 协议 6 监督方收到 ConcealedKanReveal 后验证 4 张 tile_kind 一致.
+    /// 仅 monitor actor 收 (其他 actor 不知 plaintext).
+    MonitorVerified {
+        player: u32,
+        deck_indices: [u32; 4],
+        /// 4 张反查后 tile_id (monitor 自己看到的, 不广播).
+        tile_ids: [usize; 4],
+        /// 4 张 tile_id 是否同一 kind (按 deck_size 36 推断 kind = id % 34, 但实际
+        /// caller 传 mapping 决定; 协议层只验"全相等" sanity).
+        all_same: bool,
     },
     /// 协议 7 和牌 (Tsumo / Ron) validate 通过 (4 方都收, 同 player + winning_tile).
     /// caller (上层 GameState) 拿 hand_indices 反查 Tile + 算分 (yaku.rs).
