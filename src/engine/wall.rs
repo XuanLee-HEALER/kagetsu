@@ -158,4 +158,147 @@ mod tests {
         // rinshan 第 1 张
         assert_eq!(w.rinshan_draw().unwrap().id, 70);
     }
+
+    /// 杠开后 dora 跟着翻, 但上限 5.
+    #[test]
+    fn reveal_next_dora_capped_at_5() {
+        let mut w = Wall::shuffled(42, false);
+        assert_eq!(w.dora_indicators().len(), 1);
+        for expected in 2..=5 {
+            w.reveal_next_dora();
+            assert_eq!(w.dora_indicators().len(), expected);
+        }
+        // 第 5 张已翻, 再翻应 no-op.
+        w.reveal_next_dora();
+        assert_eq!(w.dora_indicators().len(), 5);
+        // ura dora 长度跟 表 dora 一致 (立直和牌时全揭)
+        assert_eq!(w.ura_dora_indicators().len(), 5);
+    }
+
+    /// ura_dora 跟 表 dora 张数一致, 但取的是 dead 区奇数索引 — 不应等于
+    /// 同一张表 dora 指示牌 (除非两张随机刚好相同).
+    #[test]
+    fn ura_dora_indices_distinct_from_omote() {
+        use crate::domain::tile::TileIndex;
+        // 用 from_components 显式控制 dead 区让 omote/ura 必定不同.
+        let mk = |k: u8, id: u16| Tile {
+            id,
+            kind: TileIndex(k),
+            red: false,
+        };
+        let live: Vec<Tile> = (0..70).map(|i| mk(0, i as u16)).collect();
+        // dead[0..4] 岭上 / dead[4,6,8,10,12] 表 dora / dead[5,7,9,11,13] 里 dora
+        // 用 kind 区分: 表 dora kind=1, 里 dora kind=2.
+        let mut dead: Vec<Tile> = Vec::with_capacity(14);
+        for i in 0..4 {
+            dead.push(mk(0, (70 + i) as u16));
+        }
+        for i in 0..5 {
+            dead.push(mk(1, (74 + i * 2) as u16)); // omote
+            dead.push(mk(2, (75 + i * 2) as u16)); // ura
+        }
+        let w = Wall::from_components(live, dead, 5);
+        for o in w.dora_indicators() {
+            assert_eq!(o.kind.0, 1, "omote dora 应来自 kind=1 索引");
+        }
+        for u in w.ura_dora_indicators() {
+            assert_eq!(u.kind.0, 2, "ura dora 应来自 kind=2 索引");
+        }
+    }
+
+    /// with_aka = true 时, 5m / 5p / 5s 各恰 1 张赤.
+    #[test]
+    fn aka_dora_exactly_one_per_suit() {
+        let w = Wall::shuffled(42, true);
+        // 拼接 live + dead 看全副是否恰好 3 张赤.
+        let all: Vec<&Tile> = w.live.iter().chain(w.dead.iter()).collect();
+        let aka_count = all.iter().filter(|t| t.red).count();
+        assert_eq!(aka_count, 3);
+        // 每个 5 花色 (kind = 4 / 13 / 22) 恰 1 张赤.
+        for &kind in &[4u8, 13, 22] {
+            let cnt = all.iter().filter(|t| t.kind.0 == kind && t.red).count();
+            assert_eq!(cnt, 1, "kind={kind} 期望恰 1 张赤, 实际 {cnt}");
+        }
+    }
+
+    /// without aka 时全副无赤.
+    #[test]
+    fn no_aka_when_disabled() {
+        let w = Wall::shuffled(42, false);
+        let all: Vec<&Tile> = w.live.iter().chain(w.dead.iter()).collect();
+        assert!(all.iter().all(|t| !t.red));
+    }
+
+    /// 全副 136 张, kind 分布 = 每 kind 4 张 (赤替换不增加张数).
+    #[test]
+    fn shuffled_total_136_distribution() {
+        let w = Wall::shuffled(42, true);
+        let all: Vec<&Tile> = w.live.iter().chain(w.dead.iter()).collect();
+        assert_eq!(all.len(), 136);
+        let mut counts = [0u8; 34];
+        for t in &all {
+            counts[t.kind.0 as usize] += 1;
+        }
+        for (k, &c) in counts.iter().enumerate() {
+            assert_eq!(c, 4, "kind {k} 张数 {c} ≠ 4");
+        }
+    }
+
+    /// draw 全摸完后返回 None.
+    #[test]
+    fn draw_exhaustion_returns_none() {
+        let mut w = Wall::shuffled(42, false);
+        let init = w.remaining();
+        for _ in 0..init {
+            assert!(w.draw().is_some());
+        }
+        assert_eq!(w.remaining(), 0);
+        assert!(w.draw().is_none());
+        assert!(w.draw().is_none()); // idempotent
+    }
+
+    /// 不同 seed 给不同顺序, 同 seed 给相同顺序 (deterministic).
+    #[test]
+    fn shuffled_is_deterministic_per_seed() {
+        let w1 = Wall::shuffled(42, false);
+        let w2 = Wall::shuffled(42, false);
+        let w3 = Wall::shuffled(43, false);
+        // 同 seed → 相同 live[0..5] ID 序列
+        for i in 0..5 {
+            assert_eq!(w1.live[i].id, w2.live[i].id, "同 seed 应一致");
+        }
+        // 不同 seed 应大概率不一样 (取 5 个比, 同概率 < 极小)
+        let same_prefix = (0..5).all(|i| w1.live[i].id == w3.live[i].id);
+        assert!(!same_prefix, "不同 seed 大概率给不同序列");
+    }
+
+    /// from_components 输入合法但 dora_revealed = 0 → panic.
+    #[test]
+    #[should_panic(expected = "dora_revealed")]
+    fn from_components_rejects_zero_dora() {
+        use crate::domain::tile::TileIndex;
+        let mk = |k: u8, id: u16| Tile {
+            id,
+            kind: TileIndex(k),
+            red: false,
+        };
+        let live = (0..70).map(|i| mk(0, i)).collect();
+        let dead = (70..84).map(|i| mk(0, i)).collect();
+        let _ = Wall::from_components(live, dead, 0);
+    }
+
+    /// from_components dead 长度 ≠ 14 → panic.
+    #[test]
+    #[should_panic(expected = "dead wall 必须 14 张")]
+    fn from_components_rejects_wrong_dead_size() {
+        use crate::domain::tile::TileIndex;
+        let mk = |k: u8, id: u16| Tile {
+            id,
+            kind: TileIndex(k),
+            red: false,
+        };
+        let live = (0..70).map(|i| mk(0, i)).collect();
+        let dead = (70..82).map(|i| mk(0, i)).collect(); // 12 张
+        let _ = Wall::from_components(live, dead, 1);
+    }
 }

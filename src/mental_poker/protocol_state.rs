@@ -484,4 +484,190 @@ mod tests {
         assert!(h.has_all_in_hand(&[0, 2]));
         assert!(!h.has_all_in_hand(&[0, 1])); // 1 没摸过
     }
+
+    // ====== 协议 4-7 串联 e2e (lib-level integration) ======
+
+    use crate::mental_poker::protocol_call::CallAnnouncement;
+    use crate::mental_poker::protocol_concealed_kan::ConcealedKanAnnouncement;
+    use crate::mental_poker::protocol_discard::DiscardAnnouncement;
+    use crate::mental_poker::protocol_win::{WinAnnouncement, WinType};
+
+    /// 完整一手: 玩家 0 摸 13 张, 弃 1 张, 玩家 1 鸣 (Pon), 玩家 0 暗杠 4 张, 玩家 0 自摸和.
+    /// 验证 4 玩家镜像 Table 同步 transition 不冲突.
+    #[test]
+    fn protocol_4_5_6_7_full_hand_e2e() {
+        let rng = &mut test_rng();
+        let mut tables: Vec<Table> = (0..4).map(|_| Table::new(4, 136)).collect();
+
+        // 共享 plaintext: 各玩家镜像在 协议 2 摸牌后才有 plaintext, 协议 4 弃牌后
+        // 全员可见. 这里用 helper 同步所有 Table.
+        let apply_to_all = |tables: &mut [Table], f: &dyn Fn(&mut Table)| {
+            for t in tables.iter_mut() {
+                f(t);
+            }
+        };
+
+        // 玩家 0 摸 14 张 (indices 0..14, 第 14 张作和牌). 玩家 1 摸 1 张 (index 50).
+        let p0_pts: Vec<Curve> = (0..14).map(|_| Curve::rand(rng)).collect();
+        let p1_discard_pt = p0_pts[0]; // Pon 需相同 plaintext
+
+        for (i, pt) in p0_pts.iter().enumerate() {
+            // 玩家 0 自己镜像有 plaintext, 其它 3 人镜像 plaintext = None
+            for (player_view, t) in tables.iter_mut().enumerate() {
+                let p = if player_view == 0 { Some(*pt) } else { None };
+                t.hand_mut(0).record_draw(i, p).unwrap();
+            }
+        }
+        // 玩家 1 摸 index 50 plaintext = p0_pts[0] (将弃用作 Pon 来源)
+        for (player_view, t) in tables.iter_mut().enumerate() {
+            let p = if player_view == 1 {
+                Some(p1_discard_pt)
+            } else {
+                None
+            };
+            t.hand_mut(1).record_draw(50, p).unwrap();
+        }
+
+        // === 协议 4: 玩家 1 弃 50 ===
+        let discard = DiscardAnnouncement {
+            player: 1,
+            deck_index: 50,
+            plaintext: p1_discard_pt,
+        };
+        apply_to_all(&mut tables, &|t| discard.apply(t).unwrap());
+        for t in &tables {
+            assert!(!t.hand(1).has_in_hand(50));
+            assert_eq!(t.hand(1).discarded_plaintext(50), Some(&p1_discard_pt));
+        }
+
+        // === 协议 5: 玩家 0 碰 (用 0/1 + 50). p0_pts[0] = p0_pts[1] 假设 ===
+        // 让 0/1 plaintext 跟 50 一致 (碰必同 tile)
+        // 实际对 protocol_state 不验证 tile 合法性 — 但 plaintext (Curve) 字符串
+        // 必须跟 from_player.discarded[50] 一致, 否则 from_plaintext_mismatch.
+        // 让我们手动让 p0_pts[0] / p0_pts[1] 都等于 p1_discard_pt:
+        // (改 setup 的话太复杂. 直接走 self-consistent 路径 — 用 pts 用相同的)
+        // 实际上 p1_discard_pt = p0_pts[0], 所以 plaintexts: [pt0, pt1, pt0]
+        // pt1 ≠ pt0 时 Pon 在协议层不验证 tile-equality (仅密文 ↔ 明文 ↔ index 一致).
+        // 牌型合法性 (3 张相同) 留 application 层. 跳过.
+        let call = CallAnnouncement {
+            player: 0,
+            call_type: CallType::Pon,
+            deck_indices: vec![0, 1, 50],
+            plaintexts: vec![p0_pts[0], p0_pts[1], p1_discard_pt],
+            from_player: 1,
+            from_position_in_meld: 2,
+        };
+        apply_to_all(&mut tables, &|t| call.apply(t).unwrap());
+        for t in &tables {
+            assert_eq!(t.hand(0).melds().len(), 1);
+            assert!(!t.hand(0).has_in_hand(0));
+            assert!(!t.hand(0).has_in_hand(1));
+        }
+
+        // === 协议 6: 玩家 0 暗杠 (indices 2/3/4/5) — application 层 4 张相同 tile ===
+        let kan = ConcealedKanAnnouncement {
+            player: 0,
+            deck_indices: [2, 3, 4, 5],
+            monitor_player: 2,
+        };
+        apply_to_all(&mut tables, &|t| kan.apply(t).unwrap());
+        for t in &tables {
+            assert_eq!(t.hand(0).concealed_kans().len(), 1);
+            for i in 2..=5 {
+                assert!(!t.hand(0).has_in_hand(i));
+            }
+        }
+
+        // === 协议 7: 玩家 0 自摸 (winning_tile = index 13, 在 drawn) ===
+        // hand_indices = melded (0,1,50) + concealed_kan (2,3,4,5) + drawn (6..14) = 14 张
+        let mut hand_indices: Vec<usize> = vec![0, 1, 50, 2, 3, 4, 5];
+        hand_indices.extend(6..14);
+        assert_eq!(hand_indices.len(), 15); // 3 + 4 + 8 = 15, but mahjong needs 14.
+        // 注: 实际麻将和牌型 14 张. 这里 13(暗手) + 1(自摸) = 14.
+        // 副露 1 副 (3 张) + 暗杠 1 副 (4 张, 算 4 张占位但牌型对应 1 个刻子) +
+        // drawn (剩余) = 14. 我们这里 drawn 留 7 张 (6..13), winning_tile = 13.
+        hand_indices.truncate(7); // 0,1,50, 2,3,4,5
+        hand_indices.extend(6..13); // +7 张 drawn
+        hand_indices.push(13); // 自摸 winning tile
+        assert_eq!(hand_indices.len(), 15); // 仍 15, 协议 7 不强制 14
+        // protocol_win 不强制 14 张 (牌型留给 application 层), 只验 ownership.
+
+        let plaintexts: Vec<Curve> = hand_indices
+            .iter()
+            .map(|&idx| {
+                if idx < 14 {
+                    p0_pts[idx]
+                } else {
+                    p1_discard_pt // 50 这位
+                }
+            })
+            .collect();
+        let win = WinAnnouncement {
+            player: 0,
+            win_type: WinType::Tsumo,
+            hand_indices,
+            hand_plaintexts: plaintexts,
+            winning_tile_index: 13,
+            dora_plaintexts: vec![],
+            uradoor_plaintexts: None,
+        };
+        for t in &tables {
+            win.validate(t).expect("4 玩家镜像都应 validate 通过");
+        }
+    }
+
+    /// 镜像不一致 attack: 玩家 1 弃牌后, 玩家 0 立刻 Pon, 但玩家 2/3 收到的弃牌
+    /// announcement 的 plaintext 跟 玩家 0 收到的不一致 → 玩家 0 的 Pon validate
+    /// 在 玩家 2/3 的镜像里失败 (from_plaintext_mismatch).
+    #[test]
+    fn mirror_inconsistency_caught_in_pon() {
+        use crate::mental_poker::protocol_call::CallError;
+
+        let rng = &mut test_rng();
+        let mut t_player0 = Table::new(4, 136);
+        let mut t_player2 = Table::new(4, 136);
+
+        let pt_real = Curve::rand(rng);
+        let pt_fake = Curve::rand(rng);
+        // p0 view: 玩家 1 弃 50 (pt_real)
+        t_player0.hand_mut(1).record_draw(50, None).unwrap();
+        DiscardAnnouncement {
+            player: 1,
+            deck_index: 50,
+            plaintext: pt_real,
+        }
+        .apply(&mut t_player0)
+        .unwrap();
+        // p2 view: 玩家 1 弃 50 (pt_fake) - 不一致
+        t_player2.hand_mut(1).record_draw(50, None).unwrap();
+        DiscardAnnouncement {
+            player: 1,
+            deck_index: 50,
+            plaintext: pt_fake,
+        }
+        .apply(&mut t_player2)
+        .unwrap();
+
+        // 玩家 0 摸 0/1 (用 pt_real)
+        t_player0.hand_mut(0).record_draw(0, Some(pt_real)).unwrap();
+        t_player0.hand_mut(0).record_draw(1, Some(pt_real)).unwrap();
+        t_player2.hand_mut(0).record_draw(0, None).unwrap();
+        t_player2.hand_mut(0).record_draw(1, None).unwrap();
+
+        // 玩家 0 广播 Pon (basis pt_real). p0 view 接受, p2 view 拒绝.
+        let call = CallAnnouncement {
+            player: 0,
+            call_type: CallType::Pon,
+            deck_indices: vec![0, 1, 50],
+            plaintexts: vec![pt_real, pt_real, pt_real],
+            from_player: 1,
+            from_position_in_meld: 2,
+        };
+        call.apply(&mut t_player0).unwrap();
+        let err = call.apply(&mut t_player2).unwrap_err();
+        assert!(matches!(
+            err,
+            CallError::FromPlaintextMismatch { index: 50 }
+        ));
+    }
 }
