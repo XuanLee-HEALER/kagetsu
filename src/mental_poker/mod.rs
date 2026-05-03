@@ -37,6 +37,7 @@
 //!
 //! 当前实现进度: M4.A.0 (ElGamal mask/unmask baseline).
 
+pub mod card_mapping;
 pub mod cut_and_choose;
 pub mod dleq;
 pub mod elgamal;
