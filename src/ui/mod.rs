@@ -493,6 +493,7 @@ impl App {
             config: self.last_config.clone(),
             players: vec![],
             state: crate::net::protocol::RoomLifecycle::Lobby,
+            mode: self.local_prefs.network.default_room_mode,
         };
         let mut room_state = OnlineRoomState::new(session, placeholder_view);
         room_state.set_theme(self.local_prefs.theme);
@@ -528,6 +529,9 @@ impl App {
                     config: GameRules::default(),
                     players: vec![],
                     state: crate::net::protocol::RoomLifecycle::Lobby,
+                    // 远程房间, 加入者还不知道 mode (Welcome 后从 RoomView 拿).
+                    // placeholder 用 default = Standard, 收 ServerMsg::Welcome 后被覆盖.
+                    mode: crate::net::p2p::RoomMode::Standard,
                 };
                 let mut room_state = OnlineRoomState::new(session, placeholder_view);
                 room_state.set_theme(self.local_prefs.theme);

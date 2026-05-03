@@ -42,8 +42,28 @@ use crate::net::protocol::{
 
 /// 创建一个新 RoomActor 并 spawn 到当前 tokio runtime.
 /// 返回的 [`RoomHandle`] 可发 [`RoomCmd`] 给 actor.
+///
+/// 默认 mode = [`RoomMode::Standard`] (房主权威). ZeroTrust 模式用
+/// [`spawn_room_with_mode`].
 pub fn spawn_room(host_nickname: String, config: GameRules) -> RoomHandle {
     spawn_room_with_seed(host_nickname, config, None)
+}
+
+/// 创建带指定信任模式的 RoomActor (M5.B.2).
+///
+/// `mode = Standard`: 跟 [`spawn_room`] 一致, 房主权威.
+/// `mode = ZeroTrust`: 当前 commit 仅记录 mode, 后续 M5.B.3+ 集成协议 1
+/// 联合洗牌 + 协议 2/3 摸牌 / 揭示.
+pub fn spawn_room_with_mode(
+    host_nickname: String,
+    config: GameRules,
+    mode: crate::net::p2p::RoomMode,
+) -> RoomHandle {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut actor = RoomActor::new_with_rx(host_nickname, config, rx, tx.clone(), None);
+    actor.mode = mode;
+    tokio::spawn(actor.run());
+    RoomHandle { tx }
 }
 
 /// 同 [`spawn_room`], 但允许测试注入固定 seed (None = 启动时随机).
@@ -183,6 +203,10 @@ struct RoomActor {
     call_window_ms: u64,
     /// 测试注入的 seed; None 时 start_game 用真 RNG.
     seed_override: Option<u64>,
+    /// 房间信任模式 (M5.B.2). Standard = 房主权威 (现状); ZeroTrust = 对等
+    /// mental poker (M5.B.3+ 集成协议 1/2/3 + 协议 4-7 announcement).
+    /// lobby phase 房主可改, 开局后冻结.
+    mode: crate::net::p2p::RoomMode,
 }
 
 impl RoomActor {
@@ -212,6 +236,7 @@ impl RoomActor {
             call_window_gen: 0,
             call_window_ms,
             seed_override,
+            mode: crate::net::p2p::RoomMode::Standard,
         }
     }
 
@@ -925,6 +950,7 @@ impl RoomActor {
             config: self.config.clone(),
             players: self.slots.iter().map(SlotEntry::to_view).collect(),
             state: self.state,
+            mode: self.mode,
         }
     }
 
@@ -1651,5 +1677,50 @@ mod tests {
             assert_eq!(v.my_seat, seat);
             assert_eq!(v.my_hand.len(), 13);
         }
+    }
+
+    /// M5.B.2: spawn_room 默认 mode = Standard, RoomView 反映正确.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_room_default_mode_is_standard() {
+        let handle = spawn_room("h".into(), GameRules::default());
+        let (_pid, _tok, mut rx) = join_player(&handle, "h").await;
+        // 收 Welcome
+        yield_actor().await;
+        let mut got_mode = None;
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMsg::Welcome { room, .. } = msg {
+                got_mode = Some(room.mode);
+                break;
+            }
+        }
+        assert_eq!(
+            got_mode,
+            Some(crate::net::p2p::RoomMode::Standard),
+            "默认 spawn_room 应是 Standard"
+        );
+    }
+
+    /// M5.B.2: spawn_room_with_mode(ZeroTrust) 传 RoomView.mode.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_room_with_mode_propagates_to_room_view() {
+        let handle = spawn_room_with_mode(
+            "h".into(),
+            GameRules::default(),
+            crate::net::p2p::RoomMode::ZeroTrust,
+        );
+        let (_pid, _tok, mut rx) = join_player(&handle, "h").await;
+        yield_actor().await;
+        let mut got_mode = None;
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMsg::Welcome { room, .. } = msg {
+                got_mode = Some(room.mode);
+                break;
+            }
+        }
+        assert_eq!(
+            got_mode,
+            Some(crate::net::p2p::RoomMode::ZeroTrust),
+            "spawn_room_with_mode(ZeroTrust) 应反映到 RoomView.mode"
+        );
     }
 }

@@ -172,6 +172,7 @@ mod tests {
             config: GameRules::default(),
             players: vec![],
             state: RoomLifecycle::Lobby,
+            mode: crate::net::p2p::RoomMode::Standard,
         });
         in_tx
             .send(ServerMsg::Welcome {

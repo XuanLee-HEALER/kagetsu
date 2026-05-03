@@ -132,6 +132,9 @@ pub struct RoomView {
     pub config: GameRules,
     pub players: Vec<PlayerSlot>,
     pub state: RoomLifecycle,
+    /// 房间信任模式 (M5.B.2). 老 schema 没此字段时 default = Standard.
+    #[serde(default)]
+    pub mode: crate::net::p2p::RoomMode,
 }
 
 /// 房间内某个 slot. 含 AI slot.
@@ -272,6 +275,7 @@ mod tests {
                     connected: true,
                 }],
                 state: RoomLifecycle::Lobby,
+                mode: crate::net::p2p::RoomMode::Standard,
             }),
         };
         let back = round_trip(&msg);
