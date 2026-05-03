@@ -321,11 +321,28 @@ impl OnlineRoomState {
             )));
         }
 
+        // M5.F.3: ZeroTrust 模式 + 不足 4 真人时, 提示等待 + 不暴露 Enter 开始按键.
+        let n_players = self.room_view.players.len();
+        let is_zerotrust = self.room_view.mode == crate::net::p2p::RoomMode::ZeroTrust;
+        let zerotrust_short = is_zerotrust && n_players < 4;
+        if zerotrust_short {
+            lines.push(Line::from(Span::styled(
+                format!("⏳ ZeroTrust 模式需 4 真人 ({}/4 已加入)", n_players),
+                Style::default().fg(Color::Magenta),
+            )));
+        }
+
         lines.push(Line::from(""));
         let mut hints = vec!["R 切换准备".to_string()];
         if self.is_host() {
             hints.push("C 改配置".into());
-            hints.push("Enter 开始游戏 (空座位补 AI)".into());
+            if zerotrust_short {
+                hints.push(format!("(Enter 开始: 等 {} 名真人)", 4 - n_players));
+            } else if is_zerotrust {
+                hints.push("Enter 开始游戏 (ZeroTrust)".into());
+            } else {
+                hints.push("Enter 开始游戏 (空座位补 AI)".into());
+            }
         }
         hints.push("L 离开房间".into());
         hints.push("Esc 回主菜单".into());
