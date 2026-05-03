@@ -2143,4 +2143,312 @@ mod tests {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+
+    /// 通用 step driver: 推动 4 actor 桥接, 直到 cond 返回 true 或 max_steps 用完.
+    /// 收集 outbound 路由到 PeerMsg, 累积所有 event 给 caller fold.
+    async fn drive_until<F>(
+        handles: &mut [MpPlayerHandle],
+        rxs: &mut [tokio::sync::mpsc::UnboundedReceiver<MpEvent>],
+        max_steps: usize,
+        events_out: &mut Vec<(usize, MpEvent)>,
+        mut cond: F,
+    ) -> bool
+    where
+        F: FnMut(&[(usize, MpEvent)]) -> bool,
+    {
+        let n = handles.len();
+        for _step in 0..max_steps {
+            let mut any = false;
+            for src in 0..n {
+                while let Ok(ev) = rxs[src].try_recv() {
+                    any = true;
+                    if let MpEvent::OutboundMsg { to, msg } = &ev {
+                        let targets: Vec<usize> = match to {
+                            None => (0..n).filter(|&i| i != src).collect(),
+                            Some(idx) => vec![*idx],
+                        };
+                        for t in targets {
+                            handles[t]
+                                .send(MpRoomCmd::PeerMsg {
+                                    from: Some(src),
+                                    msg: msg.clone(),
+                                })
+                                .unwrap();
+                        }
+                    }
+                    if let MpEvent::ProtocolError { offender, reason } = &ev {
+                        panic!("actor {src} ProtocolError offender={offender:?}: {reason}");
+                    }
+                    events_out.push((src, ev));
+                }
+            }
+            if cond(events_out) {
+                return true;
+            }
+            if !any {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        false
+    }
+
+    /// **M5.B.7 完整一手 e2e**: 4 actor 串联协议 0+1+2+3+4+5+7 — 不依赖
+    /// yaku 牌型, 仅验 actor 状态机 + Table 镜像同步.
+    ///
+    /// 流程:
+    /// 1. 4 actor 跑完 keygen + 联合洗牌, all in Playing
+    /// 2. actor 0 摸 deck[0], deck[1] (准备 Pon 的 2 张)
+    /// 3. actor 1 摸 deck[2] → 弃 deck[2]
+    /// 4. actor 0 Pon [0, 1, 2] from=1 → 4 actor CallApplied
+    /// 5. actor 0 摸 deck[3] → 弃 deck[3] → 4 actor DiscardApplied
+    /// 6. actor 0 揭示 deck[15] (dora indicator) → 4 actor RevealComplete
+    /// 7. actor 0 摸 deck[4], deck[5], deck[6]
+    /// 8. actor 0 Tsumo: hand_indices=[4,5,6], winning_tile=6 → 4 actor WinValidated
+    /// 9. 各 actor 进 GameOver
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn protocol_full_hand_e2e() {
+        const N: usize = 4;
+        let mut handles: Vec<MpPlayerHandle> = (0..N)
+            .map(|i| spawn_mp_player(test_cfg(i), Some((i + 1000) as u64)))
+            .collect();
+        let mut rxs: Vec<_> = handles
+            .iter_mut()
+            .map(|h| h.take_event_rx().unwrap())
+            .collect();
+
+        // Step 1: 跑到 all in Playing
+        let mut events: Vec<(usize, MpEvent)> = Vec::new();
+        let entered_playing = drive_until(&mut handles, &mut rxs, 800, &mut events, |evs| {
+            let mut phase = [MpPhase::KeyExchange; N];
+            for (src, ev) in evs {
+                if let MpEvent::PhaseChanged { phase: p } = ev {
+                    phase[*src] = *p;
+                }
+            }
+            phase.iter().all(|p| *p == MpPhase::Playing)
+        })
+        .await;
+        assert!(entered_playing, "4 actor 应全 transition 到 Playing");
+
+        // Step 2: actor 0 摸 deck[0], deck[1] — 等 2 个 DrawComplete
+        events.clear();
+        handles[0]
+            .send(MpRoomCmd::TriggerDraw { deck_index: 0 })
+            .unwrap();
+        let drew_0 = drive_until(&mut handles, &mut rxs, 400, &mut events, |evs| {
+            evs.iter()
+                .any(|(s, e)| *s == 0 && matches!(e, MpEvent::DrawComplete { deck_index: 0, .. }))
+        })
+        .await;
+        assert!(drew_0, "actor 0 应完成摸 deck[0]");
+
+        events.clear();
+        handles[0]
+            .send(MpRoomCmd::TriggerDraw { deck_index: 1 })
+            .unwrap();
+        let drew_1 = drive_until(&mut handles, &mut rxs, 400, &mut events, |evs| {
+            evs.iter()
+                .any(|(s, e)| *s == 0 && matches!(e, MpEvent::DrawComplete { deck_index: 1, .. }))
+        })
+        .await;
+        assert!(drew_1, "actor 0 应完成摸 deck[1]");
+
+        // Step 3: actor 1 摸 deck[2] → 弃 deck[2]
+        events.clear();
+        handles[1]
+            .send(MpRoomCmd::TriggerDraw { deck_index: 2 })
+            .unwrap();
+        let drew_2 = drive_until(&mut handles, &mut rxs, 400, &mut events, |evs| {
+            evs.iter()
+                .any(|(s, e)| *s == 1 && matches!(e, MpEvent::DrawComplete { deck_index: 2, .. }))
+        })
+        .await;
+        assert!(drew_2, "actor 1 应完成摸 deck[2]");
+
+        events.clear();
+        handles[1]
+            .send(MpRoomCmd::Discard { deck_index: 2 })
+            .unwrap();
+        let discard_2_done = drive_until(&mut handles, &mut rxs, 200, &mut events, |evs| {
+            evs.iter()
+                .filter(|(_, e)| {
+                    matches!(
+                        e,
+                        MpEvent::DiscardApplied {
+                            player: 1,
+                            deck_index: 2,
+                            ..
+                        }
+                    )
+                })
+                .count()
+                == N
+        })
+        .await;
+        assert!(
+            discard_2_done,
+            "4 actor 应都收 DiscardApplied(player=1, deck=2)"
+        );
+
+        // Step 4: actor 0 Pon deck[0,1,2], from_player=1, from_position=2
+        events.clear();
+        handles[0]
+            .send(MpRoomCmd::Call {
+                call_type: crate::mental_poker::wire::WireCallType::Pon,
+                deck_indices: vec![0, 1, 2],
+                from_player: 1,
+                from_position_in_meld: 2,
+            })
+            .unwrap();
+        let pon_done = drive_until(&mut handles, &mut rxs, 200, &mut events, |evs| {
+            evs.iter()
+                .filter(|(_, e)| {
+                    matches!(
+                        e,
+                        MpEvent::CallApplied {
+                            player: 0,
+                            from_player: 1,
+                            ..
+                        }
+                    )
+                })
+                .count()
+                == N
+        })
+        .await;
+        assert!(pon_done, "4 actor 应都收 CallApplied(player=0, from=1)");
+
+        // Step 5: actor 0 摸 deck[3] → 弃 deck[3]
+        events.clear();
+        handles[0]
+            .send(MpRoomCmd::TriggerDraw { deck_index: 3 })
+            .unwrap();
+        let drew_3 = drive_until(&mut handles, &mut rxs, 400, &mut events, |evs| {
+            evs.iter()
+                .any(|(s, e)| *s == 0 && matches!(e, MpEvent::DrawComplete { deck_index: 3, .. }))
+        })
+        .await;
+        assert!(drew_3, "actor 0 应完成摸 deck[3]");
+
+        events.clear();
+        handles[0]
+            .send(MpRoomCmd::Discard { deck_index: 3 })
+            .unwrap();
+        let discard_3_done = drive_until(&mut handles, &mut rxs, 200, &mut events, |evs| {
+            evs.iter()
+                .filter(|(_, e)| {
+                    matches!(
+                        e,
+                        MpEvent::DiscardApplied {
+                            player: 0,
+                            deck_index: 3,
+                            ..
+                        }
+                    )
+                })
+                .count()
+                == N
+        })
+        .await;
+        assert!(
+            discard_3_done,
+            "4 actor 应都收 DiscardApplied(player=0, deck=3)"
+        );
+
+        // Step 6: actor 0 揭示 deck[15] (dora indicator) — 4 actor 收同 tile_id
+        events.clear();
+        handles[0]
+            .send(MpRoomCmd::TriggerReveal { deck_index: 15 })
+            .unwrap();
+        let reveal_done = drive_until(&mut handles, &mut rxs, 600, &mut events, |evs| {
+            evs.iter()
+                .filter(|(_, e)| matches!(e, MpEvent::RevealComplete { deck_index: 15, .. }))
+                .count()
+                == N
+        })
+        .await;
+        assert!(reveal_done, "4 actor 应都收 RevealComplete(deck=15)");
+        // 4 actor 看到的 tile_id 一致
+        let reveal_tids: Vec<usize> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                MpEvent::RevealComplete {
+                    deck_index: 15,
+                    tile_id,
+                } => Some(*tile_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reveal_tids.len(), N);
+        let dora_tid = reveal_tids[0];
+        for tid in &reveal_tids {
+            assert_eq!(*tid, dora_tid, "4 actor 看到的 dora tile_id 应一致");
+        }
+
+        // Step 7: actor 0 摸 deck[4], deck[5], deck[6]
+        for idx in [4u32, 5, 6] {
+            events.clear();
+            handles[0]
+                .send(MpRoomCmd::TriggerDraw { deck_index: idx })
+                .unwrap();
+            let ok = drive_until(&mut handles, &mut rxs, 400, &mut events, |evs| {
+                evs.iter().any(|(s, e)| {
+                    *s == 0
+                        && matches!(e, MpEvent::DrawComplete { deck_index: di, .. } if *di == idx)
+                })
+            })
+            .await;
+            assert!(ok, "actor 0 应完成摸 deck[{idx}]");
+        }
+
+        // Step 8: actor 0 Tsumo, hand=[4,5,6], winning=6
+        events.clear();
+        handles[0]
+            .send(MpRoomCmd::Tsumo {
+                hand_indices: vec![4, 5, 6],
+                winning_tile_index: 6,
+            })
+            .unwrap();
+        let win_done = drive_until(&mut handles, &mut rxs, 200, &mut events, |evs| {
+            evs.iter()
+                .filter(|(_, e)| {
+                    matches!(
+                        e,
+                        MpEvent::WinValidated {
+                            player: 0,
+                            is_tsumo: true,
+                            ..
+                        }
+                    )
+                })
+                .count()
+                == N
+        })
+        .await;
+        assert!(win_done, "4 actor 应都收 WinValidated(player=0, tsumo)");
+
+        // Step 9: 各 actor 进 GameOver
+        let game_over_count = events
+            .iter()
+            .filter(|(_, e)| {
+                matches!(
+                    e,
+                    MpEvent::PhaseChanged {
+                        phase: MpPhase::GameOver
+                    }
+                )
+            })
+            .count();
+        // 自己 emit 1 个 + 4 actor 中可能其他人也 emit (handle_win_msg 也 transition).
+        // 至少应有 4 个 (4 actor 都 transition 到 GameOver).
+        assert!(
+            game_over_count >= N,
+            "至少 {N} 个 PhaseChanged(GameOver), 实际 {game_over_count}, events={events:?}"
+        );
+
+        for h in &handles {
+            h.send(MpRoomCmd::Disconnect).ok();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
