@@ -50,6 +50,8 @@ pub mod protocol_draw;
 pub mod protocol_reveal;
 pub mod protocol_state;
 pub mod protocol_win;
+#[cfg(test)]
+mod scenarios;
 pub mod schnorr;
 pub mod session;
 pub mod shuffle;
