@@ -425,29 +425,52 @@ impl ZeroTrustGameState {
     /// 自动反查 plaintexts. validate 不验 3 张同 kind, 只验 from_player.discarded
     /// 含 winning_tile 且 plaintext 一致.
     pub fn trigger_pon(&self) {
+        self.trigger_call(crate::mental_poker::wire::WireCallType::Pon, 2);
+    }
+
+    /// UI 触发吃. 用 own_drawn 前 2 个 deck_indices + last_discard.deck_index
+    /// (from_position=2, 跟 Pon 同结构, 协议层 ZeroTrust 不区分 chi_options).
+    /// 应用层判断"上家"才能吃 留 yaku.rs 集成.
+    pub fn trigger_chi(&self) {
+        self.trigger_call(crate::mental_poker::wire::WireCallType::Chi, 2);
+    }
+
+    /// UI 触发明杠. 用 own_drawn 前 3 个 deck_indices + last_discard.deck_index
+    /// (from_position=3). 协议 5 Kan 要求 4 张, validate 不验同 kind.
+    pub fn trigger_minkan(&self) {
+        self.trigger_call(crate::mental_poker::wire::WireCallType::Kan, 3);
+    }
+
+    /// 通用鸣牌触发 — own_drawn 取前 from_position 张 + last_discard.
+    fn trigger_call(
+        &self,
+        call_type: crate::mental_poker::wire::WireCallType,
+        from_position_in_meld: u32,
+    ) {
         let Some((from_player, win_idx, _)) = self.ui_table.last_discard else {
             return;
         };
         if from_player == self.args.own_index {
             return;
         }
-        let own_two: Vec<u32> = self
+        let needed = from_position_in_meld as usize;
+        let own: Vec<u32> = self
             .ui_table
             .own_drawn_in_hand
             .keys()
-            .take(2)
+            .take(needed)
             .copied()
             .collect();
-        if own_two.len() < 2 {
+        if own.len() < needed {
             return;
         }
-        let mut deck_indices = own_two;
+        let mut deck_indices = own;
         deck_indices.push(win_idx);
         self.send_cmd(MpRoomCmd::Call {
-            call_type: crate::mental_poker::wire::WireCallType::Pon,
+            call_type,
             deck_indices,
             from_player,
-            from_position_in_meld: 2,
+            from_position_in_meld,
         });
     }
 
@@ -532,6 +555,14 @@ impl ZeroTrustGameState {
             }
             KeyCode::Char('p') | KeyCode::Char('P') if self.phase == MpPhase::Playing => {
                 self.trigger_pon();
+                None
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') if self.phase == MpPhase::Playing => {
+                self.trigger_chi();
+                None
+            }
+            KeyCode::Char('k') | KeyCode::Char('K') if self.phase == MpPhase::Playing => {
+                self.trigger_minkan();
                 None
             }
             KeyCode::Char('a') | KeyCode::Char('A') if self.phase == MpPhase::Playing => {
@@ -762,7 +793,7 @@ impl ZeroTrustGameState {
         // 操作提示
         let hint_text = match self.phase {
             MpPhase::Playing => {
-                "D 摸 / Space 弃 / R dora / P 碰 / A 暗杠 / T 自摸 / N 荣和 / ←/→ 移动 / Esc 离开"
+                "D 摸 / Space 弃 / R dora / C 吃 / P 碰 / K 明杠 / A 暗杠 / T 自摸 / N 荣和 / Esc"
             }
             _ => "Esc / L: 离开",
         };
@@ -1684,6 +1715,349 @@ mod tests {
                 "应有 'Player 0 concealed kan' log"
             );
         }
+    }
+
+    /// **M5.F.0 Chi e2e**: screen[1] 弃牌后 screen[0] 按 C 触发 Chi.
+    /// 复用 pon_then_ankan 模式但调 trigger_chi() 替代 trigger_pon().
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn zerotrust_screen_chi_emits_call_applied() {
+        use crate::mental_poker::wire::MentalPokerMsg;
+        use crate::net::p2p::mp_swarm::SwarmCommand;
+        use crate::net::session::NetSession;
+        use libp2p::PeerId;
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tokio::sync::mpsc::unbounded_channel;
+        use uuid::Uuid;
+
+        const N: usize = 4;
+        fn fake_peer_id(seed: u8) -> PeerId {
+            let mut bytes = [0u8; 32];
+            bytes[0] = seed;
+            let kp = libp2p::identity::Keypair::ed25519_from_bytes(bytes).expect("kp");
+            PeerId::from(&kp.public())
+        }
+        let peer_ids: Vec<PeerId> = (0..N as u8).map(fake_peer_id).collect();
+        let peer_to_idx: HashMap<PeerId, usize> =
+            peer_ids.iter().enumerate().map(|(i, p)| (*p, i)).collect();
+
+        let mut session_inbound_txs: Vec<
+            tokio::sync::mpsc::UnboundedSender<(PeerId, MentalPokerMsg)>,
+        > = Vec::with_capacity(N);
+        let mut cmd_rxs = Vec::with_capacity(N);
+        let mut sessions = Vec::with_capacity(N);
+        for i in 0..N {
+            let (out_tx, _out_rx) = unbounded_channel::<crate::net::protocol::ClientMsg>();
+            let (_in_tx, in_rx) = unbounded_channel::<crate::net::protocol::ServerMsg>();
+            let (mp_cmd_tx, mp_cmd_rx) = unbounded_channel::<SwarmCommand>();
+            let (mp_in_tx, mp_in_rx) = unbounded_channel::<(PeerId, MentalPokerMsg)>();
+            let session = NetSession::from_channels(i as u32, Uuid::new_v4(), out_tx, in_rx)
+                .with_mp_handles(mp_cmd_tx, mp_in_rx);
+            sessions.push(session);
+            cmd_rxs.push(mp_cmd_rx);
+            session_inbound_txs.push(mp_in_tx);
+        }
+
+        let session_label = vec![0xC1u8; 32];
+        let mut screens = Vec::with_capacity(N);
+        for (i, sess) in sessions.into_iter().enumerate() {
+            let args = MpStartArgs {
+                all_peer_ids: peer_ids.iter().map(|p| p.to_bytes()).collect(),
+                own_index: i as u32,
+                session_label: session_label.clone(),
+                deck_size: 16,
+                cnc_k_rounds: 8,
+            };
+            screens.push(ZeroTrustGameState::new(sess, args));
+        }
+
+        for i in 0..N {
+            let mut cmd_rx = cmd_rxs.remove(0);
+            let inbound_txs = session_inbound_txs.clone();
+            let peer_to_idx_clone = peer_to_idx.clone();
+            let peer_ids_clone = peer_ids.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = cmd_rx.recv().await {
+                    match cmd {
+                        SwarmCommand::Broadcast { topic: _, msg } => {
+                            for (idx, tx) in inbound_txs.iter().enumerate() {
+                                if idx == i {
+                                    continue;
+                                }
+                                let _ = tx.send((peer_ids_clone[i], msg.clone()));
+                            }
+                        }
+                        SwarmCommand::Unicast { target, msg } => {
+                            if let Some(&t_idx) = peer_to_idx_clone.get(&target) {
+                                let _ = inbound_txs[t_idx].send((peer_ids_clone[i], msg));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        let _ = tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens.iter().all(|s| s.phase == MpPhase::Playing) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(screens.iter().all(|s| s.phase == MpPhase::Playing));
+
+        // screen[0] 摸 deck[0,1] 准备 Chi
+        for _ in 0..2 {
+            screens[0].trigger_draw_next();
+            let target = screens[0].ui_table.own_drawn_in_hand.len() + 1;
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    for s in &mut screens {
+                        let _ = s.advance();
+                    }
+                    if screens[0].ui_table.own_drawn_in_hand.len() == target {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+        }
+        // screen[1] 摸 + 弃 deck[2]
+        screens[1].trigger_draw_next();
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if !screens[1].ui_table.own_drawn_in_hand.is_empty() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        screens[1].discard_cursor();
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens
+                    .iter()
+                    .all(|s| s.ui_table.last_discard.map(|(p, _, _)| p) == Some(1))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        // screen[0] 按 C 触发 Chi
+        screens[0].trigger_chi();
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens
+                    .iter()
+                    .all(|s| s.event_log.iter().any(|l| l.contains("called Chi from 1")))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        for s in &screens {
+            assert!(
+                s.event_log.iter().any(|l| l.contains("called Chi from 1")),
+                "应有 'called Chi from 1' log"
+            );
+        }
+        assert_eq!(
+            screens[0].ui_table.own_melds.len(),
+            1,
+            "screen[0] 应有 1 副 Chi"
+        );
+    }
+
+    /// **M5.F.0 Minkan e2e**: screen[1] 弃牌后 screen[0] 摸 3 张 + 按 K 触发 Minkan.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn zerotrust_screen_minkan_emits_call_applied() {
+        use crate::mental_poker::wire::MentalPokerMsg;
+        use crate::net::p2p::mp_swarm::SwarmCommand;
+        use crate::net::session::NetSession;
+        use libp2p::PeerId;
+        use std::collections::HashMap;
+        use std::time::Duration;
+        use tokio::sync::mpsc::unbounded_channel;
+        use uuid::Uuid;
+
+        const N: usize = 4;
+        fn fake_peer_id(seed: u8) -> PeerId {
+            let mut bytes = [0u8; 32];
+            bytes[0] = seed;
+            let kp = libp2p::identity::Keypair::ed25519_from_bytes(bytes).expect("kp");
+            PeerId::from(&kp.public())
+        }
+        let peer_ids: Vec<PeerId> = (0..N as u8).map(fake_peer_id).collect();
+        let peer_to_idx: HashMap<PeerId, usize> =
+            peer_ids.iter().enumerate().map(|(i, p)| (*p, i)).collect();
+
+        let mut session_inbound_txs: Vec<
+            tokio::sync::mpsc::UnboundedSender<(PeerId, MentalPokerMsg)>,
+        > = Vec::with_capacity(N);
+        let mut cmd_rxs = Vec::with_capacity(N);
+        let mut sessions = Vec::with_capacity(N);
+        for i in 0..N {
+            let (out_tx, _out_rx) = unbounded_channel::<crate::net::protocol::ClientMsg>();
+            let (_in_tx, in_rx) = unbounded_channel::<crate::net::protocol::ServerMsg>();
+            let (mp_cmd_tx, mp_cmd_rx) = unbounded_channel::<SwarmCommand>();
+            let (mp_in_tx, mp_in_rx) = unbounded_channel::<(PeerId, MentalPokerMsg)>();
+            let session = NetSession::from_channels(i as u32, Uuid::new_v4(), out_tx, in_rx)
+                .with_mp_handles(mp_cmd_tx, mp_in_rx);
+            sessions.push(session);
+            cmd_rxs.push(mp_cmd_rx);
+            session_inbound_txs.push(mp_in_tx);
+        }
+
+        let session_label = vec![0xC2u8; 32];
+        let mut screens = Vec::with_capacity(N);
+        for (i, sess) in sessions.into_iter().enumerate() {
+            let args = MpStartArgs {
+                all_peer_ids: peer_ids.iter().map(|p| p.to_bytes()).collect(),
+                own_index: i as u32,
+                session_label: session_label.clone(),
+                deck_size: 16,
+                cnc_k_rounds: 8,
+            };
+            screens.push(ZeroTrustGameState::new(sess, args));
+        }
+
+        for i in 0..N {
+            let mut cmd_rx = cmd_rxs.remove(0);
+            let inbound_txs = session_inbound_txs.clone();
+            let peer_to_idx_clone = peer_to_idx.clone();
+            let peer_ids_clone = peer_ids.clone();
+            tokio::spawn(async move {
+                while let Some(cmd) = cmd_rx.recv().await {
+                    match cmd {
+                        SwarmCommand::Broadcast { topic: _, msg } => {
+                            for (idx, tx) in inbound_txs.iter().enumerate() {
+                                if idx == i {
+                                    continue;
+                                }
+                                let _ = tx.send((peer_ids_clone[i], msg.clone()));
+                            }
+                        }
+                        SwarmCommand::Unicast { target, msg } => {
+                            if let Some(&t_idx) = peer_to_idx_clone.get(&target) {
+                                let _ = inbound_txs[t_idx].send((peer_ids_clone[i], msg));
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        let _ = tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens.iter().all(|s| s.phase == MpPhase::Playing) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(screens.iter().all(|s| s.phase == MpPhase::Playing));
+
+        // screen[0] 摸 3 张
+        for _ in 0..3 {
+            screens[0].trigger_draw_next();
+            let target = screens[0].ui_table.own_drawn_in_hand.len() + 1;
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    for s in &mut screens {
+                        let _ = s.advance();
+                    }
+                    if screens[0].ui_table.own_drawn_in_hand.len() == target {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+        }
+        // screen[1] 摸 + 弃 deck[3]
+        screens[1].trigger_draw_next();
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if !screens[1].ui_table.own_drawn_in_hand.is_empty() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        screens[1].discard_cursor();
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens
+                    .iter()
+                    .all(|s| s.ui_table.last_discard.map(|(p, _, _)| p) == Some(1))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+
+        // screen[0] 按 K 触发 Minkan
+        screens[0].trigger_minkan();
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                for s in &mut screens {
+                    let _ = s.advance();
+                }
+                if screens
+                    .iter()
+                    .all(|s| s.event_log.iter().any(|l| l.contains("called Kan from 1")))
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        for s in &screens {
+            assert!(
+                s.event_log.iter().any(|l| l.contains("called Kan from 1")),
+                "应有 'called Kan from 1' log"
+            );
+        }
+        assert_eq!(
+            screens[0].ui_table.own_melds.len(),
+            1,
+            "screen[0] 应有 1 副 Minkan"
+        );
     }
 
     #[test]
