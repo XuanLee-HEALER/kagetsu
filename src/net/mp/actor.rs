@@ -1518,11 +1518,18 @@ impl MpPlayerActor {
             .iter()
             .map(|p| self.card_mapping.decode(p).unwrap_or(usize::MAX))
             .collect();
+        // 反查 winning_tile 在 hand_indices 中的位置 → tile_id (M6.C)
+        let winning_tile_id = hand_indices
+            .iter()
+            .position(|&i| i == winning_tile_index)
+            .and_then(|p| tile_ids.get(p).copied())
+            .unwrap_or(usize::MAX);
         let _ = self.event_tx.send(MpEvent::WinValidated {
             player: self.cfg.own_index as u32,
             is_tsumo,
             from_player,
             winning_tile_index,
+            winning_tile_id,
             hand_tile_ids: tile_ids,
         });
         self.phase = MpPhase::GameOver;
@@ -1587,11 +1594,17 @@ impl MpPlayerActor {
             .iter()
             .map(|p| self.card_mapping.decode(p).unwrap_or(usize::MAX))
             .collect();
+        let winning_tile_id = hand_indices
+            .iter()
+            .position(|&i| i == winning_tile_index)
+            .and_then(|p| tile_ids.get(p).copied())
+            .unwrap_or(usize::MAX);
         let _ = self.event_tx.send(MpEvent::WinValidated {
             player,
             is_tsumo,
             from_player,
             winning_tile_index,
+            winning_tile_id,
             hand_tile_ids: tile_ids,
         });
         self.phase = MpPhase::GameOver;

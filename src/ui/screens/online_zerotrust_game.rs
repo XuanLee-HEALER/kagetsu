@@ -68,6 +68,8 @@ pub struct WinSummary {
     pub is_tsumo: bool,
     pub from_player: Option<u32>,
     pub winning_tile_index: u32,
+    /// M6.C: winning_tile 反查后的 tile_id (kind = id / 4 当 deck_size=136).
+    pub winning_tile_id: usize,
     pub hand_tile_ids: Vec<usize>,
 }
 
@@ -356,6 +358,7 @@ impl ZeroTrustGameState {
                 is_tsumo,
                 from_player,
                 winning_tile_index,
+                winning_tile_id,
                 hand_tile_ids,
             } => {
                 self.ui_table.last_win = Some(WinSummary {
@@ -363,6 +366,7 @@ impl ZeroTrustGameState {
                     is_tsumo,
                     from_player,
                     winning_tile_index,
+                    winning_tile_id,
                     hand_tile_ids: hand_tile_ids.clone(),
                 });
                 self.event_log.push(format!(
@@ -587,6 +591,164 @@ impl ZeroTrustGameState {
         self.ui_table.last_win.as_ref()
     }
 
+    /// **M6.C** 调 yaku::detect_yaku + score::evaluate 算分.
+    /// 仅 deck_size=136 时启用 (其他 deck_size 下 tile_id → kind 映射不对应实际 mahjong).
+    /// 返回 None 当: deck_size!=136 / 没 win_summary / decompose 无解.
+    pub fn evaluate_yaku(&self) -> Option<YakuScoreSummary> {
+        if self.args.deck_size != 136 {
+            return None;
+        }
+        let win = self.win_summary()?;
+        // 自家算分仅当 win.player == own_index (其他玩家手牌 UI 看不到).
+        if win.player != self.args.own_index {
+            return None;
+        }
+        use crate::domain::decompose::decompose;
+        use crate::domain::meld::{Meld, MeldKind, Seat};
+        use crate::domain::tile::{Tile, TileIndex};
+        use crate::domain::yaku::{WinContext, detect_yaku};
+        use crate::engine::rules::GameRules;
+        use crate::engine::score::evaluate;
+
+        let make_tile = |tid: usize| -> Tile {
+            Tile {
+                kind: TileIndex((tid / 4) as u8),
+                red: false,
+                id: tid as u16,
+            }
+        };
+
+        // Build closed[34] count from hand_tile_ids (含 winning_tile, 不含 melds 的牌).
+        // 注意: hand_tile_ids 来自 trigger_tsumo/ron, 已经包括 winning_tile.
+        // 但是 own_melds 的 tile_ids 不在 hand_tile_ids 中 (do_win 反查 own_drawn,
+        // melded indices 不在 own_drawn 内). 所以 hand_tile_ids 就是 closed hand.
+        let mut closed = [0u8; 34];
+        for &tid in &win.hand_tile_ids {
+            let kind = tid / 4;
+            if kind < 34 {
+                closed[kind] += 1;
+            }
+        }
+
+        // 副露 → Vec<Meld>
+        let melds: Vec<Meld> = self
+            .ui_table
+            .own_melds
+            .iter()
+            .filter_map(|(ct, ids)| {
+                let tiles_vec: Vec<Tile> = ids.iter().map(|&t| make_tile(t)).collect();
+                let kind = match ct {
+                    crate::mental_poker::wire::WireCallType::Pon if tiles_vec.len() == 3 => {
+                        MeldKind::Pon {
+                            tiles: [tiles_vec[0], tiles_vec[1], tiles_vec[2]],
+                        }
+                    }
+                    crate::mental_poker::wire::WireCallType::Chi if tiles_vec.len() == 3 => {
+                        MeldKind::Chi {
+                            tiles: [tiles_vec[0], tiles_vec[1], tiles_vec[2]],
+                        }
+                    }
+                    crate::mental_poker::wire::WireCallType::Kan if tiles_vec.len() == 4 => {
+                        MeldKind::Minkan {
+                            tiles: [tiles_vec[0], tiles_vec[1], tiles_vec[2], tiles_vec[3]],
+                        }
+                    }
+                    _ => return None,
+                };
+                Some(Meld {
+                    kind,
+                    from: Some(Seat::East), // 简化: from Seat 不影响算分 (yaku 不靠 from)
+                })
+            })
+            .collect();
+
+        let winning_tile = TileIndex((win.winning_tile_id / 4) as u8);
+        let decompositions = decompose(&closed, &melds, winning_tile);
+        let decomposition = decompositions.first()?;
+
+        // Seat / round wind: 简化 — 默认 East round, own_index 0..3 对应 East/South/West/North
+        let seat_wind = match self.args.own_index % 4 {
+            0 => TileIndex::EAST,
+            1 => TileIndex::SOUTH,
+            2 => TileIndex::WEST,
+            _ => TileIndex::NORTH,
+        };
+        let round_wind = TileIndex::EAST;
+
+        let dora_count = self
+            .ui_table
+            .dora_indicators
+            .iter()
+            .map(|&t| {
+                let indicator_kind = TileIndex((t / 4) as u8);
+                let dora_kind = indicator_kind.next_dora();
+                closed[dora_kind.0 as usize] as u32
+                    + melds
+                        .iter()
+                        .flat_map(|m| m.tiles())
+                        .filter(|t| t.kind == dora_kind)
+                        .count() as u32
+            })
+            .sum();
+
+        let rules = GameRules::default();
+        let menzen = melds.iter().all(|m| m.is_concealed());
+        let fully_concealed = melds.is_empty();
+
+        let ctx = WinContext {
+            decomposition,
+            seat_wind,
+            round_wind,
+            winning_tile,
+            is_tsumo: win.is_tsumo,
+            is_riichi: self.my_riichi,
+            is_double_riichi: false,
+            is_ippatsu: false, // 简化, 不追踪一发
+            is_haitei: false,
+            is_houtei: false,
+            is_rinshan: false,
+            is_chankan: false,
+            is_tenhou: false,
+            is_chiihou: false,
+            is_renhou: false,
+            menzen,
+            fully_concealed,
+            dora_count,
+            aka_count: 0,
+            ura_dora_count: 0,
+            rules: &rules,
+        };
+
+        let yaku_list: Vec<(String, u32)> = detect_yaku(&ctx, &melds)
+            .into_iter()
+            .map(|(y, han)| (y.name_zh().to_string(), han))
+            .collect();
+        let total_han: u32 = yaku_list.iter().map(|(_, h)| *h).sum();
+        let result = evaluate(&ctx, &melds);
+        let (fu, score) = result
+            .as_ref()
+            .map(|r| (r.fu, r.base_points as i32))
+            .unwrap_or((0, 0));
+
+        Some(YakuScoreSummary {
+            yaku_list,
+            total_han,
+            fu,
+            score,
+        })
+    }
+}
+
+/// M6.C yaku 算分摘要.
+#[derive(Debug, Clone)]
+pub struct YakuScoreSummary {
+    pub yaku_list: Vec<(String, u32)>,
+    pub total_han: u32,
+    pub fu: u32,
+    pub score: i32,
+}
+
+impl ZeroTrustGameState {
     /// M6.A: UI 触发立直. 简化 — 仅设置 my_riichi flag + 记录 deck_index.
     /// 实际游戏立直需:听牌 + 1000 点 + 门清 + wall 余 4 张以上, 这些 application
     /// 检查留 yaku 算分时验证 (yaku::detect_yaku 用 ctx.is_riichi).
@@ -848,47 +1010,70 @@ impl ZeroTrustGameState {
                 .iter()
                 .map(|&t| tile_label(t, self.args.deck_size))
                 .collect();
-            let winning_label = win
-                .hand_tile_ids
-                .iter()
-                .position(|_| false) // placeholder, we use winning_tile_index 而非 tile_id 反查
-                .map(|_| String::new())
-                .unwrap_or_default();
-            let _ = winning_label;
             let dora_str: Vec<String> = self
                 .ui_table
                 .dora_indicators
                 .iter()
                 .map(|&t| tile_label(t, self.args.deck_size))
                 .collect();
-            (
-                "和牌详情",
-                vec![
-                    Line::from(vec![Span::styled(
-                        format!("★ player {} {}", win.player, win_type),
-                        Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
-                    )]),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::raw("和牌型: "),
-                        Span::styled(hand_str.join(" "), Style::default().fg(theme.accent)),
-                    ]),
-                    Line::from(format!(
-                        "winning_tile_deck_index = {}",
-                        win.winning_tile_index
-                    )),
-                    Line::from(if dora_str.is_empty() {
-                        "宝牌指示: (无)".to_string()
-                    } else {
-                        format!("宝牌指示: {}", dora_str.join(" "))
-                    }),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "(算分留 application 层接 yaku.rs, 当前仅显示协议层 ownership 验证通过)",
+            let mut all_lines = vec![
+                Line::from(vec![Span::styled(
+                    format!("★ player {} {}", win.player, win_type),
+                    Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
+                )]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw("和牌型: "),
+                    Span::styled(hand_str.join(" "), Style::default().fg(theme.accent)),
+                ]),
+                Line::from(format!(
+                    "winning_tile_deck_index = {}, tile_id = {}",
+                    win.winning_tile_index, win.winning_tile_id
+                )),
+                Line::from(if dora_str.is_empty() {
+                    "宝牌指示: (无)".to_string()
+                } else {
+                    format!("宝牌指示: {}", dora_str.join(" "))
+                }),
+                Line::from(""),
+            ];
+            if let Some(score) = self.evaluate_yaku() {
+                all_lines.push(Line::from(Span::styled(
+                    format!(
+                        "翻数: {} 番 / 符: {} / 基本点: {}",
+                        score.total_han, score.fu, score.score
+                    ),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                if score.yaku_list.is_empty() {
+                    all_lines.push(Line::from(Span::styled(
+                        "(无役 — 协议层 ownership 通过, application 层无成立役)",
                         Style::default().fg(theme.dim),
-                    )),
-                ],
-            )
+                    )));
+                } else {
+                    for (name, han) in &score.yaku_list {
+                        all_lines.push(Line::from(format!("  · {name} ({han} 番)")));
+                    }
+                }
+            } else if self.args.deck_size != 136 {
+                all_lines.push(Line::from(Span::styled(
+                    format!("(deck_size={} ≠ 136, 跳过 yaku 算分)", self.args.deck_size),
+                    Style::default().fg(theme.dim),
+                )));
+            } else if win.player != self.args.own_index {
+                all_lines.push(Line::from(Span::styled(
+                    "(其他玩家和牌, UI 看不到他家手牌, 跳过 yaku 算分)",
+                    Style::default().fg(theme.dim),
+                )));
+            } else {
+                all_lines.push(Line::from(Span::styled(
+                    "(yaku 算分: decompose 无解 / 和牌型不合法)",
+                    Style::default().fg(theme.dim),
+                )));
+            }
+            ("和牌详情", all_lines)
         } else {
             (
                 "事件日志",
@@ -2408,6 +2593,36 @@ mod tests {
         assert_eq!(tile_label(7, 16), "t7");
     }
 
+    /// **M6.C evaluate_yaku 单测**: deck_size!=136 时返回 None.
+    #[test]
+    fn evaluate_yaku_returns_none_for_test_deck_size() {
+        use crate::net::session::NetSession;
+        use tokio::sync::mpsc::unbounded_channel;
+        use uuid::Uuid;
+
+        let (out_tx, _out_rx) = unbounded_channel::<crate::net::protocol::ClientMsg>();
+        let (_in_tx, in_rx) = unbounded_channel::<crate::net::protocol::ServerMsg>();
+        let session = NetSession::from_channels(0, Uuid::new_v4(), out_tx, in_rx);
+        let args = MpStartArgs {
+            all_peer_ids: vec![vec![1; 32], vec![2; 32], vec![3; 32], vec![4; 32]],
+            own_index: 0,
+            session_label: vec![0xAB; 32],
+            deck_size: 16, // 测试 deck 不算 yaku
+            cnc_k_rounds: 8,
+        };
+        let mut state = ZeroTrustGameState::new(session, args);
+        state.apply_event(MpEvent::WinValidated {
+            player: 0,
+            is_tsumo: true,
+            from_player: None,
+            winning_tile_index: 5,
+            winning_tile_id: 7,
+            hand_tile_ids: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+        });
+        // deck_size=16 → evaluate_yaku 返回 None
+        assert!(state.evaluate_yaku().is_none());
+    }
+
     /// **M6.A Riichi 单测**: declare_riichi() 设 my_riichi flag + my_riichi_at,
     /// 重复调用 idempotent. Playing phase 之外 noop.
     #[test]
@@ -2475,6 +2690,7 @@ mod tests {
             is_tsumo: false,
             from_player: Some(1),
             winning_tile_index: 7,
+            winning_tile_id: 11,
             hand_tile_ids: vec![3, 5, 7, 9, 11],
         });
         let win = state.win_summary().expect("win_summary 应有值");
@@ -2482,6 +2698,7 @@ mod tests {
         assert!(!win.is_tsumo);
         assert_eq!(win.from_player, Some(1));
         assert_eq!(win.winning_tile_index, 7);
+        assert_eq!(win.winning_tile_id, 11);
         assert_eq!(win.hand_tile_ids, vec![3, 5, 7, 9, 11]);
         // winner() 反查也通过
         assert_eq!(state.winner(), Some((2, false)));

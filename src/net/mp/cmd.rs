@@ -153,12 +153,16 @@ pub enum MpEvent {
         all_same: bool,
     },
     /// 协议 7 和牌 (Tsumo / Ron) validate 通过 (4 方都收, 同 player + winning_tile).
-    /// caller (上层 GameState) 拿 hand_indices 反查 Tile + 算分 (yaku.rs).
+    /// caller (上层 GameState) 拿 hand_tile_ids 反查 Tile + 算分 (yaku.rs).
     WinValidated {
         player: u32,
         is_tsumo: bool,
         from_player: Option<u32>,
+        /// winning_tile 的 deck_index.
         winning_tile_index: u32,
+        /// winning_tile 反查后的 tile_id (M6.C 直接给 UI 反查 kind 用,
+        /// 替代之前的 hand_tile_ids 中查找).
+        winning_tile_id: usize,
         hand_tile_ids: Vec<usize>,
     },
     /// 一局结束 (流局 / 和牌).
