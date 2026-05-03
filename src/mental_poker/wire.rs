@@ -418,6 +418,15 @@ pub enum MentalPokerMsg {
         dora_plaintexts: Vec<Vec<u8>>,
         uradoor_plaintexts: Option<Vec<Vec<u8>>>,
     },
+    /// 加杠 (M6.B Shouminkan) — 把已有 Pon meld 升级为 Kan.
+    /// player 公开广播: 我把 deck[new_deck_index] (plaintext = same as Pon)
+    /// 加进我的 melds[target_meld_idx] (Pon → Kan).
+    Shouminkan {
+        player: u32,
+        target_meld_idx: u32,
+        new_deck_index: u32,
+        new_plaintext: Vec<u8>,
+    },
 }
 
 impl MentalPokerMsg {

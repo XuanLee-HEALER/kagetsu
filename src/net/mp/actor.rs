@@ -249,6 +249,13 @@ impl MpPlayerActor {
                 self.do_concealed_kan(deck_indices, monitor_player);
                 true
             }
+            MpRoomCmd::Shouminkan {
+                target_meld_idx,
+                new_deck_index,
+            } => {
+                self.do_shouminkan(target_meld_idx, new_deck_index);
+                true
+            }
             MpRoomCmd::Tsumo {
                 hand_indices,
                 winning_tile_index,
@@ -353,6 +360,14 @@ impl MpPlayerActor {
                     hand_plaintexts,
                     winning_tile_index,
                 );
+            }
+            MentalPokerMsg::Shouminkan {
+                player,
+                target_meld_idx,
+                new_deck_index,
+                new_plaintext,
+            } if self.phase == MpPhase::Playing => {
+                self.handle_shouminkan_msg(player, target_meld_idx, new_deck_index, new_plaintext);
             }
             other => {
                 tracing::debug!(
@@ -1327,6 +1342,88 @@ impl MpPlayerActor {
         });
     }
 
+    /// M6.B 自己加杠. 把已有 Pon meld[target_meld_idx] 升级为 Kan,
+    /// 加 deck[new_deck_index] (自摸的同 kind 牌). 公开广播 plaintext.
+    fn do_shouminkan(&mut self, target_meld_idx: u32, new_deck_index: u32) {
+        if self.phase != MpPhase::Playing {
+            return;
+        }
+        // 反查自摸的 plaintext
+        let Some(&tid) = self.own_drawn.get(&new_deck_index) else {
+            self.emit_protocol_error(
+                None,
+                format!("Shouminkan: deck_index={new_deck_index} 不在 own_drawn"),
+            );
+            return;
+        };
+        let plaintext = self.card_mapping.encode(tid);
+        // 本地 record_shouminkan
+        if let Err(e) = self.table.hand_mut(self.cfg.own_index).record_shouminkan(
+            target_meld_idx as usize,
+            new_deck_index as usize,
+            plaintext,
+        ) {
+            self.emit_protocol_error(None, format!("自己 Shouminkan apply 失败: {e}"));
+            return;
+        }
+        // 广播
+        let msg = MentalPokerMsg::Shouminkan {
+            player: self.cfg.own_index as u32,
+            target_meld_idx,
+            new_deck_index,
+            new_plaintext: wire::encode_curve(&plaintext),
+        };
+        let _ = self.event_tx.send(MpEvent::OutboundMsg { to: None, msg });
+        let _ = self.event_tx.send(MpEvent::ShouminkanApplied {
+            player: self.cfg.own_index as u32,
+            target_meld_idx,
+            new_deck_index,
+            new_tile_id: tid,
+        });
+    }
+
+    /// M6.B 远端加杠. 反查 plaintext + record_shouminkan.
+    fn handle_shouminkan_msg(
+        &mut self,
+        player: u32,
+        target_meld_idx: u32,
+        new_deck_index: u32,
+        new_plaintext_bytes: Vec<u8>,
+    ) {
+        if (player as usize) >= self.cfg.n_players() {
+            self.emit_protocol_error(None, format!("Shouminkan player={player} 越界"));
+            return;
+        }
+        if (player as usize) == self.cfg.own_index {
+            return; // 自己 echo, 已 apply
+        }
+        let plaintext = match wire::decode_curve(&new_plaintext_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                self.emit_protocol_error(
+                    Some(player as usize),
+                    format!("Shouminkan plaintext decode: {e}"),
+                );
+                return;
+            }
+        };
+        if let Err(e) = self.table.hand_mut(player as usize).record_shouminkan(
+            target_meld_idx as usize,
+            new_deck_index as usize,
+            plaintext,
+        ) {
+            self.emit_protocol_error(Some(player as usize), format!("Shouminkan apply 失败: {e}"));
+            return;
+        }
+        let tid = self.card_mapping.decode(&plaintext).unwrap_or(usize::MAX);
+        let _ = self.event_tx.send(MpEvent::ShouminkanApplied {
+            player,
+            target_meld_idx,
+            new_deck_index,
+            new_tile_id: tid,
+        });
+    }
+
     /// 协议 7 自己宣告和牌 (Tsumo / Ron). validate 本地 + 广播 (不 apply 到
     /// Table 因为 Win 是终局事件不修改 state).
     fn do_win(
@@ -1778,6 +1875,7 @@ mod tests {
                         | MpEvent::ConcealedKanApplied { .. }
                         | MpEvent::MonitorVerified { .. }
                         | MpEvent::RemoteDrawObserved { .. }
+                        | MpEvent::ShouminkanApplied { .. }
                         | MpEvent::WinValidated { .. } => {}
                     }
                 }
@@ -1854,6 +1952,7 @@ mod tests {
                         | MpEvent::ConcealedKanApplied { .. }
                         | MpEvent::MonitorVerified { .. }
                         | MpEvent::RemoteDrawObserved { .. }
+                        | MpEvent::ShouminkanApplied { .. }
                         | MpEvent::WinValidated { .. } => {}
                     }
                 }

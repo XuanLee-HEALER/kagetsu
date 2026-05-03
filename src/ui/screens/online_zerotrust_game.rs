@@ -376,6 +376,29 @@ impl ZeroTrustGameState {
             MpEvent::GameOver { reason } => {
                 self.event_log.push(format!("GameOver: {reason}"));
             }
+            MpEvent::ShouminkanApplied {
+                player,
+                target_meld_idx,
+                new_deck_index,
+                new_tile_id,
+            } => {
+                if player == self.args.own_index {
+                    self.ui_table.own_drawn_in_hand.remove(&new_deck_index);
+                    let len = self.ui_table.own_drawn_in_hand.len();
+                    if self.hand_cursor >= len && self.hand_cursor > 0 {
+                        self.hand_cursor = len.saturating_sub(1);
+                    }
+                    // own_melds 升级 — Pon → Kan, push tile_id
+                    if let Some(m) = self.ui_table.own_melds.get_mut(target_meld_idx as usize) {
+                        m.0 = crate::mental_poker::wire::WireCallType::Kan;
+                        m.1.push(new_tile_id);
+                    }
+                }
+                self.next_deck_index = self.next_deck_index.max(new_deck_index + 1);
+                self.event_log.push(format!(
+                    "Player {player} shouminkan meld[{target_meld_idx}] += tile {new_tile_id}"
+                ));
+            }
             MpEvent::OutboundMsg { .. } | MpEvent::MonitorVerified { .. } => {
                 // 不渲染
             }
@@ -504,6 +527,27 @@ impl ZeroTrustGameState {
         });
     }
 
+    /// M6.B UI 触发加杠. 用 own_melds 第一个 Pon meld + own_drawn 第一张 (假设 caller
+    /// 已自验同 kind). 协议层 record_shouminkan 验 plaintext 一致.
+    pub fn trigger_shouminkan(&self) {
+        // 找第一个 Pon meld
+        let target_idx = self
+            .ui_table
+            .own_melds
+            .iter()
+            .position(|(ct, _)| *ct == crate::mental_poker::wire::WireCallType::Pon);
+        let Some(target_meld_idx) = target_idx else {
+            return;
+        };
+        let Some((&new_deck_index, _)) = self.ui_table.own_drawn_in_hand.iter().next() else {
+            return;
+        };
+        self.send_cmd(MpRoomCmd::Shouminkan {
+            target_meld_idx: target_meld_idx as u32,
+            new_deck_index,
+        });
+    }
+
     /// UI 触发暗杠. 用 own_drawn 前 4 个 deck_indices, monitor =
     /// (own_index + 1) % 4. 协议 6 选项 C — monitor 收 plaintexts 验证 4 张同 kind.
     /// 简化版: 不检查 4 张是否真同 kind (协议层 do_concealed_kan 自动反查
@@ -608,6 +652,10 @@ impl ZeroTrustGameState {
             }
             KeyCode::Char('a') | KeyCode::Char('A') if self.phase == MpPhase::Playing => {
                 self.trigger_ankan();
+                None
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') if self.phase == MpPhase::Playing => {
+                self.trigger_shouminkan();
                 None
             }
             KeyCode::Char('i') | KeyCode::Char('I') if self.phase == MpPhase::Playing => {
@@ -897,7 +945,7 @@ impl ZeroTrustGameState {
         // 操作提示
         let hint_text = match self.phase {
             MpPhase::Playing => {
-                "D 摸 / Space 弃 / R dora / C 吃 / P 碰 / K 明杠 / A 暗杠 / I 立直 / T 自摸 / N 荣和 / Esc"
+                "D 摸 / Space 弃 / R dora / C 吃 / P 碰 / K 明杠 / X 加杠 / A 暗杠 / I 立直 / T 自摸 / N 荣和 / Esc"
             }
             _ => "Esc / L: 离开",
         };

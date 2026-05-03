@@ -96,6 +96,12 @@ pub enum HandStateError {
     },
     #[error("from_position_in_meld {pos} 越界 (deck_indices 长 {len})")]
     FromPositionOutOfRange { pos: usize, len: usize },
+    #[error("加杠 target_meld_idx={idx} 越界 (melds 长 {len})")]
+    ShouminkanTargetOutOfRange { idx: usize, len: usize },
+    #[error("加杠 target meld[{idx}] 不是 Pon (实际 {actual:?})")]
+    ShouminkanNotPon { idx: usize, actual: CallType },
+    #[error("加杠 target meld[{idx}] plaintext 跟新 plaintext 不一致")]
+    ShouminkanPlaintextMismatch { idx: usize },
     #[error(
         "声明从玩家 {from_player} 弃牌 index={from_index} 鸣, 但该 index 不在 from_player discarded 集合"
     )]
@@ -248,6 +254,51 @@ impl HandState {
         self.concealed_kans.push(kan);
         Ok(())
     }
+
+    // --- transition: 加杠 (Shouminkan, M6.B) ---
+
+    /// 记录加杠 — 把已有 Pon meld 升级为 Kan, 加一张自摸的同 kind 牌.
+    /// 验证:
+    /// - target_meld_idx 存在且是 Pon (call_type == Pon)
+    /// - new_deck_index 在自己手牌内 (drawn ∧ ¬discarded ∧ ¬melded)
+    /// - new_plaintext 跟 Pon meld 已有 plaintext 一致 (确保同 kind)
+    /// 成功后 meld[idx] 升级: call_type Pon → Kan, deck_indices/plaintexts 各加 1.
+    pub fn record_shouminkan(
+        &mut self,
+        target_meld_idx: usize,
+        new_deck_index: usize,
+        new_plaintext: Curve,
+    ) -> Result<(), HandStateError> {
+        if target_meld_idx >= self.melds.len() {
+            return Err(HandStateError::ShouminkanTargetOutOfRange {
+                idx: target_meld_idx,
+                len: self.melds.len(),
+            });
+        }
+        if !self.has_in_hand(new_deck_index) {
+            return Err(HandStateError::NotInHand {
+                index: new_deck_index,
+            });
+        }
+        let meld = &self.melds[target_meld_idx];
+        if meld.call_type != CallType::Pon {
+            return Err(HandStateError::ShouminkanNotPon {
+                idx: target_meld_idx,
+                actual: meld.call_type,
+            });
+        }
+        // plaintext 一致性 — Pon 3 张应同 kind, 取第 0 张比对即可.
+        if meld.plaintexts.first() != Some(&new_plaintext) {
+            return Err(HandStateError::ShouminkanPlaintextMismatch {
+                idx: target_meld_idx,
+            });
+        }
+        let m = &mut self.melds[target_meld_idx];
+        m.call_type = CallType::Kan;
+        m.deck_indices.push(new_deck_index);
+        m.plaintexts.push(new_plaintext);
+        Ok(())
+    }
 }
 
 /// 全桌账本: N 个玩家的 HandState 集合 + 牌山大小 sanity.
@@ -336,6 +387,7 @@ mod tests {
         h.record_draw(5, Some(pt)).unwrap();
         h.record_discard(5, pt).unwrap();
         assert!(!h.has_in_hand(5));
+        // sanity for record_shouminkan basic happy path moved to dedicated test below.
     }
 
     #[test]
@@ -668,6 +720,94 @@ mod tests {
         assert!(matches!(
             err,
             CallError::FromPlaintextMismatch { index: 50 }
+        ));
+    }
+
+    /// **M6.B record_shouminkan happy path**: 已碰 Pon → 升级 Kan.
+    #[test]
+    fn shouminkan_upgrades_pon_to_kan() {
+        use ark_ff::UniformRand;
+        use ark_std::test_rng;
+        let rng = &mut test_rng();
+        let mut h = HandState::new();
+        let pt = Curve::rand(rng);
+        // 玩家手摸 4 张同 plaintext (模拟 3 张已 Pon + 1 张自摸)
+        for i in [0, 1, 2, 3] {
+            h.record_draw(i, Some(pt)).unwrap();
+        }
+        // 先记录 Pon meld (deck_indices=[0,1,2], from_position=2 假设 from_player 弃过 idx 2)
+        // 简化: 直接 push MeldRecord (绕过 record_meld 验证 from_player.discarded).
+        h.melds.push(MeldRecord {
+            call_type: CallType::Pon,
+            deck_indices: vec![0, 1, 2],
+            plaintexts: vec![pt; 3],
+            from_player: 1,
+            from_position_in_meld: 2,
+        });
+        // 现 deck[0,1,2] 已在 meld 中, 不在手 hand. deck[3] 还在 hand.
+        assert!(!h.has_in_hand(0));
+        assert!(h.has_in_hand(3));
+        // 加杠: target=0 (Pon meld), new_deck_index=3, plaintext=pt
+        h.record_shouminkan(0, 3, pt).unwrap();
+        // meld[0] 升级
+        assert_eq!(h.melds[0].call_type, CallType::Kan);
+        assert_eq!(h.melds[0].deck_indices, vec![0, 1, 2, 3]);
+        assert_eq!(h.melds[0].plaintexts.len(), 4);
+        // deck[3] 现在不在 hand 了 (in meld)
+        assert!(!h.has_in_hand(3));
+    }
+
+    #[test]
+    fn shouminkan_rejects_plaintext_mismatch() {
+        use ark_ff::UniformRand;
+        use ark_std::test_rng;
+        let rng = &mut test_rng();
+        let mut h = HandState::new();
+        let pt_a = Curve::rand(rng);
+        let pt_b = Curve::rand(rng);
+        for i in [0, 1, 2, 3] {
+            h.record_draw(i, Some(pt_a)).unwrap();
+        }
+        h.melds.push(MeldRecord {
+            call_type: CallType::Pon,
+            deck_indices: vec![0, 1, 2],
+            plaintexts: vec![pt_a; 3],
+            from_player: 1,
+            from_position_in_meld: 2,
+        });
+        // 用不同 plaintext 加杠 → 拒绝
+        let err = h.record_shouminkan(0, 3, pt_b).unwrap_err();
+        assert!(matches!(
+            err,
+            HandStateError::ShouminkanPlaintextMismatch { idx: 0 }
+        ));
+    }
+
+    #[test]
+    fn shouminkan_rejects_non_pon_target() {
+        use ark_ff::UniformRand;
+        use ark_std::test_rng;
+        let rng = &mut test_rng();
+        let mut h = HandState::new();
+        let pt = Curve::rand(rng);
+        for i in [0, 1, 2, 3, 4] {
+            h.record_draw(i, Some(pt)).unwrap();
+        }
+        // Push 一个 Chi meld (非 Pon), 再尝试加杠
+        h.melds.push(MeldRecord {
+            call_type: CallType::Chi,
+            deck_indices: vec![0, 1, 2],
+            plaintexts: vec![pt; 3],
+            from_player: 1,
+            from_position_in_meld: 2,
+        });
+        let err = h.record_shouminkan(0, 3, pt).unwrap_err();
+        assert!(matches!(
+            err,
+            HandStateError::ShouminkanNotPon {
+                idx: 0,
+                actual: CallType::Chi
+            }
         ));
     }
 }

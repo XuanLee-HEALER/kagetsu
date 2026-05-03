@@ -50,6 +50,12 @@ pub enum MpRoomCmd {
         deck_indices: [u32; 4],
         monitor_player: u32,
     },
+    /// 主动加杠 (M6.B Shouminkan). caller 指定 target_meld_idx (已有 Pon meld
+    /// 索引) + new_deck_index (自摸的同 kind 牌). actor 公开广播.
+    Shouminkan {
+        target_meld_idx: u32,
+        new_deck_index: u32,
+    },
     /// 主动自摸和 (协议 7): caller 指定完整手牌的 deck_indices + winning_tile.
     /// actor 跟据本地状态广播 WinAnnouncement (Tsumo).
     Tsumo {
@@ -126,6 +132,14 @@ pub enum MpEvent {
         player: u32,
         deck_indices: [u32; 4],
         monitor_player: u32,
+    },
+    /// M6.B 加杠 applied 到本地 Table 镜像 (4 actor 都收). UI 渲染升级 Pon→Kan.
+    ShouminkanApplied {
+        player: u32,
+        target_meld_idx: u32,
+        new_deck_index: u32,
+        /// 反查后的 tile_id (UI 渲染用).
+        new_tile_id: usize,
     },
     /// 协议 6 监督方收到 ConcealedKanReveal 后验证 4 张 tile_kind 一致.
     /// 仅 monitor actor 收 (其他 actor 不知 plaintext).
