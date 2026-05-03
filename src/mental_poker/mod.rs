@@ -57,6 +57,7 @@ pub mod schnorr;
 pub mod session;
 pub mod shuffle;
 pub mod transcript;
+pub mod wire;
 
 /// 椭圆曲线群类型: BLS12-381 G1 (作普通 ECC 群, 不用 pairing).
 pub type Curve = ark_bls12_381::G1Projective;

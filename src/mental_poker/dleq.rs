@@ -22,13 +22,14 @@
 //!      z · G2 == a2 + c · H2
 
 use ark_ff::UniformRand;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 
 use super::transcript::Transcript;
 use super::{Curve, Scalar};
 
 /// DLEQ 证明.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct DleqProof {
     pub a1: Curve,
     pub a2: Curve,

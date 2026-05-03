@@ -21,6 +21,7 @@
 
 use ark_ec::PrimeGroup;
 use ark_ff::UniformRand;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 
 use super::{Curve, Scalar};
@@ -28,7 +29,7 @@ use super::{Curve, Scalar};
 /// ElGamal 密文 (c1, c2). 在 mental poker 协议中代表"未揭示的牌".
 ///
 /// `Curve` 加法群表达, c1/c2 都是曲线点.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct Ciphertext {
     pub c1: Curve,
     pub c2: Curve,
@@ -38,11 +39,11 @@ pub struct Ciphertext {
 ///
 /// 联合公钥模式下每个玩家持自己 1 份 sk_i, 联合公钥 PK = sum(pk_i).
 /// 协议 2 / 3 摸牌 / 揭示时, 玩家用 sk_i 计算 reveal token = sk_i · c1.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, CanonicalSerialize, CanonicalDeserialize)]
 pub struct SecretKey(pub Scalar);
 
 /// 单方公钥 (1 个曲线点).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct PublicKey(pub Curve);
 
 /// 生成 keypair: sk 随机标量, pk = sk · G.

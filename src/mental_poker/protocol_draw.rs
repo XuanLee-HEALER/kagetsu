@@ -30,6 +30,7 @@
 //! 共享同一 [`compute_share`] / [`verify_share`] / [`combine_shares`] 原语.
 
 use ark_ec::PrimeGroup;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 
 use super::Curve;
@@ -40,7 +41,7 @@ use super::elgamal::{Ciphertext, PublicKey, SecretKey};
 ///
 /// 数学上 = sk_i · c.c1. 单独公开它不会泄露 sk_i (DLOG 假设),
 /// 也不会泄露明文 (需要 sum 全 4 个).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct DecryptionShare(pub Curve);
 
 /// 玩家 i 计算自己的解密分片 + DLEQ 证明.

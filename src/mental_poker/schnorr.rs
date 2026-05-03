@@ -19,6 +19,7 @@
 
 use ark_ec::PrimeGroup;
 use ark_ff::UniformRand;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 
 use super::elgamal::{PublicKey, SecretKey};
@@ -26,7 +27,7 @@ use super::transcript::Transcript;
 use super::{Curve, Scalar};
 
 /// Schnorr 证明 = (commitment a, response z).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct DlogProof {
     pub a: Curve,
     pub z: Scalar,
