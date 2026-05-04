@@ -22,9 +22,11 @@ default:
 # 开始游戏 (release, 推荐) — 默认走 launcher 在新终端窗口开
 # 注意: launcher 不直接依赖 game, cargo 不会自动重编 game.
 #       这里显式 build --bins 确保两个 binary 都最新.
+# 默认带 dev-tools feature: F5/F9 savestate + F8 录像开关.
+# 纯净 release 直接 `cargo run --release --bin tui-majo`.
 play:
-    cargo build --release --bins
-    cargo run --release --bin tui-majo
+    cargo build --release --bins --features dev-tools
+    cargo run --release --bin tui-majo --features dev-tools
 
 # 别名: run = play
 run: play
