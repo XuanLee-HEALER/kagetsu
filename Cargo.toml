@@ -17,6 +17,11 @@ exclude = [
     "*.png",
 ]
 
+[features]
+default = []
+# Dev tools: F5/F9 quick savestate + replay recorder. 不带就纯净 release.
+dev-tools = []
+
 [dependencies]
 ratatui = "0.30"
 crossterm = "0.28"

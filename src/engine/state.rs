@@ -137,7 +137,7 @@ pub struct SelfOptions {
     pub shouminkan: Vec<TileIndex>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameState {
     pub rules: GameRules,
     pub round_wind: RoundWind,
@@ -157,6 +157,12 @@ pub struct GameState {
     pub first_go_around: bool,
     /// 最近动作事件 (UI 用), 最多 MAX_EVENTS 条 (新事件 push_back).
     pub events: VecDeque<GameEvent>,
+    /// dev-tools replay 录像缓冲: Some 表示当前局正在录, do_* 在成功后追加
+    /// [`crate::dev::recorder::RecordedAction`]. UI 在 RoundEnd 时取走 flush.
+    /// 默认 None, 即使 feature 开了也不会自动录制, 由 UI 显式打开.
+    #[cfg(feature = "dev-tools")]
+    #[serde(skip)]
+    pub recorded_actions: Option<Vec<crate::dev::recorder::RecordedAction>>,
 }
 
 impl GameState {
@@ -183,6 +189,8 @@ impl GameState {
             round_seed: 0,
             first_go_around: true,
             events: VecDeque::new(),
+            #[cfg(feature = "dev-tools")]
+            recorded_actions: None,
         }
     }
 
@@ -397,11 +405,26 @@ impl GameState {
             who: seat,
             tile: removed,
         });
+        #[cfg(feature = "dev-tools")]
+        if let Some(actions) = self.recorded_actions.as_mut() {
+            actions.push(crate::dev::recorder::RecordedAction::Discard {
+                tile_id: removed.id,
+            });
+        }
         Ok(())
     }
 
     /// 完成 AwaitCalls 阶段, 推进到下一家摸牌.
     pub fn advance_turn(&mut self) {
+        // dev-tools: 从 AwaitCalls 调用 advance_turn = 没人鸣 = Pass.
+        // 鸣牌完成后 phase 已是 AwaitDiscard (do_pon/chi/minkan 内设的),
+        // 此时 advance_turn 不会被调到这条路径, 所以判 phase 即可去重.
+        #[cfg(feature = "dev-tools")]
+        if let Some(actions) = self.recorded_actions.as_mut()
+            && self.phase == Phase::AwaitCalls
+        {
+            actions.push(crate::dev::recorder::RecordedAction::Pass);
+        }
         self.turn = self.turn.next();
         // 如果回到了起家, 第一巡结束.
         if self.turn == self.dealer {
@@ -442,6 +465,10 @@ impl GameState {
         self.riichi_sticks = 0;
         self.phase = Phase::RoundEnd;
         self.push_event(GameEvent::Tsumo { who: winner });
+        #[cfg(feature = "dev-tools")]
+        if let Some(actions) = self.recorded_actions.as_mut() {
+            actions.push(crate::dev::recorder::RecordedAction::Tsumo);
+        }
     }
 
     /// 宣告某家荣和.
@@ -468,6 +495,12 @@ impl GameState {
         self.phase = Phase::RoundEnd;
         if let Some(from) = loser {
             self.push_event(GameEvent::Ron { who, from });
+        }
+        #[cfg(feature = "dev-tools")]
+        if let Some(actions) = self.recorded_actions.as_mut()
+            && let Some(from) = loser
+        {
+            actions.push(crate::dev::recorder::RecordedAction::Ron { who, from });
         }
     }
 
@@ -745,6 +778,13 @@ impl GameState {
         self.phase = Phase::AwaitDiscard;
         sort_hand(&mut self.players[who.index()].hand.closed);
         self.push_event(GameEvent::Pon { who, tile });
+        #[cfg(feature = "dev-tools")]
+        if let Some(actions) = self.recorded_actions.as_mut() {
+            actions.push(crate::dev::recorder::RecordedAction::Pon {
+                who,
+                hand_tile_ids: [two[0].id, two[1].id],
+            });
+        }
         Ok(())
     }
 
@@ -778,6 +818,13 @@ impl GameState {
         self.phase = Phase::AwaitDiscard;
         sort_hand(&mut self.players[who.index()].hand.closed);
         self.push_event(GameEvent::Chi { who, tile });
+        #[cfg(feature = "dev-tools")]
+        if let Some(actions) = self.recorded_actions.as_mut() {
+            actions.push(crate::dev::recorder::RecordedAction::Chi {
+                who,
+                hand_tile_ids: [two[0].id, two[1].id],
+            });
+        }
         Ok(())
     }
 
@@ -804,6 +851,13 @@ impl GameState {
         self.kan_draw_and_reveal(who);
         self.phase = Phase::AwaitDiscard;
         self.push_event(GameEvent::Minkan { who, tile });
+        #[cfg(feature = "dev-tools")]
+        if let Some(actions) = self.recorded_actions.as_mut() {
+            actions.push(crate::dev::recorder::RecordedAction::Minkan {
+                who,
+                hand_tile_ids: [three[0].id, three[1].id, three[2].id],
+            });
+        }
         Ok(())
     }
 
@@ -836,6 +890,10 @@ impl GameState {
         self.break_first_round_and_ippatsu();
         self.kan_draw_and_reveal(seat);
         self.push_event(GameEvent::Ankan { who: seat, kind });
+        #[cfg(feature = "dev-tools")]
+        if let Some(actions) = self.recorded_actions.as_mut() {
+            actions.push(crate::dev::recorder::RecordedAction::Ankan { kind: kind.0 });
+        }
         Ok(())
     }
 
@@ -872,6 +930,12 @@ impl GameState {
         self.break_first_round_and_ippatsu();
         self.kan_draw_and_reveal(seat);
         self.push_event(GameEvent::Shouminkan { who: seat, kind });
+        #[cfg(feature = "dev-tools")]
+        if let Some(actions) = self.recorded_actions.as_mut() {
+            actions.push(crate::dev::recorder::RecordedAction::Shouminkan {
+                kind: kind.0,
+            });
+        }
         Ok(())
     }
 
@@ -914,6 +978,14 @@ impl GameState {
         p.riichi_river_idx = p.river.len().checked_sub(1);
         self.riichi_sticks += 1;
         self.push_event(GameEvent::Riichi { who: seat, tile });
+        // do_discard 给 recorder push 了一条 Discard, 替换为 Riichi.
+        #[cfg(feature = "dev-tools")]
+        if let Some(actions) = self.recorded_actions.as_mut() {
+            actions.pop();
+            actions.push(crate::dev::recorder::RecordedAction::Riichi {
+                tile_id: tile.id,
+            });
+        }
         Ok(())
     }
 

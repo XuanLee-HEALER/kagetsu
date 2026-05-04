@@ -289,6 +289,12 @@ impl App {
             self.cycle_theme();
             return None;
         }
+        // F8: dev-tools 录像全局开关 (持久化到 LocalPrefs).
+        #[cfg(feature = "dev-tools")]
+        if key.code == KeyCode::F(8) {
+            self.toggle_record_replays();
+            return None;
+        }
         // 全局快捷键: Q 弹确认 modal (主菜单除外, 直接退).
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
             return Some(Transition::RequestConfirm {
@@ -369,6 +375,19 @@ impl App {
         }
     }
 
+    /// F8: 切换录像全局开关 + 持久化 + 同步到当前 InGame 屏 (下一局生效).
+    #[cfg(feature = "dev-tools")]
+    fn toggle_record_replays(&mut self) {
+        let v = !self.local_prefs.dev.record_replays;
+        self.local_prefs.dev.record_replays = v;
+        if let Err(e) = self.local_prefs.save() {
+            tracing::warn!("保存 prefs 失败: {e}");
+        }
+        if let Screen::InGame(s) = &mut self.screen {
+            s.set_record_replays(v);
+        }
+    }
+
     fn apply_transition(&mut self, t: Transition) {
         match t {
             Transition::Quit => {
@@ -397,6 +416,7 @@ impl App {
                     self.last_config.clone(),
                     seed,
                     self.local_prefs.theme,
+                    self.local_prefs.dev.record_replays,
                 )));
             }
             Transition::EnterGameOver { rankings } => {

@@ -1,5 +1,7 @@
-//! Dev-only 工具: savestate 等. 仅 debug 构建编译.
+//! Dev-only 工具: savestate + replay recorder. 仅 dev-tools feature 编译.
 //!
-//! 调试场景: 玩到某局面发现 bug → F5 存档 → 修代码 → 重启 → F9 复现.
+//! - savestate: F5/F9 把当前 GameState dump/load JSON. 用于"跳到那一刻".
+//! - recorder:  开关打开后每局自动录决策序列, 局结算时 flush. 用于"看 bug 怎么演变".
 
+pub mod recorder;
 pub mod savestate;

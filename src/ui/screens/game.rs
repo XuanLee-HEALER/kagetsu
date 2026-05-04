@@ -74,13 +74,26 @@ pub struct GameScreenState {
     pub theme_kind: crate::ui::theme::ThemeKind,
     /// 多选吃法时弹出的 picker. 非 None 时优先吃所有按键.
     pub chi_picker: Option<crate::ui::chi_picker::ChiPicker>,
+    /// 全局录像开关 (来自 LocalPrefs.dev.record_replays). feature 关时
+    /// 字段还在但永远不被读, F8 也不会改它.
+    pub record_replays: bool,
+    /// 当前局的初始 GameState snapshot. 局开始时若 record_replays 为
+    /// true 则填充, RoundEnd 时连同 game.recorded_actions 一起 flush.
+    #[cfg(feature = "dev-tools")]
+    pub recording_initial: Option<GameState>,
 }
 
 impl GameScreenState {
-    pub fn new(config: GameRules, game_seed: u64, theme_kind: crate::ui::theme::ThemeKind) -> Self {
+    pub fn new(
+        config: GameRules,
+        game_seed: u64,
+        theme_kind: crate::ui::theme::ThemeKind,
+        record_replays: bool,
+    ) -> Self {
         let mut g = GameState::new(config);
         g.start_round(game_seed ^ 1);
-        Self {
+        #[allow(unused_mut)]
+        let mut s = Self {
             game: g,
             selected: 0,
             player_calls: None,
@@ -95,7 +108,15 @@ impl GameScreenState {
             round_end_at: None,
             theme_kind,
             chi_picker: None,
-        }
+            record_replays,
+            #[cfg(feature = "dev-tools")]
+            recording_initial: None,
+        };
+        #[cfg(feature = "dev-tools")]
+        s.maybe_start_recording();
+        // record_replays 在 feature off 时只是个 dead bool, 静默.
+        let _ = record_replays;
+        s
     }
 
     /// 推进自动状态. 返回 Some(Transition) 表示要切屏(整场结束).
@@ -130,6 +151,8 @@ impl GameScreenState {
                 self.calls_resolved = false;
                 self.last_step_at = Instant::now();
                 self.clear_deadline();
+                #[cfg(feature = "dev-tools")]
+                self.maybe_start_recording();
             }
             Phase::Draw => {
                 if self.game.do_draw().is_none() {
@@ -228,9 +251,11 @@ impl GameScreenState {
                 self.clear_deadline();
             }
             Phase::RoundEnd => {
-                // 首次进入 RoundEnd: 设置 message.
+                // 首次进入 RoundEnd: 设置 message + flush 录像.
                 if self.round_end_at.is_none() {
                     self.round_end_at = Some(Instant::now());
+                    #[cfg(feature = "dev-tools")]
+                    self.flush_recording_if_any();
                     if let Some(result) = self.game.last_result.clone() {
                         self.message = match &result {
                             RoundResult::Ryuukyoku { .. } => "流局. 按 N 进下一局.".to_string(),
@@ -275,12 +300,12 @@ impl GameScreenState {
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
         // Dev-only savestate (F5/F9). 优先级最高: chi picker / modal / riichi lock
         // 都不拦截, 任何时刻都能存读档.
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "dev-tools")]
         if matches!(key.code, KeyCode::F(5)) {
             self.dev_quick_save();
             return None;
         }
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "dev-tools")]
         if matches!(key.code, KeyCode::F(9)) {
             self.dev_quick_load();
             return None;
@@ -625,7 +650,7 @@ impl GameScreenState {
     }
 
     /// F5: dev quick save. 失败时把错误写到 message.
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-tools")]
     fn dev_quick_save(&mut self) {
         match crate::dev::savestate::save(&self.game, "quick") {
             Ok(path) => {
@@ -638,7 +663,7 @@ impl GameScreenState {
     }
 
     /// F9: dev quick load. 替换 self.game 并复位 UI 派生 state.
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "dev-tools")]
     fn dev_quick_load(&mut self) {
         match crate::dev::savestate::load("quick") {
             Ok(g) => {
@@ -659,6 +684,71 @@ impl GameScreenState {
                 self.message = format!("[DEV] 读档失败: {}", e);
             }
         }
+    }
+
+    /// 如果 record_replays 开了, 给当前 GameState 装上录像缓冲并
+    /// snapshot 初态. 局开始时调用. 必须在任何 do_* 之前.
+    #[cfg(feature = "dev-tools")]
+    fn maybe_start_recording(&mut self) {
+        if !self.record_replays {
+            return;
+        }
+        // serde clone GameState (struct 没有 derive Clone 的关键字段, 用 serde 复制).
+        match serde_json::to_string(&self.game)
+            .and_then(|s| serde_json::from_str::<GameState>(&s).map_err(Into::into))
+        {
+            Ok(snapshot) => {
+                self.recording_initial = Some(snapshot);
+                self.game.recorded_actions = Some(Vec::new());
+            }
+            Err(e) => {
+                tracing::warn!("录像 snapshot 失败: {e}");
+            }
+        }
+    }
+
+    /// 局结算时把当前 recording flush 到磁盘. 失败仅记 message.
+    /// 文件名: `<UTC ISO>_seed<game_seed>_e<round_index>.json`.
+    #[cfg(feature = "dev-tools")]
+    fn flush_recording_if_any(&mut self) {
+        let Some(initial_state) = self.recording_initial.take() else {
+            return;
+        };
+        let actions = self.game.recorded_actions.take().unwrap_or_default();
+        let rec = crate::dev::recorder::RoundRecording {
+            initial_state,
+            actions,
+        };
+        let now = time::OffsetDateTime::now_local()
+            .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        let stamp = format!(
+            "{:04}{:02}{:02}_{:02}{:02}{:02}",
+            now.year(),
+            u8::from(now.month()),
+            now.day(),
+            now.hour(),
+            now.minute(),
+            now.second()
+        );
+        let filename = format!(
+            "{}_seed{}_e{}",
+            stamp, self.game_seed, self.round_index
+        );
+        match crate::dev::recorder::save(&rec, &filename) {
+            Ok(path) => {
+                tracing::info!("录像写入 {}", path.display());
+            }
+            Err(e) => {
+                tracing::warn!("录像写入失败: {e}");
+            }
+        }
+    }
+
+    /// F8 (App 层调用) 切换录像开关. 当前局已开始的录像不变 (flag 仅
+    /// 影响下一局).
+    #[cfg(feature = "dev-tools")]
+    pub fn set_record_replays(&mut self, v: bool) {
+        self.record_replays = v;
     }
 
     /// 剩余思考秒数(向上取整). None = 不限时或不在等候态.
@@ -1037,6 +1127,20 @@ impl GameScreenState {
             };
             paint_str(buf, col, oy, &format!("{} {}{}", label, score, star), style);
             col += 11;
+        }
+        // dev-tools 录像指示 (col 116-118): 当前局正在录时显示 REC.
+        #[cfg(feature = "dev-tools")]
+        if self.recording_initial.is_some() {
+            paint_str(
+                buf,
+                ox + 116,
+                oy,
+                "REC",
+                Style::default()
+                    .fg(theme.danger)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD),
+            );
         }
         // 时钟 / 标题
         paint_str(
@@ -1655,7 +1759,7 @@ impl GameScreenState {
             "响应",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "dev-tools")]
         let pairs: &[(&str, &str)] = &[
             ("P", "碰"),
             ("A", "吃"),
@@ -1664,11 +1768,12 @@ impl GameScreenState {
             ("C", "跳过"),
             ("N", "下一局"),
             ("F5", "存档"),
+            ("F8", "录像"),
             ("F9", "读档"),
-            ("Esc", "回主菜单"),
-            ("Q", "退出"),
+            ("Esc", "回"),
+            ("Q", "退"),
         ];
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(feature = "dev-tools"))]
         let pairs: &[(&str, &str)] = &[
             ("P", "碰"),
             ("A", "吃"),
@@ -2153,6 +2258,7 @@ mod tests {
             GameRules::default(),
             0xC0FFEE,
             crate::ui::theme::ThemeKind::Dark,
+            false,
         );
         let backend = TestBackend::new(144, 40);
         let mut term = Terminal::new(backend).unwrap();
@@ -2185,6 +2291,7 @@ mod tests {
             GameRules::default(),
             0xC0FFEE,
             crate::ui::theme::ThemeKind::Dark,
+            false,
         );
         let backend = TestBackend::new(144, 40);
         let mut term = Terminal::new(backend).unwrap();
@@ -2237,6 +2344,7 @@ mod tests {
             GameRules::default(),
             0xC0FFEE,
             crate::ui::theme::ThemeKind::Dark,
+            false,
         );
         // 模拟玩家摸牌阶段
         let _ = app.advance(); // Deal -> Draw

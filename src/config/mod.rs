@@ -37,10 +37,22 @@ const MAX_PREFS_SIZE: u64 = 1_048_576;
 pub struct LocalPrefs {
     pub theme: ThemeKind,
     pub network: NetworkPrefs,
+    /// dev-tools (replay recorder 等) 偏好. 字段始终存在,
+    /// 只在 dev-tools feature 编译时被实际读取/修改.
+    pub dev: DevPrefs,
     // 占位扩展点 (未来加字段时, 旧 prefs.toml 因 #[serde(default)] 仍可解析):
     // pub locale: Locale,        // zh-CN / en-US / ja-JP ...
     // pub keymap: KeymapPreset,   // default / vim ...
     // pub sound: SoundPrefs,
+}
+
+/// dev-tools 偏好. 字段在所有构建里都存在 (避免不同 build 写出不同 schema
+/// 触发 Migrated banner), feature 关时只是不被读.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DevPrefs {
+    /// 全局开关: 是否每局自动录像. F8 切换并 save.
+    pub record_replays: bool,
 }
 
 /// P2P 网络偏好.
@@ -301,6 +313,7 @@ mod tests {
         let p = LocalPrefs {
             theme: ThemeKind::Light,
             network: NetworkPrefs::default(),
+            dev: DevPrefs::default(),
         };
         let s = toml::to_string_pretty(&p).unwrap();
         let back: LocalPrefs = toml::from_str(&s).unwrap();

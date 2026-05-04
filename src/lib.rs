@@ -11,7 +11,7 @@
 
 pub mod ai;
 pub mod config;
-#[cfg(debug_assertions)]
+#[cfg(feature = "dev-tools")]
 pub mod dev;
 pub mod domain;
 pub mod engine;
