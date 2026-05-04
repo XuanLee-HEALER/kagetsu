@@ -56,6 +56,8 @@ pub struct PlayerState {
     pub double_riichi: bool,
     pub ippatsu_active: bool,
     pub last_drawn: Option<Tile>,
+    /// 立直宣告牌在 river 中的索引 (UI 用 90° 横置). None = 未立直.
+    pub riichi_river_idx: Option<usize>,
 }
 
 impl PlayerState {
@@ -69,6 +71,7 @@ impl PlayerState {
             double_riichi: false,
             ippatsu_active: false,
             last_drawn: None,
+            riichi_river_idx: None,
         }
     }
 
@@ -79,6 +82,7 @@ impl PlayerState {
         self.double_riichi = false;
         self.ippatsu_active = false;
         self.last_drawn = None;
+        self.riichi_river_idx = None;
     }
 
     /// 返回 13 (含暗杠时仍为 13 + 杠的 1 张) 或 14 (摸牌后).
@@ -905,6 +909,8 @@ impl GameState {
         p.double_riichi = first_go;
         p.ippatsu_active = true;
         p.score -= 1000;
+        // do_discard 已 push 到 river, 立直宣告牌即 river 末尾.
+        p.riichi_river_idx = p.river.len().checked_sub(1);
         self.riichi_sticks += 1;
         self.push_event(GameEvent::Riichi { who: seat, tile });
         Ok(())

@@ -1773,15 +1773,10 @@ impl GameScreenState {
     }
 }
 
-/// 找到玩家立直时弃出的牌在 river 里的索引. 简化: 当 player.riichi 时找最早的弃牌索引.
+/// 找到玩家立直时弃出的牌在 river 里的索引. PlayerState.riichi_river_idx
+/// 由 do_riichi 写入, 此处直接转发.
 fn riichi_index_in_river(p: &crate::engine::state::PlayerState) -> Option<usize> {
-    if p.riichi && !p.river.is_empty() {
-        // MVP: 立直牌 = 立直时切的那张, 但当前 PlayerState 没存. 用 None 暂不标记.
-        // 后续 task 可加 riichi_river_idx 字段.
-        None
-    } else {
-        None
-    }
+    p.riichi_river_idx
 }
 
 /// 把 TileIndex 渲染成 tight 文本 (3 cells: "1萬" / "東 ").

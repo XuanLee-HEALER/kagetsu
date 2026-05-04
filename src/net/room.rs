@@ -1095,7 +1095,7 @@ impl RoomActor {
                 melds: p.hand.melds.clone(),
                 river: p.river.clone(),
                 riichi: p.riichi,
-                riichi_river_idx: None,
+                riichi_river_idx: p.riichi_river_idx,
             }
         });
         Some(GameStateView {
