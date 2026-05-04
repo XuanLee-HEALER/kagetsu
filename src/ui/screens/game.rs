@@ -293,6 +293,11 @@ impl GameScreenState {
         if self.modal_open {
             return self.handle_modal_key(key);
         }
+        // 立直后游戏内操作锁: 除 W (自摸/荣和) / C (跳过响应) / Esc (回主菜单)
+        // 外其它键全部 noop. 自动摸切由 advance() 处理.
+        if self.is_riichi_locked() {
+            return self.handle_riichi_locked_key(key);
+        }
         match key.code {
             KeyCode::Char('m') | KeyCode::Char('M') => {
                 // 注意: AwaitCalls 时 m 是明杠键, 这里改用 modal 唤起.
@@ -368,6 +373,43 @@ impl GameScreenState {
                     if idx < len {
                         self.selected = idx;
                     }
+                }
+            }
+            KeyCode::Esc => {
+                return Some(Transition::RequestConfirm {
+                    modal: Box::new(crate::ui::confirm::ConfirmModal::new(
+                        "回主菜单",
+                        "确定离开当前对局回主菜单? 进度会丢失.",
+                    )),
+                    action: crate::ui::ConfirmAction::BackToMainMenu,
+                });
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// 立直后是否锁定游戏内操作键 (AwaitDiscard / AwaitCalls 阶段).
+    fn is_riichi_locked(&self) -> bool {
+        self.player().riichi
+            && matches!(
+                self.game.phase,
+                Phase::AwaitDiscard | Phase::AwaitCalls | Phase::Draw
+            )
+    }
+
+    /// 立直锁定模式下只允许 W / C / Esc.
+    fn handle_riichi_locked_key(&mut self, key: KeyEvent) -> Option<Transition> {
+        match key.code {
+            KeyCode::Char('w') | KeyCode::Char('W') => {
+                self.try_player_win();
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                if self.player_calls.is_some() {
+                    self.player_calls = None;
+                    self.message = "已跳过.".into();
+                    self.last_step_at = Instant::now();
+                    self.clear_deadline();
                 }
             }
             KeyCode::Esc => {
@@ -489,7 +531,10 @@ impl GameScreenState {
             hints.push("W 自摸".into());
         }
         if !opts.riichi_discards.is_empty() {
-            hints.push(format!("R 立直({}张可)", opts.riichi_discards.len()));
+            hints.push(format!(
+                "R 立直 (高亮 {} 张可立, ←/→ 选后按 R)",
+                opts.riichi_discards.len()
+            ));
         }
         if !opts.ankan.is_empty() {
             hints.push("K 暗杠".into());
@@ -1406,20 +1451,30 @@ impl GameScreenState {
             drawn_idx,
             self.highlight_kind(),
         );
-        // 编号 row 35 (与 paint_boxed_row 同样的间隙规则: drawn 前留 3 cells)
+        // 编号 row 35 (与 paint_boxed_row 同样的间隙规则: drawn 前留 3 cells).
+        // 切后能进入听牌的牌 (legal_self_options.riichi_discards) 用 danger
+        // 高亮, 玩家用 ←/→ 选中再 R 立直.
+        let opts = self.game.legal_self_options();
+        let riichi_kinds: std::collections::HashSet<u8> = opts
+            .riichi_discards
+            .iter()
+            .map(|t| t.kind.0)
+            .collect();
         let drawn_gap = 3u16;
         let mut cx = ox + 4 + 1;
-        for i in 0..display.len() {
+        for (i, t) in display.iter().enumerate() {
             if Some(i) == drawn_idx && i > 0 {
                 cx += drawn_gap;
             }
-            paint_str(
-                buf,
-                cx,
-                oy + 35,
-                &format!("{:>2}", i + 1),
-                Style::default().fg(theme.dim).bg(theme.bg),
-            );
+            let style = if riichi_kinds.contains(&t.kind.0) {
+                Style::default()
+                    .fg(theme.danger)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.dim).bg(theme.bg)
+            };
+            paint_str(buf, cx, oy + 35, &format!("{:>2}", i + 1), style);
             cx += 5;
         }
     }
