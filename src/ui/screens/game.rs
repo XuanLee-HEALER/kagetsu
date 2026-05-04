@@ -153,6 +153,13 @@ impl GameScreenState {
                     self.apply_ai_action(action);
                     self.last_step_at = Instant::now();
                     self.clear_deadline();
+                } else if self.player().riichi && !self.game.can_tsumo() {
+                    // 立直后强制摸切 (除非可自摸, 留给玩家按 W 决定).
+                    // 走 AI 节流让玩家看到摸到的牌再切出.
+                    self.update_self_message();
+                    if self.last_step_at.elapsed().as_millis() >= AI_STEP_DELAY_MS as u128 {
+                        self.try_player_tsumogiri();
+                    }
                 } else {
                     self.update_self_message();
                     self.set_deadline_if_unset();
@@ -467,6 +474,16 @@ impl GameScreenState {
 
     fn update_self_message(&mut self) {
         let opts = self.game.legal_self_options();
+        // 立直中: 只剩 W 自摸或自动摸切.
+        if self.player().riichi {
+            let intro = if opts.tsumo {
+                "立直中, 可自摸! W 和  T/Enter 摸切"
+            } else {
+                "立直中: 自动摸切..."
+            };
+            self.message = intro.into();
+            return;
+        }
         let mut hints = vec!["←/→ 选".to_string(), "Enter 切".to_string()];
         if opts.tsumo {
             hints.push("W 自摸".into());
@@ -614,6 +631,11 @@ impl GameScreenState {
 
     fn try_player_discard(&mut self) {
         if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
+            return;
+        }
+        // 立直后只能摸切: Enter/Space/D 退化为摸切刚摸到的牌.
+        if self.player().riichi {
+            self.try_player_tsumogiri();
             return;
         }
         let tiles = self.selectable_tiles();
@@ -1822,11 +1844,16 @@ impl GameScreenState {
                 },
                 enabled: !opts.ankan.is_empty(),
             });
+            let in_riichi = self.game.players[PLAYER_SEAT.index()].riichi;
             out.push(ModalAction {
                 key: 'D',
                 label: "切牌",
-                detail: "选择手牌中一张打出".into(),
-                enabled: true,
+                detail: if in_riichi {
+                    "立直后只能摸切".into()
+                } else {
+                    "选择手牌中一张打出".into()
+                },
+                enabled: !in_riichi,
             });
             out.push(ModalAction {
                 key: 'T',

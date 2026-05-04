@@ -368,6 +368,12 @@ impl GameState {
         }
         let seat = self.turn;
         let p = &mut self.players[seat.index()];
+        // 立直后只能摸切: 切出的必须是刚摸到的那张.
+        if p.riichi
+            && p.last_drawn.map(|t| t.id) != Some(tile.id)
+        {
+            return Err("riichi: must tsumogiri");
+        }
         let pos = p
             .hand
             .closed
