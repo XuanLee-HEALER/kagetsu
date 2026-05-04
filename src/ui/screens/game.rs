@@ -930,6 +930,15 @@ impl GameScreenState {
             "tui-majo",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
+        let now = time::OffsetDateTime::now_local()
+            .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        paint_str(
+            buf,
+            ox + 130,
+            oy,
+            &format!("{:02}:{:02}:{:02}", now.hour(), now.minute(), now.second()),
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
         paint_hr(buf, ox, oy + 1, 144, theme);
     }
 

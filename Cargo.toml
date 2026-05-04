@@ -65,6 +65,9 @@ ark-bls12-381 = "0.5"
 # Mental Poker Sigma 协议的 Fiat-Shamir transcript (challenge = hash). sha2 已被
 # libp2p 间接引入, 直接拿来用免增加版本碎片.
 sha2 = "0.10"
+# 本地时间 (顶部状态栏 hh:mm:ss). time 已被 libp2p 间接编译, 仅多开
+# `local-offset` feature 用于读取系统时区.
+time = { version = "0.3", features = ["local-offset"] }
 
 [dev-dependencies]
 pretty_assertions = "1"

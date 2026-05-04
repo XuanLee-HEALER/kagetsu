@@ -678,14 +678,11 @@ impl App {
                 ));
             }
             Screen::InGame(s) => {
-                spans.push(Span::styled(
-                    "  Esc 回主菜单  |  Q 退出  ",
-                    Style::default().fg(Color::DarkGray),
-                ));
+                // Esc / Q 已在游戏屏 row 39 右侧菜单中, 这里不再重复.
                 if let Some(secs) = s.remaining_seconds() {
                     let color = if secs <= 5 { Color::Red } else { Color::Yellow };
                     spans.push(Span::styled(
-                        format!("|  ⏱ 剩 {}s  ", secs),
+                        format!("  ⏱ 剩 {}s  ", secs),
                         Style::default().fg(color),
                     ));
                 }
