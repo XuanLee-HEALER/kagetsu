@@ -3,12 +3,17 @@
 //! 在合适的终端 emulator 中开新窗口跑 `tui-majo-game`. 找不到合适终端则 fallback
 //! 到当前终端 inline 运行.
 //!
-//! 目前支持:
-//! - Windows: Windows Terminal (wt.exe)
-//! - macOS:   iTerm2 优先, Terminal.app fallback
-//! - 其他:    inline (向后兼容)
+//! ## 检测策略
 //!
-//! 启动选项:
+//! 1. **TERM_PROGRAM 提示**: 用户当前已经在某个终端里跑 launcher 时, 优先开同款.
+//!    - WezTerm / kitty / iTerm.app / Apple_Terminal 这几个会 set 这个变量.
+//!    - Alacritty / GNOME Terminal / konsole 不 set, 走下一步.
+//! 2. **跨平台 modern 三巨头**: WezTerm → kitty → Alacritty (按命令是否在 PATH).
+//! 3. **平台原生**: macOS 走 iTerm2 → Terminal.app; Windows 走 Windows Terminal.
+//! 4. **Inline fallback**: 都没有就在当前终端跑.
+//!
+//! ## 启动选项
+//!
 //! - `--inline`: 强制 inline 跑 (跳过 launcher, 在当前终端).
 
 use anyhow::{Context, Result, bail};
@@ -68,33 +73,140 @@ fn run_inline(game: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+/// 总调度: 按策略试一连串终端, 第一个成功的 spawn 即返回 Ok(true).
+/// 任何 launcher 拿到 Err 直接冒泡 (不掩盖); 拿到 Ok(false) 表示该 launcher
+/// 不适用 (binary 不在 / app bundle 不存在), 继续试下一个.
 fn try_launch_external(game: &Path) -> Result<bool> {
-    if !binary_in_path("wt.exe") {
+    // 1. TERM_PROGRAM 提示: 用户当前在啥终端 launcher 就开啥.
+    if let Ok(hint) = env::var("TERM_PROGRAM") {
+        let r = match hint.as_str() {
+            "WezTerm" => launch_wezterm(game),
+            "kitty" => launch_kitty(game),
+            #[cfg(target_os = "macos")]
+            "iTerm.app" => launch_iterm2(game),
+            #[cfg(target_os = "macos")]
+            "Apple_Terminal" => launch_terminal_app(game),
+            _ => Ok(false),
+        };
+        if matches!(r, Ok(true)) {
+            return Ok(true);
+        }
+    }
+
+    // 2. 跨平台 modern 三巨头 (用户选择 modern-first).
+    if launch_wezterm(game)? {
+        return Ok(true);
+    }
+    if launch_kitty(game)? {
+        return Ok(true);
+    }
+    if launch_alacritty(game)? {
+        return Ok(true);
+    }
+
+    // 3. 平台原生.
+    #[cfg(target_os = "macos")]
+    {
+        if launch_iterm2(game)? {
+            return Ok(true);
+        }
+        if launch_terminal_app(game)? {
+            return Ok(true);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if launch_windows_terminal(game)? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+// ============================================================
+// 跨平台 modern 三巨头
+// ============================================================
+
+/// WezTerm: 命令 `wezterm start --config initial_cols=N --config initial_rows=M -- <cmd>`.
+/// 跨 mac / linux / windows.
+fn launch_wezterm(game: &Path) -> Result<bool> {
+    if !binary_in_path(wezterm_bin_name()) {
         return Ok(false);
     }
     let path_str = game.to_str().context("game path utf8")?;
-    Command::new("wt.exe")
+    Command::new(wezterm_bin_name())
         .args([
-            "--size",
-            &format!("{},{}", DEFAULT_COLS, DEFAULT_ROWS),
+            "start",
+            "--config",
+            &format!("initial_cols={DEFAULT_COLS}"),
+            "--config",
+            &format!("initial_rows={DEFAULT_ROWS}"),
+            "--",
+            path_str,
+        ])
+        .spawn()
+        .context("spawn wezterm")?;
+    Ok(true)
+}
+
+/// kitty: `kitty -o initial_window_width=Nc -o initial_window_height=Mc --title <t> <cmd>`.
+/// `Nc` 后缀表示按列/行数计算 (不是像素).
+fn launch_kitty(game: &Path) -> Result<bool> {
+    if !binary_in_path(kitty_bin_name()) {
+        return Ok(false);
+    }
+    let path_str = game.to_str().context("game path utf8")?;
+    Command::new(kitty_bin_name())
+        .args([
+            "-o",
+            &format!("initial_window_width={DEFAULT_COLS}c"),
+            "-o",
+            &format!("initial_window_height={DEFAULT_ROWS}c"),
             "--title",
             APP_TITLE,
             path_str,
         ])
         .spawn()
-        .context("spawn wt.exe")?;
+        .context("spawn kitty")?;
     Ok(true)
 }
 
+/// Alacritty: `alacritty -o window.dimensions.{columns,lines}=N --title <t> -e <cmd>`.
+fn launch_alacritty(game: &Path) -> Result<bool> {
+    if !binary_in_path(alacritty_bin_name()) {
+        return Ok(false);
+    }
+    let path_str = game.to_str().context("game path utf8")?;
+    Command::new(alacritty_bin_name())
+        .args([
+            "-o",
+            &format!("window.dimensions.columns={DEFAULT_COLS}"),
+            "-o",
+            &format!("window.dimensions.lines={DEFAULT_ROWS}"),
+            "--title",
+            APP_TITLE,
+            "-e",
+            path_str,
+        ])
+        .spawn()
+        .context("spawn alacritty")?;
+    Ok(true)
+}
+
+// ============================================================
+// 平台原生
+// ============================================================
+
 #[cfg(target_os = "macos")]
-fn try_launch_external(game: &Path) -> Result<bool> {
+fn launch_iterm2(game: &Path) -> Result<bool> {
+    if !iterm2_installed() {
+        return Ok(false);
+    }
     let path_str = game.to_str().context("game path utf8")?;
     let escaped = applescript_escape(path_str);
-
-    if iterm2_installed() {
-        let script = format!(
-            r#"tell application "iTerm"
+    let script = format!(
+        r#"tell application "iTerm"
     activate
     set newWindow to (create window with default profile)
     tell current session of newWindow
@@ -104,44 +216,80 @@ fn try_launch_external(game: &Path) -> Result<bool> {
         write text "{path}"
     end tell
 end tell"#,
-            cols = DEFAULT_COLS,
-            rows = DEFAULT_ROWS,
-            title = APP_TITLE,
-            path = escaped,
-        );
-        Command::new("osascript")
-            .args(["-e", &script])
-            .spawn()
-            .context("spawn osascript (iTerm2)")?;
-        return Ok(true);
-    }
+        cols = DEFAULT_COLS,
+        rows = DEFAULT_ROWS,
+        title = APP_TITLE,
+        path = escaped,
+    );
+    Command::new("osascript")
+        .args(["-e", &script])
+        .spawn()
+        .context("spawn osascript (iTerm2)")?;
+    Ok(true)
+}
 
-    if terminal_app_installed() {
-        let script = format!(
-            r#"tell application "Terminal"
+#[cfg(target_os = "macos")]
+fn launch_terminal_app(game: &Path) -> Result<bool> {
+    if !terminal_app_installed() {
+        return Ok(false);
+    }
+    let path_str = game.to_str().context("game path utf8")?;
+    let escaped = applescript_escape(path_str);
+    let script = format!(
+        r#"tell application "Terminal"
     activate
     do script "{path}"
     set custom title of front window to "{title}"
 end tell"#,
-            path = escaped,
-            title = APP_TITLE,
-        );
-        Command::new("osascript")
-            .args(["-e", &script])
-            .spawn()
-            .context("spawn osascript (Terminal.app)")?;
-        return Ok(true);
+        path = escaped,
+        title = APP_TITLE,
+    );
+    Command::new("osascript")
+        .args(["-e", &script])
+        .spawn()
+        .context("spawn osascript (Terminal.app)")?;
+    Ok(true)
+}
+
+#[cfg(target_os = "windows")]
+fn launch_windows_terminal(game: &Path) -> Result<bool> {
+    if !binary_in_path("wt.exe") {
+        return Ok(false);
     }
-
-    Ok(false)
+    let path_str = game.to_str().context("game path utf8")?;
+    Command::new("wt.exe")
+        .args([
+            "--size",
+            &format!("{DEFAULT_COLS},{DEFAULT_ROWS}"),
+            "--title",
+            APP_TITLE,
+            path_str,
+        ])
+        .spawn()
+        .context("spawn wt.exe")?;
+    Ok(true)
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn try_launch_external(_: &Path) -> Result<bool> {
-    Ok(false)
+// ============================================================
+// 平台无关 helpers
+// ============================================================
+
+fn wezterm_bin_name() -> &'static str {
+    if cfg!(windows) { "wezterm.exe" } else { "wezterm" }
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn kitty_bin_name() -> &'static str {
+    if cfg!(windows) { "kitty.exe" } else { "kitty" }
+}
+
+fn alacritty_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "alacritty.exe"
+    } else {
+        "alacritty"
+    }
+}
+
 fn binary_in_path(name: &str) -> bool {
     env::var_os("PATH")
         .map(|p| env::split_paths(&p).any(|d| d.join(name).exists()))
@@ -172,7 +320,6 @@ fn applescript_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
     use super::*;
 
     #[cfg(target_os = "macos")]
@@ -183,9 +330,21 @@ mod tests {
         assert_eq!(applescript_escape(r#"a"b"#), r#"a\"b"#);
     }
 
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
     #[test]
     fn binary_in_path_returns_false_for_nonexistent() {
-        assert!(!super::binary_in_path("definitely-not-a-binary-xyzzy"));
+        assert!(!binary_in_path("definitely-not-a-binary-xyzzy"));
+    }
+
+    #[test]
+    fn bin_names_have_correct_suffix() {
+        if cfg!(windows) {
+            assert_eq!(wezterm_bin_name(), "wezterm.exe");
+            assert_eq!(kitty_bin_name(), "kitty.exe");
+            assert_eq!(alacritty_bin_name(), "alacritty.exe");
+        } else {
+            assert_eq!(wezterm_bin_name(), "wezterm");
+            assert_eq!(kitty_bin_name(), "kitty");
+            assert_eq!(alacritty_bin_name(), "alacritty");
+        }
     }
 }

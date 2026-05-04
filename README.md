@@ -17,7 +17,7 @@
 - **多种吃法 picker**：手里同时有两种吃法时弹选择框，避免误吃
 - **两套主题**：暗 / 亮，`T` 键循环切换；牌张分色（数字红、萬黑筒蓝索紫、中红發绿白蓝风牌黑），辨识度高
 - **操作计时**：每步思考时长可配（10-60 秒 / 不限时），超时执行默认动作
-- **自动适配终端**：Windows 走 `wt.exe`，macOS 优先 iTerm2（fallback Terminal.app），启动开新窗口跑游戏不污染当前终端
+- **自动适配终端**：跨平台优先 WezTerm / kitty / Alacritty，再 fallback 到 Windows Terminal / iTerm2 / Terminal.app；启动开新窗口跑游戏不污染当前终端，找不到合适终端则 inline 兜底
 
 ## 多人游戏
 
