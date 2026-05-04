@@ -12,7 +12,7 @@ use crate::domain::meld::Meld;
 use crate::domain::tile::TileIndex;
 use crate::engine::rules::GameRules;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum YakuhaiKind {
     Haku,
     Hatsu,
@@ -22,7 +22,7 @@ pub enum YakuhaiKind {
     DoubleWind, // 场风=自风(连风)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Yaku {
     // 1 番
     Riichi,

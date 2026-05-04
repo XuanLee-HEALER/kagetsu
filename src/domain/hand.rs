@@ -2,8 +2,9 @@
 
 use crate::domain::meld::Meld;
 use crate::domain::tile::{TILE_KINDS, Tile, count_by_kind};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Hand {
     /// 暗手部分(未鸣牌的部分),包括摸到尚未切的那张.
     pub closed: Vec<Tile>,

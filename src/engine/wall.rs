@@ -10,11 +10,13 @@ use crate::domain::tile::{Tile, standard_set};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
 
 const DEAD_WALL_LEN: usize = 14;
 const RINSHAN_LEN: usize = 4;
 const DORA_INDICATORS_MAX: usize = 5;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wall {
     /// 活牌山(从尾部摸: pop()).
     live: Vec<Tile>,

@@ -46,7 +46,7 @@ impl RoundWind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerState {
     pub seat: Seat,
     pub hand: Hand,
@@ -91,7 +91,7 @@ impl PlayerState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RoundResult {
     Win {
         winner: Seat,
@@ -105,7 +105,7 @@ pub enum RoundResult {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RyuukyokuKind {
     Howaipai,
     NoYaku,
@@ -137,6 +137,7 @@ pub struct SelfOptions {
     pub shouminkan: Vec<TileIndex>,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct GameState {
     pub rules: GameRules,
     pub round_wind: RoundWind,

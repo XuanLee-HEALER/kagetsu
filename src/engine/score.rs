@@ -8,7 +8,7 @@ use crate::domain::yaku::{WinContext, Yaku, detect_yaku};
 use crate::engine::rules::GameRules;
 use crate::engine::state::PlayerState;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ScoreLevel {
     Normal,
     Mangan,
@@ -20,7 +20,7 @@ pub enum ScoreLevel {
     Yakuman(u8),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScoreResult {
     pub han: u32,
     pub fu: u32,
@@ -29,7 +29,7 @@ pub struct ScoreResult {
     pub level: ScoreLevel,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PaymentDistribution {
     pub from: Seat,
     pub to: Seat,

@@ -11,6 +11,8 @@
 
 pub mod ai;
 pub mod config;
+#[cfg(debug_assertions)]
+pub mod dev;
 pub mod domain;
 pub mod engine;
 pub mod mental_poker;

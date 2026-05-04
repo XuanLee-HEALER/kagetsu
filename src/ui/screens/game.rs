@@ -273,6 +273,18 @@ impl GameScreenState {
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
+        // Dev-only savestate (F5/F9). 优先级最高: chi picker / modal / riichi lock
+        // 都不拦截, 任何时刻都能存读档.
+        #[cfg(debug_assertions)]
+        if matches!(key.code, KeyCode::F(5)) {
+            self.dev_quick_save();
+            return None;
+        }
+        #[cfg(debug_assertions)]
+        if matches!(key.code, KeyCode::F(9)) {
+            self.dev_quick_load();
+            return None;
+        }
         // ChiPicker 打开: 优先吃所有按键.
         if let Some(picker) = self.chi_picker.as_mut() {
             use crate::ui::chi_picker::ChiOutcome;
@@ -610,6 +622,43 @@ impl GameScreenState {
     /// 切换主题 (供全局 T 键调用).
     pub fn set_theme(&mut self, kind: crate::ui::theme::ThemeKind) {
         self.theme_kind = kind;
+    }
+
+    /// F5: dev quick save. 失败时把错误写到 message.
+    #[cfg(debug_assertions)]
+    fn dev_quick_save(&mut self) {
+        match crate::dev::savestate::save(&self.game, "quick") {
+            Ok(path) => {
+                self.message = format!("[DEV] 存档 → {}", path.display());
+            }
+            Err(e) => {
+                self.message = format!("[DEV] 存档失败: {}", e);
+            }
+        }
+    }
+
+    /// F9: dev quick load. 替换 self.game 并复位 UI 派生 state.
+    #[cfg(debug_assertions)]
+    fn dev_quick_load(&mut self) {
+        match crate::dev::savestate::load("quick") {
+            Ok(g) => {
+                self.game = g;
+                // UI 派生 state 全部复位, 因为切屏/局面变了.
+                self.selected = 0;
+                self.player_calls = None;
+                self.calls_resolved = false;
+                self.last_step_at = Instant::now();
+                self.decision_deadline = None;
+                self.modal_open = false;
+                self.modal_selected = 0;
+                self.round_end_at = None;
+                self.chi_picker = None;
+                self.message = "[DEV] 已读档.".into();
+            }
+            Err(e) => {
+                self.message = format!("[DEV] 读档失败: {}", e);
+            }
+        }
     }
 
     /// 剩余思考秒数(向上取整). None = 不限时或不在等候态.
@@ -1606,6 +1655,20 @@ impl GameScreenState {
             "响应",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
+        #[cfg(debug_assertions)]
+        let pairs: &[(&str, &str)] = &[
+            ("P", "碰"),
+            ("A", "吃"),
+            ("M", "明杠"),
+            ("K", "暗杠"),
+            ("C", "跳过"),
+            ("N", "下一局"),
+            ("F5", "存档"),
+            ("F9", "读档"),
+            ("Esc", "回主菜单"),
+            ("Q", "退出"),
+        ];
+        #[cfg(not(debug_assertions))]
         let pairs: &[(&str, &str)] = &[
             ("P", "碰"),
             ("A", "吃"),
