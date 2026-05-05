@@ -13,7 +13,6 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::domain::decompose::decompose;
-use crate::engine::domain::hand::Hand;
 use crate::engine::domain::meld::{Meld, MeldKind, Seat};
 use crate::engine::domain::tile::{Tile, TileIndex, count_by_kind};
 use crate::engine::domain::yaku::WinContext;

@@ -1,6 +1,8 @@
 //! 玩家可执行的动作 (Action).
 //!
-//! 由 UI 或 AI 产生, 由 [`crate::game::GameState`] 消费.
+//! UI / AI 决策的中间表示. 调用方负责把 Action 翻译成
+//! [`crate::engine::op::AtomicOp`] 喂给
+//! [`crate::engine::round_state::round_apply`].
 
 use crate::engine::domain::meld::Seat;
 use crate::engine::domain::tile::Tile;

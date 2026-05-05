@@ -6,7 +6,7 @@
 use crate::engine::domain::meld::Seat;
 use crate::engine::rules::{GameRules, LengthRule};
 use crate::engine::score::PaymentDistribution;
-use crate::legacy_state::{RoundWind, RyuukyokuKind};
+use crate::engine::round_state::{RoundWind, RyuukyokuKind};
 use serde::{Deserialize, Serialize};
 
 /// 跨局累积的庄状态.

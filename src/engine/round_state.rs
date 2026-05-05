@@ -27,7 +27,7 @@ use crate::typed_op;
 use serde::{Deserialize, Serialize};
 
 // ============================================================
-// 局 / 庄共享类型 (原在 engine::state, 随 GameState 剥离一并移到这里)
+// 局 / 庄共享类型 (RoundWind / RoundResult / RyuukyokuKind 等局级概念)
 // ============================================================
 
 /// 场风 (东 / 南 / 西 / 北).
@@ -602,8 +602,6 @@ pub fn init_round(
     m: &crate::engine::match_state::MatchState,
     seed: u64,
 ) -> RoundState {
-    use crate::legacy_state::PlayerState;
-
     // 4 玩家 PlayerState, score 来自 MatchState.scores.
     let mut players: [PlayerState; 4] = [
         PlayerState::new(Seat::East, m.scores[0]),
@@ -1562,35 +1560,22 @@ mod tests {
 
     // ─── try_op validity gate 测试 ───
     //
-    // Test fixtures: 用现有 GameState::new + start_round 构造合法初始 GameState,
-    // 抽出 PlayerState/Wall 等组装到新 RoundState. 这是 stage 5b 的临时桥, 阶段 5d
-    // 写完 init_round 后改用那个.
+    // Test fixtures: 用 init_round + round_apply Draw 推到 AwaitDiscard.
 
+    use crate::engine::match_state::MatchState;
     use crate::engine::rules::GameRules;
-    use crate::legacy_state::GameState;
 
     /// 用 seed 构造一个 AwaitDiscardState (东家摸第 14 张后, 未切).
     fn fixture_await_discard(seed: u64) -> AwaitDiscardState {
-        let mut g = GameState::new(GameRules::default());
-        g.start_round(seed);
-        // 让 East 摸一张
-        let drawn = g.do_draw().expect("wall not empty");
-        assert_eq!(g.turn, Seat::East);
-        let common = CommonRound {
-            rules: g.rules.clone(),
-            round_wind: g.round_wind,
-            kyoku: g.kyoku,
-            honba: g.honba,
-            riichi_sticks_pool: g.riichi_sticks as u32,
-            dealer: g.dealer,
-            players: g.players.clone(),
-            wall: g.wall.clone().expect("wall set"),
-            first_go_around: g.first_go_around,
-        };
-        AwaitDiscardState {
-            common,
-            turn: g.turn,
-            last_drawn: Some(drawn),
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, seed);
+        let (next, _) = round_apply(&r, AtomicOp::Draw).expect("Draw on fresh round");
+        match next {
+            RoundState::AwaitDiscard(s) => {
+                assert_eq!(s.turn, Seat::East);
+                s
+            }
+            _ => panic!("Draw should land on AwaitDiscard"),
         }
     }
 

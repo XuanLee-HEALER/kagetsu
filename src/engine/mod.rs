@@ -1,13 +1,16 @@
 //! 计算库 — domain 类型 + 状态机 + 计分. 零外部感知 (不知道 ui/ai/net/recorder 存在).
 //!
 //! 子模块:
-//! - [`domain`] 静态类型 + 纯算法 (tile/meld/hand/action/decompose/yaku)
-//! - [`rules`]  GameRules — 一庄规则参数 (开局 freeze)
-//! - [`wall`]   Wall — 牌山 + 王牌 + dora
-//! - [`state`]  GameState + PlayerState + RoundResult
-//! - [`phase`]  Phase — 状态机阶段
-//! - [`event`]  GameEvent — 局内动作事件
-//! - [`score`]  番符计算 + 点数分配
+//! - [`domain`]      静态类型 + 纯算法 (tile/meld/hand/action/decompose/yaku)
+//! - [`rules`]       GameRules — 一庄规则参数 (开局 freeze)
+//! - [`wall`]        Wall — 牌山 + 王牌 + dora
+//! - [`player`]      PlayerState — 局内单家状态
+//! - [`op`]          AtomicOp + OpError — engine 算子代数
+//! - [`round_state`] RoundState + typed-state + round_apply (局层转移)
+//! - [`match_state`] MatchState + match_apply (庄层转移)
+//! - [`phase`]       Phase — 兼容 legacy 4-phase 表示 (UI 用)
+//! - [`event`]       GameEvent — 局内动作事件
+//! - [`score`]       番符计算 + 点数分配
 
 pub mod domain;
 pub mod event;

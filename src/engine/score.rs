@@ -6,7 +6,7 @@ use crate::engine::domain::decompose::{Decomposition, Mentsu, WaitKind};
 use crate::engine::domain::meld::{Meld, MeldKind, Seat};
 use crate::engine::domain::yaku::{WinContext, Yaku, detect_yaku};
 use crate::engine::rules::GameRules;
-use crate::legacy_state::PlayerState;
+use crate::engine::player::PlayerState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ScoreLevel {
