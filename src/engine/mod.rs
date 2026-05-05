@@ -14,6 +14,7 @@ pub mod event;
 pub mod match_state;
 pub mod op;
 pub mod phase;
+pub mod player;
 pub mod round_state;
 pub mod rules;
 pub mod score;
@@ -29,8 +30,9 @@ pub use domain::tile::{Tile, TileIndex};
 pub use domain::yaku::{Yaku, YakuhaiKind};
 pub use match_state::{MatchState, RoundOutcome, match_apply};
 pub use op::{AtomicOp, AtomicOpKind, OpError, PhaseKind};
+pub use player::PlayerState;
 pub use round_state::{
     AwaitCallsState, AwaitDiscardState, AwaitDrawState, AwaitRiichiDiscardState,
-    AwaitRinshanDrawState, CommonRound, LegalOps, PerSeatCalls, RoundEndState, RoundState,
-    init_round, legal_ops, round_apply, summarize_round,
+    AwaitRinshanDrawState, CommonRound, LegalOps, PerSeatCalls, RoundEndState, RoundResult,
+    RoundState, RoundWind, RyuukyokuKind, init_round, legal_ops, round_apply, summarize_round,
 };

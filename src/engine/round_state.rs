@@ -19,12 +19,66 @@ use crate::engine::domain::tile::{Tile, TileIndex, count_by_kind};
 use crate::engine::domain::yaku::WinContext;
 use crate::engine::event::GameEvent;
 use crate::engine::op::{AtomicOp, OpError};
+use crate::engine::player::PlayerState;
 use crate::engine::rules::GameRules;
-use crate::engine::score::{ScoreResult, distribute, evaluate};
-use crate::engine::state::{PlayerState, RoundResult, RoundWind, RyuukyokuKind};
+use crate::engine::score::{PaymentDistribution, ScoreResult, distribute, evaluate};
 use crate::engine::wall::Wall;
 use crate::typed_op;
 use serde::{Deserialize, Serialize};
+
+// ============================================================
+// 局 / 庄共享类型 (原在 engine::state, 随 GameState 剥离一并移到这里)
+// ============================================================
+
+/// 场风 (东 / 南 / 西 / 北).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoundWind {
+    East,
+    South,
+    West,
+    North,
+}
+
+impl RoundWind {
+    pub fn tile(self) -> TileIndex {
+        match self {
+            RoundWind::East => TileIndex::EAST,
+            RoundWind::South => TileIndex::SOUTH,
+            RoundWind::West => TileIndex::WEST,
+            RoundWind::North => TileIndex::NORTH,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            RoundWind::East => "东",
+            RoundWind::South => "南",
+            RoundWind::West => "西",
+            RoundWind::North => "北",
+        }
+    }
+}
+
+/// 一局结束时的结果. 由 typed apply (Tsumo / Ron / 流局) 写入 RoundEndState.result.
+/// summarize_round 据此抽 RoundOutcome 喂给 match_apply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RoundResult {
+    Win {
+        winner: Seat,
+        is_tsumo: bool,
+        loser: Option<Seat>,
+        score: ScoreResult,
+        payments: Vec<PaymentDistribution>,
+    },
+    Ryuukyoku {
+        kind: RyuukyokuKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RyuukyokuKind {
+    Howaipai,
+    NoYaku,
+}
 
 /// 手牌排序 helper.
 fn sort_hand(tiles: &mut Vec<Tile>) {

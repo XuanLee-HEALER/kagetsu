@@ -15,101 +15,13 @@ use crate::engine::domain::tile::{Tile, TileIndex, count_by_kind};
 use crate::engine::domain::yaku::WinContext;
 use crate::engine::event::{GameEvent, MAX_EVENTS};
 use crate::engine::phase::Phase;
+// 共享类型已移到新 home, 这里 re-export 让 crate::engine::state::* 路径继续工作.
+// 老 imports 暂不强制更新, 后续 stage 顺手清理.
+pub use crate::engine::player::PlayerState;
+pub use crate::engine::round_state::{RoundResult, RoundWind, RyuukyokuKind};
 use crate::engine::rules::{GameRules, LengthRule};
 use crate::engine::score::{PaymentDistribution, ScoreResult, distribute, evaluate};
 use crate::engine::wall::Wall;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RoundWind {
-    East,
-    South,
-    West,
-    North,
-}
-
-impl RoundWind {
-    pub fn tile(self) -> TileIndex {
-        match self {
-            RoundWind::East => TileIndex::EAST,
-            RoundWind::South => TileIndex::SOUTH,
-            RoundWind::West => TileIndex::WEST,
-            RoundWind::North => TileIndex::NORTH,
-        }
-    }
-    pub fn label(self) -> &'static str {
-        match self {
-            RoundWind::East => "东",
-            RoundWind::South => "南",
-            RoundWind::West => "西",
-            RoundWind::North => "北",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlayerState {
-    pub seat: Seat,
-    pub hand: Hand,
-    pub river: Vec<Tile>,
-    pub score: i32,
-    pub riichi: bool,
-    pub double_riichi: bool,
-    pub ippatsu_active: bool,
-    pub last_drawn: Option<Tile>,
-    /// 立直宣告牌在 river 中的索引 (UI 用 90° 横置). None = 未立直.
-    pub riichi_river_idx: Option<usize>,
-}
-
-impl PlayerState {
-    pub fn new(seat: Seat, score: i32) -> Self {
-        Self {
-            seat,
-            hand: Hand::new(),
-            river: Vec::new(),
-            score,
-            riichi: false,
-            double_riichi: false,
-            ippatsu_active: false,
-            last_drawn: None,
-            riichi_river_idx: None,
-        }
-    }
-
-    pub fn reset_round(&mut self) {
-        self.hand = Hand::new();
-        self.river.clear();
-        self.riichi = false;
-        self.double_riichi = false;
-        self.ippatsu_active = false;
-        self.last_drawn = None;
-        self.riichi_river_idx = None;
-    }
-
-    /// 返回 13 (含暗杠时仍为 13 + 杠的 1 张) 或 14 (摸牌后).
-    pub fn closed_count(&self) -> usize {
-        self.hand.closed.len()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RoundResult {
-    Win {
-        winner: Seat,
-        is_tsumo: bool,
-        loser: Option<Seat>,
-        score: ScoreResult,
-        payments: Vec<PaymentDistribution>,
-    },
-    Ryuukyoku {
-        kind: RyuukyokuKind,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RyuukyokuKind {
-    Howaipai,
-    NoYaku,
-}
 
 /// 某家对最近弃牌的合法响应选项.
 #[derive(Debug, Clone, Default)]
