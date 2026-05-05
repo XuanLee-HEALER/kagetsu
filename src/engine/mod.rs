@@ -11,6 +11,7 @@
 
 pub mod domain;
 pub mod event;
+pub mod match_state;
 pub mod op;
 pub mod phase;
 pub mod rules;
@@ -25,4 +26,5 @@ pub use domain::hand::Hand;
 pub use domain::meld::{Meld, MeldKind, Seat};
 pub use domain::tile::{Tile, TileIndex};
 pub use domain::yaku::{Yaku, YakuhaiKind};
+pub use match_state::{MatchState, RoundOutcome, match_apply};
 pub use op::{AtomicOp, AtomicOpKind, OpError, PhaseKind};
