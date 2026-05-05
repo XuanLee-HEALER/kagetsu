@@ -20,21 +20,23 @@
 
 ### 进 engine (refactor 范围)
 
-- `src/domain/*` — 几乎已经 pure, 走查 + 补 derive.
+- `src/engine/domain/*` — 原 `src/domain/` **整体下沉为 engine 子模块**. 走查 + 补 derive.
+  - engine 顶层 re-export: `pub use domain::{Tile, TileIndex, Seat, Meld, MeldKind, Hand};`
+  - 外部仍写 `tui_majo::engine::Tile`, 不暴露 `engine::domain::` 路径.
 - `src/engine/state.rs` — 重写为 type-state.
 - `src/engine/wall.rs` — `draw(&self) -> (Wall, Option<Tile>)`.
 - `src/engine/score.rs` — 函数形式 + 已经基本 pure.
-- `src/engine/event.rs` — 保留 GameEvent, 但从 GameState 移到 round_apply 返回值.
+- `src/engine/event.rs` — 保留 GameEvent 类型, 但**从 RoundState 字段移除**, 由 round_apply 返回值带出.
 - 新文件 `src/engine/op.rs` — AtomicOp + OpError + typed_op! 宏.
 - 新文件 `src/engine/match_state.rs` — MatchState + match_apply.
 
 ### 不进 engine
 
-- `src/ai/*` — **独立模块**. AI 通过 engine 公开 API (读 RoundState, 调 legal_ops, 输出 AtomicOp). 不在 engine 内, engine 也不知道 ai 存在.
-- `src/net/*` — 不在本次 refactor 强制范围. 调用 engine 的代码点跟着新签名改, 但 actor 模型保持现状.
-- `src/ui/*` — 不变, 继续是 mutable driver.
-- `src/dev/recorder.rs` — replay 函数从循环改成 `try_fold(round_apply)`. 录像写盘逻辑不变.
-- `src/mental_poker/*` — 已经基本 pure, 不动.
+- `src/ai/*` — **独立模块**. AI 通过 engine 公开 API (读 RoundState, 调 legal_ops, 输出 AtomicOp). engine 不知道 ai 存在.
+- `src/ui/*` — driver, 适配新 API 但不 pure 化.
+- `src/net/*` — **refactor 期间允许临时性破坏 (在线模式不可用)**. 阶段 7 仅保证签名层适配 + cargo build --bin tui-majo 通过. 运行时正确性 / net 测试不在本次 refactor 验证范围, 后续单独修.
+- `src/mental_poker/*` — 已经基本 pure, 不动. 但调用它的 net::room 等可能临时坏.
+- `src/dev/recorder.rs` — **暂不动**. dev-tools feature 下可能编不过, 接受. refactor 结束后再处理 RecordedAction ↔ AtomicOp 关系.
 
 ---
 
@@ -61,80 +63,114 @@ clone-everywhere. 每次 `round_apply` 内部 `state.clone()` 一次再走转移
 
 ## 4. 实施步骤 (bottom-up)
 
-每阶段一个 commit, 每 commit 全测试 (408 lib + 54 集成) 必须绿. **测试本身不允许改**
-(测试是 ground truth — 测试需要改的 helper 适配 API 变化是允许的, 但 assertion 语义不改).
+### 通用规则
 
-### 阶段 1: domain 层走查
-- `Tile` / `TileIndex` / `Seat` / `Meld` / `Hand`: 确认无 `&mut self` 方法.
-- 必要的 derive 补齐 (Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize).
+- 每阶段 (含子阶段) 一个 commit, 自包含.
+- 每 commit 必须 `cargo build --bin tui-majo` 通过.
+- 单机相关测试 (engine / domain / ai / dev::savestate / ui 相关) 必须绿.
+- net / mental_poker 测试在 refactor 期间允许失败 / 编不过 — **不阻塞**.
+- `cargo build --features dev-tools` 在 refactor 中段可能编不过 (dev::recorder 没适配), 接受.
+- **测试 assertion 语义不允许改** — 测试 helper 签名跟着 API 适配是允许的.
+
+### 新旧共存策略
+
+阶段 2-5 期间, **保留所有旧 `do_*` 方法**让外部代码继续编. 新 API (`round_apply`,
+type-state state) 同时存在. 阶段 6 一次性切外部到新 API, 阶段 7 才删旧 do_*.
+否则中段 commit 会大面积编不过.
+
+### 阶段 1: domain 下沉 + 走查
+- 物理移动 `src/domain/` → `src/engine/domain/`.
+- `src/lib.rs`: 删 `pub mod domain;`.
+- `src/engine/mod.rs`: 加 `pub mod domain;` 和 re-export `pub use domain::{Tile, TileIndex, Seat, Meld, MeldKind, Hand, ...};`
+- 全工程 `use crate::domain::*` 改 `use crate::engine::*` (re-export 路径).
+- 走查无 `&mut self` 方法, 必要 derive 补齐 (Debug / Clone / PartialEq / Eq / Hash / Serialize / Deserialize).
 
 ### 阶段 2: Wall pure 化
-- `Wall::draw(&self) -> (Wall, Option<Tile>)`.
-- `Wall::rinshan_draw(&self) -> (Wall, Option<Tile>)`.
-- `Wall::reveal_next_dora(&self) -> Wall`.
-- 调用方 (state.rs 旧 do_*) 暂时通过本地 `let (w, t) = self.wall.draw(); self.wall = w;` 适配, 为后面 type-state 重写铺路.
+- `Wall::draw(&self) -> (Wall, Option<Tile>)` 等. 老 `&mut self` 方法暂保留 (state.rs 旧 do_* 还在用), 加新方法不动旧.
+- 旧 do_* 调用站点暂不切, 等阶段 6.
 
 ### 阶段 3: AtomicOp + OpError + typed_op! 宏
-- 新文件 `src/engine/op.rs`.
-- `AtomicOp` enum (含 Draw / RinshanDraw / Discard / RiichiDeclare / Tsumo / Ankan / Shouminkan / Pon / Chi / Minkan / Ron / Pass).
+新文件 `src/engine/op.rs`:
+- `AtomicOp` enum (Draw / RinshanDraw / Discard / RiichiDeclare / Tsumo / Ankan / Shouminkan / Pon / Chi / Minkan / Ron / Pass).
 - `AtomicOpKind` (variant kind only, 用作 OpError 字段).
-- `OpError` enum (thiserror).
-- `typed_op!` declarative macro 生成 typed-op enum + try_from_atomic + From 反向.
+- `OpError` enum (thiserror, 完整 variant 列表见 abstract-model.md §OpError).
+- `typed_op!` declarative macro: 生成 typed-op enum + `try_from_atomic` + `From<TypedOp> for AtomicOp`.
 
 ### 阶段 4: MatchState
-- 新文件 `src/engine/match_state.rs`.
+新文件 `src/engine/match_state.rs`:
 - `MatchState` struct.
 - `RoundOutcome` enum.
 - `match_apply(&MatchState, RoundOutcome) -> MatchState`.
 - `init_match(GameRules) -> MatchState`.
 - `check_match_ended(&MatchState) -> bool`.
 
-### 阶段 5: type-state RoundState 重写
-最大一步. `src/engine/state.rs` 新结构:
-- `CommonRound` 子 struct (共享字段).
-- 每个 phase 的 typed state struct.
-- 每个 typed state 的 `try_op` (完整 validity gate).
-- 每个 typed state 的 typed `apply` (total).
-- `NextXxxState` enum + `From<NextXxxState> for RoundState`.
-- 公开 `RoundState` enum 包装.
-- 公开 `round_apply(&RoundState, AtomicOp) -> Result<RoundState, OpError>`.
-- 公开 `legal_ops(&RoundState) -> LegalOps`.
-- 公开 `summarize_round(&RoundState) -> Option<RoundOutcome>`.
-- 公开 `init_round(&MatchState, seed: u64) -> RoundState`.
-- events 从 state 字段拆出: `round_apply` 返回 `Result<(RoundState, Vec<GameEvent>), OpError>`. (TBD: 也可能保留 events 在 state 里方便 driver 读, 实施时定.)
+### 阶段 5: type-state RoundState (拆 4 子阶段)
 
-### 阶段 6: 删遗留
+最大一步, 拆细:
+
+#### 5a — 类型骨架
+- `src/engine/state.rs` 新增: `CommonRound` 子 struct + 各 typed state struct (字段, 无方法).
+- `RoundState` enum 包装.
+- `From<NextXxxState> for RoundState` 模板 (空实现, 占位).
+- 此阶段不引入任何转移逻辑. 旧 `GameState` 仍存在并继续工作.
+
+#### 5b — 各 typed state 的 try_op (validity gate)
+- 每个 state impl `fn try_op(&self, op: AtomicOp) -> Result<TypedOp, OpError>`.
+- 完整检查: phase 错配 (typed_op! 自动) + 数据级 + 规则级.
+- 此阶段加单元测试覆盖每个 OpError variant 的触发路径.
+
+#### 5c — 各 typed state 的 typed apply
+- 每个 state impl `fn apply(self, op: TypedOp) -> (NextState, Vec<GameEvent>)`.
+- **total 函数, 无 Result**. 输入已 validated.
+- 转移逻辑直接从旧 `do_*` 抄过来重组, 算法不变.
+- emit 的 events 跟旧逻辑一致 (Discard / Pon / Riichi 等).
+
+#### 5d — 公开 entry 函数
+- `round_apply(&RoundState, AtomicOp) -> Result<(RoundState, Vec<GameEvent>), OpError>`.
+- `legal_ops(&RoundState) -> LegalOps`.
+- `summarize_round(&RoundState) -> Option<RoundOutcome>`.
+- `init_round(&MatchState, seed: u64) -> RoundState`.
+
+阶段 5 完成后: 新旧 API 并存. 旧 `GameState` + `do_*` 仍可用 (老调用方继续编),
+新 `RoundState` + `round_apply` 已就绪 (但还没人调用).
+
+### 阶段 6: 切外部到新 API
+分成两步, 都在本阶段:
+
+#### 6a — UI 单机驱动切换 (最重要)
+`src/ui/screens/game.rs`:
+- `GameScreenState` 持 `RoundState` + `MatchState` 替代 `GameState`.
+- `advance()` 内部循环改成 `state = round_apply(&state, op)?`.
+- driver loop 读 state phase 决定下一 op 来源 (玩家 / AI / 自动 Draw / RinshanDraw).
+- 单机游戏正常运行 = refactor 主要验证目标.
+
+#### 6b — 其它调用方签名层适配
+- `src/ai/dummy.rs`: 改成 `ai_choose_discard(&RoundState) -> AtomicOp` / `ai_react_to_discard(&RoundState, who) -> AtomicOp`.
+- `src/net/room.rs` / `online_game.rs` / `online_zerotrust_game.rs`: 仅签名层适配让 cargo build 过, 运行时正确性不验.
+- `src/dev/recorder.rs`: 暂不动, dev-tools build 接受坏.
+
+### 阶段 7: 删遗留
+- 旧 `GameState` 删.
+- 旧 `do_*` 方法全删.
 - engine 中的 `tracing::info!` / `warn!` 全删.
-- `recorded_actions: Option<Vec<RecordedAction>>` 字段删 (engine 不知道录像).
-- `do_riichi` pop-and-replace hack 删 (新结构里 RiichiDeclare 是独立 op).
-- 旧 `do_*` 方法删.
+- `recorded_actions` 字段相关代码全删.
+- `do_riichi` pop-and-replace hack 自然消失.
 
-### 阶段 7: 适配外部
-- `src/dev/recorder.rs`:
-  - `RecordedAction` 等同 `engine::AtomicOp` (要么改用 engine::AtomicOp, 要么 type alias).
-  - `replay` 函数重写成 `ops.iter().try_fold(initial, |s, op| engine::round_apply(&s, op))`.
-- `src/ai/dummy.rs`:
-  - `ai_choose_discard(&RoundState) -> AtomicOp`.
-  - `ai_react_to_discard(&RoundState, who: Seat) -> AtomicOp`.
-- `src/ui/screens/game.rs`:
-  - 持 `RoundState` (替代 GameState).
-  - 用 `round_apply(&self.state, op)?` 替代 `self.game.do_*`.
-  - 内部 driver loop: 读 state phase, 决定下一 op 来源 (玩家 / AI / 自动 Draw).
-- `src/net/room.rs` / `online_game.rs`:
-  - 跟着新签名改. actor 内部仍 `&mut server_state`, 但 `server_state.engine_state = round_apply(&server_state.engine_state, op)?` 走 pure 函数.
-
-### 阶段 8: 测试 + benchmark
-- 全 408 lib + 54 集成测试跑过.
-- (可选) 加几个 benchmark 看 clone 开销 (一般不超过 1ms / op).
+### 阶段 8: 收尾
+- `cargo build --bin tui-majo` + 单机测试全绿.
+- 单机游戏手动验证 (`just play`) 一切正常.
+- 文档 `abstract-model.md` 跟实际代码 cross-check 一遍.
+- net / dev-tools 修复留作 follow-up issue, 不阻塞本 PR.
 
 ---
 
 ## 5. 容忍 (非完美但接受)
 
-- **RNG**: 仅用于 `Wall::shuffled(seed, with_aka)`, 一次性洗完后不再用. 直接 seed 参数喂入就够, 不上升到 `RngStream` trait 抽象. 影响仅限 wall 生成.
-- **events 是否完全脱离 state**: 阶段 5 实施时拍. 倾向脱离 (每次 round_apply 返新 events Vec), 但如果 driver 实际方便操作历史, 留在 state 也行. 对核心模型不影响.
+- **RNG**: 仅用于 `Wall::shuffled(seed, with_aka)`, 一次性洗完后不再用. 直接 seed 参数喂入就够, 不上升到 `RngStream` trait 抽象. 影响仅限 wall 生成. **以后做 P2P 在线游戏可能需要重新设计这块** (mental_poker 协议涉及共同 RNG), 但不在本次范围.
+- **events 完全脱离 state** ✅: round_apply 返 `Vec<GameEvent>`. UI/recorder/网络 各自累积.
 - **Pass 粒度**: 单一 op (整个 call window 关闭一次). 不按家拆 4 个.
 - **Crate 拆分**: 保持单 crate, lib 部分 re-export 在 `tui_majo::engine::*`. 不切 workspace.
+- **在线游戏临时不可用**: refactor 期间 net / mental_poker 测试可能黑色, dev::recorder 在 dev-tools build 下可能编不过. 接受.
 
 ---
 
@@ -142,9 +178,11 @@ clone-everywhere. 每次 `round_apply` 内部 `state.clone()` 一次再走转移
 
 ### 真实风险
 
-- **net 层调用点适配**: `room.rs` / `online_game.rs` / `online_zerotrust_game.rs` 都调用 engine. 签名换了之后这些调用点都得动. mental_poker 的 actor 已经接近 pure, mp_swarm 没那么干净, 但都不深.
+- **net 层 follow-up**: refactor 末尾 net 层只签名层适配 + cargo build 通过, 运行时正确性留 follow-up. 包括 `room.rs::reduce_to_view` 那种 GameState → GameStateView 的转换 (现在依赖 GameState 内部字段, 重构后 RoundState 是 enum, 转换逻辑要重写). 单独一轮工作.
+- **dev::recorder follow-up**: 同上. 旧 `RecordedAction` 跟新 `AtomicOp` 不一致, 需要决定是 alias / 替换 / 还是双轨并存. 旧 quick.json / recordings/ 可能失效.
 - **录像 schema 演化**: AtomicOp 加 variant / RoundState 加字段会让老录像反序列化失败. 加 `schema_version` 字段, 或文档化"录像不跨 minor 版本兼容".
 - **type-state state 数量增加成本**: 每加一种 phase 加一个 struct + 一组 typed-op + 一组 apply. mahjong phase 数稳定 (5-6 个), 短期不会爆.
+- **mental_poker / P2P 重设计**: 本次完全不动, 但后期做 P2P 在线游戏跟 pure engine 配合时可能要重新设计 actor model + RNG 协调. 提前知道有这件事, 不在本次解决.
 
 ### 已通过设计消除的风险
 
