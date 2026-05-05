@@ -11,6 +11,7 @@
 
 pub mod domain;
 pub mod event;
+pub mod op;
 pub mod phase;
 pub mod rules;
 pub mod score;
@@ -24,3 +25,4 @@ pub use domain::hand::Hand;
 pub use domain::meld::{Meld, MeldKind, Seat};
 pub use domain::tile::{Tile, TileIndex};
 pub use domain::yaku::{Yaku, YakuhaiKind};
+pub use op::{AtomicOp, AtomicOpKind, OpError, PhaseKind};
