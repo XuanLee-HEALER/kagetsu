@@ -14,6 +14,132 @@
 注: 「巡」(junme, 一摸一切的循环) 不是这里的"操作", 它在原子模型下退化成"两个连续 op"
 (Draw + Discard) 加可能的 Pass / 鸣牌. 我们不把"巡"作为一级抽象.
 
+## fold 是什么 — 概念前置
+
+后面的整个模型架在 **fold** 这个抽象上, 先把它讲清楚.
+
+### 定义
+
+fold (在 FP 世界也叫 **reduce / accumulate / catamorphism**) 是把一个**事件序列**
+塌缩成一个**累积值**的操作. 三个角色:
+
+| 角色 | 含义 |
+|---|---|
+| `initial: Acc` | 初始累积值 |
+| `events: [E]` | 待处理的事件序列 |
+| `step: (Acc, E) -> Acc` | 一步如何把事件应用到累积值上 |
+
+签名:
+
+```rust
+fn fold<Acc, E>(
+    initial: Acc,
+    events: impl Iterator<Item = E>,
+    step: impl Fn(Acc, E) -> Acc,
+) -> Acc {
+    let mut acc = initial;
+    for e in events { acc = step(acc, e); }
+    acc
+}
+```
+
+最朴素的例子, 求和:
+```rust
+let sum = [1, 2, 3, 4, 5].iter().fold(0, |acc, x| acc + x);
+//                                ↑           ↑
+//                              initial      step
+//   acc 一路: 0 → 1 → 3 → 6 → 10 → 15
+```
+
+step 没有副作用, 只是 `(acc, event) -> acc`. 走完整个序列, 拿到最终累积值.
+
+### 为什么 fold 不只是 "for 循环的语法糖"
+
+实现上是个 for 循环没错, 但**形式化它**有几个本质好处:
+
+**1. 确定性 + 可重放**
+
+只要 (initial, events, step) 三个东西不变, 输出**永远一样**——没有隐藏内部状态,
+没有副作用. 所以**只要给我事件序列, 我能精确重建任何中间状态**:
+
+```rust
+let state_at_step_k = events.iter().take(k).fold(initial, step);
+```
+
+这就是 event sourcing 的全部基石, 也是 `dev/recorder.rs::replay` 已经在做的事
+(它就是个 fold, 只是没用 Iterator API 写).
+
+**2. 强制把"状态"和"事件"概念分开**
+
+写 fold 强迫你回答三个问题:
+- 累积值 (state) 是什么? 类型是?
+- 事件是什么? 有几种 variant? 各带什么数据?
+- step 怎么把事件应用到 state 上?
+
+这三个问题答清楚, 领域模型就 90% 设计完了. 对 mahjong 来说: 明确
+`RoundState` / `AtomicOp` / `round_apply` 三件事, 一局的完整语义就被严格刻画了.
+
+**3. 状态/事件分离, 单元测试天然干净**
+
+每个 step 是 `(input) -> output`, 没有 setup/teardown, 没有 mock. 给我两个 input,
+我直接断言 output. 这也是 pure 范式整体的好处, fold 是它最显式的体现.
+
+### try_fold: 可失败版本
+
+step 可能失败时, 用 `try_fold`, Err 短路:
+
+```rust
+fn try_fold<Acc, E, Err>(
+    initial: Acc,
+    events: impl Iterator<Item = E>,
+    step: impl Fn(Acc, E) -> Result<Acc, Err>,
+) -> Result<Acc, Err>
+```
+
+mahjong 的 `round_apply` 必然是 try_fold 风格——非法 op 应该 Err 而不是 panic.
+
+### 与 "reducer" / Redux / 状态机的关系
+
+熟悉前端 Redux / Elm / NgRx 的会很眼熟——fold step 在那些框架里叫 **reducer**:
+`(state, action) -> state`. 一回事.
+
+mahjong 的 `round_apply` 就是个 reducer. 接 AtomicOp action, 返回新 RoundState.
+区别只在于 mahjong 是单线程回合制, 不需要响应式 store / dispatch 那套.
+
+也跟 **状态机 (state machine)** 的语义一致——状态机的转移函数 `δ: (Q, Σ) → Q`
+本质就是一次 step. 一连串输入沿着状态机走完得到的最终状态, 就是这串输入对
+δ 的 fold.
+
+### 为什么 mahjong 是"天然的 fold"
+
+mahjong 本身就是一个 **离散事件驱动 + 全局状态** 的回合制博弈:
+
+| mahjong 自然语义 | fold 中的角色 |
+|---|---|
+| 全局状态 (谁的牌 / 谁的河 / 牌山剩多少) | Acc (RoundState) |
+| 玩家决策 (摸切碰立直) | Event (AtomicOp) |
+| 应用决策的规则 (副露后转 turn 等) | step (round_apply) |
+| 一局完整过程 | fold |
+
+形式化跟它的天然性对齐. 不像有些领域 (带连续物理量的实时游戏) 强行 fold 反而别扭.
+
+### 嵌套 fold = 多层级状态
+
+mahjong 不止一层. 一庄 = 多局, 一局 = 多个 op. 嵌套两层 fold 就把多层级
+表达出来:
+
+```rust
+let match_final = ROUNDS.fold(init_match, |m, _round_idx| {
+    let round_init  = init_round_from_match(&m);
+    let round_final = OPS_of_this_round.fold(round_init, round_apply);
+    let outcome     = summarize_round(&round_final);
+    match_apply(m, outcome)
+});
+```
+
+外层 fold 的 step 内嵌一次内层 fold. 每局跑完后 summarize 喂给外层. 这是后面
+"三层 fold 结构" 一节要展开的核心.
+
 ## 三层 fold 结构
 
 每层都是一个**纯 fold**, 外层 fold 的 event 参数 = 内层 fold 的最终 state 摘要:
