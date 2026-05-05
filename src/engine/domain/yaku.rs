@@ -1,27 +1,43 @@
-//! 役种判定.
+//! 役 (役 / Yaku) 种判定.
 //!
-//! 详见 docs/spec/yaku.md
+//! 役是日麻和了的"特殊牌型条件" — 至少 1 役才能和了, 各役有番数 (Han),
+//! 多役叠加. 本模块定义 [`Yaku`] enum (~50+ 种) + [`detect_yaku`] 实现.
 //!
-//! 实现优先级:
-//! - 全部标准役 (1-6 番) 完整实现
-//! - 全部役满完整实现
-//! - 古役: 类型完整, 实现按需逐个补 (默认关闭)
+//! # 役分类
+//!
+//! - **标准役 1-6 番**: Riichi / Tanyao / Pinfu / Yakuhai / 等. 完整实现.
+//! - **役满** (役満 / Yakuman): 国士无双 / 四暗刻 / 大三元 / 等. 完整实现.
+//! - **古役** (古役 / Koteki): 大车轮 / 八连庄 / 等. 类型定义完整, 实现按需补,
+//!   默认关闭 (见 `rules.kotekisai`).
+//!
+//! 详见 `docs/spec/yaku.md`.
 
 use crate::engine::domain::decompose::{Decomposition, Mentsu, WaitKind};
 use crate::engine::domain::meld::Meld;
 use crate::engine::domain::tile::TileIndex;
 use crate::engine::rules::GameRules;
 
+/// 役牌 (役牌 / Yakuhai) 类型 — 1 番役, 来源不同.
+///
+/// 役牌指雀头 / 刻子 = 三元牌 (白发中) 或 当家相关风牌 (场风 / 自风) 时给的役.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum YakuhaiKind {
+    /// 白 (白 / Haku) — 三元之一.
     Haku,
+    /// 發 (發 / Hatsu) — 三元之一.
     Hatsu,
+    /// 中 (中 / Chun) — 三元之一.
     Chun,
-    BakaWind,   // 场风
-    JikaWind,   // 自风
-    DoubleWind, // 场风=自风(连风)
+    /// 场风 (場風 / Bakaze) — 当前 round_wind 对应的风牌.
+    BakaWind,
+    /// 自风 (自風 / Jikaze) — 当家相对庄家位置对应的风牌.
+    JikaWind,
+    /// 连风 (連風 / 双風 / DoubleWind) — 场风 == 自风 时算 2 番 (例: 东 1 局东家的东).
+    DoubleWind,
 }
 
+/// 役 (Yaku). 大部分 unit variant; 役满中部分携带"特殊条件" (例:
+/// 国士 13 面待 / 四暗刻单骑 / 九莲宝灯 9 面待) 用于双倍役满判定.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Yaku {
     // 1 番
@@ -174,35 +190,57 @@ impl Yaku {
     }
 }
 
-/// 一次和牌的上下文.
+/// 一次和牌的完整上下文 — [`detect_yaku`] / [`crate::engine::score::evaluate`] 的输入.
+///
+/// 整合了拆解结果 + 风位 + 各种"特殊和了情境" flags + 宝牌计数. 由 engine 内部
+/// 在和了瞬间从 RoundState 抽出后构造, 调用方通常不直接 build.
 #[derive(Debug, Clone)]
 pub struct WinContext<'a> {
+    /// 牌型分解 (含面子 / 雀头 / 待型).
     pub decomposition: &'a Decomposition,
+    /// 自风 (自家相对庄家的位置对应的风牌).
     pub seat_wind: TileIndex,
+    /// 场风 (整个圈对应的风牌).
     pub round_wind: TileIndex,
+    /// 和牌张 kind.
     pub winning_tile: TileIndex,
 
+    /// 是否自摸 (`true`) 或荣和 (`false`).
     pub is_tsumo: bool,
+    /// 是否立直状态.
     pub is_riichi: bool,
+    /// 是否双立直 (W立直, 第一巡内立直).
     pub is_double_riichi: bool,
+    /// 是否一发 (立直后下一巡内未被打断).
     pub is_ippatsu: bool,
+    /// 海底捞月 (海底摸月 / Haitei): 自摸最后一张活牌.
     pub is_haitei: bool,
+    /// 河底捞鱼 (河底撈魚 / Houtei): 荣和最后一张弃牌.
     pub is_houtei: bool,
+    /// 岭上开花 (嶺上開花 / Rinshan): 杠后岭上摸的那张和.
     pub is_rinshan: bool,
+    /// 抢杠 (槍槓 / Chankan): 加杠时被截胡荣和.
     pub is_chankan: bool,
+    /// 天和 (天和 / Tenhou): 庄家配牌即和 (役满).
     pub is_tenhou: bool,
+    /// 地和 (地和 / Chiihou): 子家自家第 1 摸即和 (役满).
     pub is_chiihou: bool,
+    /// 人和 (人和 / Renhou): 子家第 1 巡内荣和上家弃牌 (古役).
     pub is_renhou: bool,
 
-    /// 门清(无副露; 暗杠不算副露).
+    /// 门前清 (Menzen) — 无他人来源副露; 暗杠不算副露破.
     pub menzen: bool,
-    /// 完全无副露(包括暗杠).
+    /// 完全闭手 (无任何 melds, 含暗杠也算破).
     pub fully_concealed: bool,
 
+    /// 表宝牌 (ドラ / Dora) 命中数.
     pub dora_count: u32,
+    /// 赤宝牌 (赤ドラ / Aka-Dora) 命中数.
     pub aka_count: u32,
+    /// 里宝牌 (裏ドラ / Ura-Dora) 命中数. 仅立直方有.
     pub ura_dora_count: u32,
 
+    /// 整庄规则参数 (双倍役满 / 古役开关 / etc.).
     pub rules: &'a GameRules,
 }
 

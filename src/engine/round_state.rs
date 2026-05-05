@@ -1,17 +1,63 @@
-//! 局 (Round) 层 — type-state 模式. 见 docs/design/abstract-model.md §Layer 2.
+//! 局 (Round / 局 / Kyoku) 层状态 + 转移函数.
 //!
-//! 4 层架构:
-//! - L1 数据层: AtomicOp (在 op.rs 定义)
-//! - L2 类型化 state: AwaitDiscardState / AwaitRiichiDiscardState / ... 在本文件
-//! - L3 类型化 op: 由 typed_op! 宏在本文件生成 (AwaitDiscardOp 等)
-//! - L4 桥接: 各 typed state 的 try_op 方法 (在本文件 impl)
+//! 一局麻将从 *配牌* (Haipai, 4 家各发 13 张) 开始, 经过摸牌 / 切牌 / 鸣牌 /
+//! 立直等若干步, 直到 *和了* (Agari) 或 *流局* (Ryuukyoku) 结束. 本模块用
+//! type-state 模式建模这条状态机.
 //!
-//! RoundState enum 包装所有 typed state, 公开给外部用.
+//! # Driver 用法
 //!
-//! ## 阶段 5a 状态: 类型骨架
+//! ```ignore
+//! use tui_majo::engine::{
+//!     match_state::MatchState,
+//!     round_state::{init_round, round_apply, summarize_round, RoundState},
+//!     op::AtomicOp,
+//!     rules::GameRules,
+//! };
 //!
-//! 本提交只定义 struct/enum 字段 + From 占位. try_op (5b) / typed apply (5c) /
-//! 公开 round_apply 等 entry (5d) 待续.
+//! // 1. 起庄
+//! let mut mat = MatchState::new(GameRules::default());
+//! // 2. 起一局
+//! let mut round = init_round(&mat, 0xdead_beef /* seed */);
+//! // 3. 推动状态机, 直到 RoundEnd
+//! while !round.is_ended() {
+//!     let op: AtomicOp = decide_next_op(&round); // 你的 driver
+//!     let (next, _events) = round_apply(&round, op).expect("op valid");
+//!     round = next;
+//! }
+//! // 4. 把局结果喂给庄, 进下一局
+//! let outcome = summarize_round(&round).unwrap();
+//! mat = tui_majo::engine::match_state::match_apply(&mat, outcome);
+//! ```
+//!
+//! # 状态机 (6 phase)
+//!
+//! [`RoundState`] 是 6-variant enum, 对应 6 个 phase:
+//!
+//! | Phase | 触发条件 | 唯一 / 主要合法 op |
+//! |---|---|---|
+//! | [`AwaitDraw`](RoundState::AwaitDraw) | 局开始 / 上家切完 Pass | [`Draw`](AtomicOp::Draw) |
+//! | [`AwaitDiscard`](RoundState::AwaitDiscard) | 摸完牌 / 鸣牌后 | `Discard` / `RiichiDeclare` / `Tsumo` / `Ankan` / `Shouminkan` |
+//! | [`AwaitRiichiDiscard`](RoundState::AwaitRiichiDiscard) | `RiichiDeclare` 后 | `Discard` (限定为切某张听牌) |
+//! | [`AwaitRinshanDraw`](RoundState::AwaitRinshanDraw) | 任意杠后 | [`RinshanDraw`](AtomicOp::RinshanDraw) |
+//! | [`AwaitCalls`](RoundState::AwaitCalls) | 切牌后 | `Pon` / `Chi` / `Minkan` / `Ron` / `Pass` |
+//! | [`RoundEnd`](RoundState::RoundEnd) | 和了 / 流局 / 山摸尽 | (任何 op 均拒绝) |
+//!
+//! # 4 层架构 (内部细节)
+//!
+//! - **L1 数据层**: [`AtomicOp`] (统一 enum, 序列化友好, 适合录像 / 网络协议)
+//! - **L2 类型化 state**: [`AwaitDiscardState`] / [`AwaitCallsState`] / 等 6 个,
+//!   各自只携带该 phase 需要的字段
+//! - **L3 类型化 op**: `AwaitDiscardOp` / `AwaitCallsOp` / 等 (由 `typed_op!` 宏
+//!   生成), AtomicOp 的子集对应该 phase 合法的 variants
+//! - **L4 桥接**: 各 typed state 的 `try_op` 方法 — 把 AtomicOp 验证 + 翻译成
+//!   typed-op, 失败返 [`OpError`]
+//!
+//! 公开 [`round_apply`] 把 4 层串起来, driver 只需要面对 [`RoundState`] +
+//! [`AtomicOp`] 即可.
+//!
+//! # 引用
+//!
+//! 设计文档: `docs/design/abstract-model.md` §Layer 2
 
 use crate::engine::domain::decompose::decompose;
 use crate::engine::domain::meld::{Meld, MeldKind, Seat};
@@ -30,16 +76,28 @@ use serde::{Deserialize, Serialize};
 // 局 / 庄共享类型 (RoundWind / RoundResult / RyuukyokuKind 等局级概念)
 // ============================================================
 
-/// 场风 (东 / 南 / 西 / 北).
+/// 场风 (場風 / Bakaze) — 整个 *圈* (round) 的风牌.
+///
+/// 日麻按场风划分阶段:
+/// - 东风战 (Tonpuusen): 仅 `East` 风, 4 局后结束
+/// - 半庄 (Hanchan): `East` → `South`, 共 8 局
+/// - 一庄 (Ichijou): `East` → `South` → `West` → `North` (本 engine 不支持)
+///
+/// 与自风 (Jikaze, 玩家相对庄家位置) 一起构成 *役牌* (Yakuhai) 的判定依据.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RoundWind {
+    /// 东 (東 / トン).
     East,
+    /// 南 (南 / ナン).
     South,
+    /// 西 (西 / シャー). 本 engine 不主动进入, 保留备用.
     West,
+    /// 北 (北 / ペー). 本 engine 不主动进入, 保留备用.
     North,
 }
 
 impl RoundWind {
+    /// 转成对应的字牌 [`TileIndex`] (评分时用).
     pub fn tile(self) -> TileIndex {
         match self {
             RoundWind::East => TileIndex::EAST,
@@ -48,6 +106,7 @@ impl RoundWind {
             RoundWind::North => TileIndex::NORTH,
         }
     }
+    /// 中文短名 ("东" / "南" / ...).
     pub fn label(self) -> &'static str {
         match self {
             RoundWind::East => "东",
@@ -58,25 +117,43 @@ impl RoundWind {
     }
 }
 
-/// 一局结束时的结果. 由 typed apply (Tsumo / Ron / 流局) 写入 RoundEndState.result.
-/// summarize_round 据此抽 RoundOutcome 喂给 match_apply.
+/// 一局的最终结果.
+///
+/// 当 [`RoundState`] 进入 [`RoundState::RoundEnd`] 时挂在
+/// [`RoundEndState::result`]. 调用 [`summarize_round`] 抽出对应的
+/// [`crate::engine::match_state::RoundOutcome`] 喂给庄层的
+/// [`crate::engine::match_state::match_apply`] 推进.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RoundResult {
+    /// 和了 (和了 / Agari) — 自摸 ([`AtomicOp::Tsumo`]) 或荣和 ([`AtomicOp::Ron`]).
     Win {
+        /// 和家.
         winner: Seat,
+        /// `true` = 自摸; `false` = 荣和.
         is_tsumo: bool,
+        /// 放铳家. 自摸时 None, 荣和时 = 切牌方.
         loser: Option<Seat>,
+        /// 完整评分结果 (役 / 番 / 符 / 总点数 / 等级).
         score: ScoreResult,
+        /// 完整支付列表 (含立直棒 self-payment, score::distribute 算出).
         payments: Vec<PaymentDistribution>,
     },
+    /// 流局 (流局 / Ryuukyoku) — 牌山摸尽或无役 (NoYaku) 等情况, 见 [`RyuukyokuKind`].
     Ryuukyoku {
         kind: RyuukyokuKind,
     },
 }
 
+/// 流局类型. 当前 engine 仅支持 *荒牌流局* (`Howaipai`) 和占位的 `NoYaku`.
+///
+/// 严格规则下还有: 九种九牌、四风连打、四杠散了、四家立直、三家和了 — 全部
+/// future work, 当前简化为 Howaipai.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RyuukyokuKind {
+    /// 荒牌流局 (荒牌平局 / Howaipai) — 牌山活牌区摸尽且无人和, 局自然结束.
+    /// 本 engine 当前唯一会真触发的流局类型.
     Howaipai,
+    /// 占位 variant (无役流局), 保留给将来需要区分场景.
     NoYaku,
 }
 
@@ -114,95 +191,152 @@ fn break_first_round_and_ippatsu(common: &mut CommonRound) {
     common.first_go_around = false;
 }
 
-/// 各 typed state 共享的局内字段. 抽出避免每个 state 重复.
+/// 局内 6 个 typed state 共享的字段.
+///
+/// 局开始时由 [`init_round`] 从 [`crate::engine::match_state::MatchState`] 注入:
+/// - 庄层信息 (rules / round_wind / kyoku / honba / dealer / riichi_sticks_pool)
+///   局内不变 (rules) 或仅特定 op 会改 (riichi_sticks_pool 在立直时 +1)
+/// - 4 家初始状态 (`players`) 由 [`init_round`] 配牌 13×4
+/// - 牌山 ([`Wall`]) 含活牌区 + 死墙 + 已翻宝牌指示
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommonRound {
-    /// 整庄规则 (从 MatchState 注入, 局内不变).
+    /// 整庄规则 (从 [`MatchState`](crate::engine::match_state::MatchState) 注入,
+    /// 局内不变).
     pub rules: GameRules,
-    /// 场风 (从 MatchState).
+    /// 场风 (場風 / Bakaze) — 决定字牌的役牌身份.
     pub round_wind: RoundWind,
-    /// 局序号 (从 MatchState).
+    /// 局序号 (1..=4 in each round_wind, 例: 东 1 / 东 2 / ...).
     pub kyoku: u8,
-    /// 本场数 (从 MatchState).
+    /// 本场数 (本場 / Honba) — 庄家连和 / 流局每次 +1, 子家和清零.
+    /// 影响和了点数 (每本场 +300 点).
     pub honba: u8,
-    /// 立直棒池 (本局开局时 from MatchState, 局内有人立直会 +1).
+    /// 立直棒池 (供托 / Kyoutaku) — 已立直未被领走的 1000 点棒计数.
+    /// 局内有人立直 → +1; 和家整池领走; 流局保留到下局.
     pub riichi_sticks_pool: u32,
-    /// 庄家 (从 MatchState).
+    /// 庄家 (亲家 / 親 / Oya) — 决定本局自风分配 + 和了点数加倍.
     pub dealer: Seat,
-    /// 4 家完整 state (含 hand / river / melds / score / riichi flags / last_drawn).
+    /// 4 家完整状态 (含手牌 / 弃牌河 / 副露 / 分数 / 立直 flags / 最后摸到的牌).
+    /// 索引方式 = `Seat::index()` (East=0, South=1, West=2, North=3).
     pub players: [PlayerState; 4],
-    /// 牌山 (含活/死/dora_revealed).
+    /// 牌山 — 含活牌区 (live wall) / 死墙 (dead wall) / 已翻宝牌指示 (dora indicator).
     pub wall: Wall,
-    /// 第一巡是否未被打断 (用于天和/地和等极端役).
+    /// *第一巡* (一巡目 / Chunkun) 是否仍未被鸣牌 / 杠打断.
+    /// 用于判定 *天和* (Tenhou, 庄家配牌即和) / *地和* (Chiihou, 子家第一摸即和) /
+    /// *人和* (Renhou, 子家在自家第一巡内荣和上家弃牌) 等极端役.
     pub first_go_around: bool,
 }
 
-/// 等当前家做出 AwaitDiscard 阶段的某个决策 (切牌 / 立直宣告 / 自摸 / 暗杠 / 加杠).
+/// **AwaitDiscard** — 当前家已摸牌, 等切牌 / 立直 / 自摸 / 杠决策.
 ///
-/// `last_drawn` 是 Option, 因为进入 AwaitDiscard 有两条路径:
-/// - Draw / RinshanDraw 后 → Some(摸到的牌)
-/// - Pon / Chi / Minkan 后 → None (鸣牌不摸新牌)
+/// 进入路径 (二选一):
+/// - [`AtomicOp::Draw`] / [`AtomicOp::RinshanDraw`] 后 → `last_drawn = Some(刚摸的牌)`
+/// - [`AtomicOp::Pon`] / [`AtomicOp::Chi`] / [`AtomicOp::Minkan`] 后 → `last_drawn = None` (鸣牌不摸新牌)
 ///
-/// Tsumo / RiichiDeclare 等 op 在 try_op 里检查 last_drawn 必须 Some
-/// (这些动作前提是刚摸了牌).
+/// `Tsumo` / `RiichiDeclare` 等动作 *前提是刚摸了牌*, 因此在 try_op 里检查
+/// `last_drawn` 必须 `Some` 否则拒绝.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwaitDiscardState {
     pub common: CommonRound,
-    /// 当前家.
+    /// 当前家 (待决策方).
     pub turn: Seat,
-    /// 刚摸到的那张, 仅 Draw / RinshanDraw 后 Some, 鸣牌后 None.
+    /// 刚摸到的那张. `Some` 仅在 Draw / RinshanDraw 之后, 鸣牌后 `None`.
     pub last_drawn: Option<Tile>,
 }
 
-/// 当前家未摸牌, 唯一合法 op = Draw. driver 自动喂入.
+/// **AwaitDraw** — 等当前家摸牌. 唯一合法 op = [`AtomicOp::Draw`].
+///
+/// 通常 driver 自动喂 `Draw` (没有玩家选择), 但作为显式 phase 让录像 (replay)
+/// 表达更精准 — 摸的那一刻有明确事件.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwaitDrawState {
     pub common: CommonRound,
+    /// 即将摸牌的家.
     pub turn: Seat,
 }
 
-/// RiichiDeclare 已执行, 必须切牌. 唯一合法下一 op = Discard.
+/// **AwaitRiichiDiscard** — 立直宣告 ([`AtomicOp::RiichiDeclare`]) 已执行,
+/// 必须紧接着切牌.
+///
+/// 立直规则要求宣告与切牌是 *逻辑上不可分* 的两步. engine 把它拆成两个 op,
+/// 但用 type-state 限定中间不能插入其它操作 (除了切牌就是 [`OpError::IllegalForPhase`]).
+///
+/// `last_drawn` 必为 `Some` (立直前提是刚摸牌, 用 `Tile` 直接表达).
+/// 切牌时检查必须切某张听牌 ([`OpError::NotTenpaiForRiichi`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwaitRiichiDiscardState {
     pub common: CommonRound,
+    /// 立直方.
     pub turn: Seat,
+    /// 立直瞬间手中刚摸的那张. 玩家可以切此牌 (摸切) 也可以切手中其它能听的牌.
     pub last_drawn: Tile,
 }
 
-/// 杠 (明杠 / 暗杠 / 加杠) 刚执行, 必须摸岭上. 唯一合法下一 op = RinshanDraw.
+/// **AwaitRinshanDraw** — 任何杠 (Ankan / Shouminkan / Minkan) 后, 必须从死墙
+/// 岭上区摸一张. 唯一合法 op = [`AtomicOp::RinshanDraw`].
+///
+/// driver 通常自动喂入. 单独建模这个 phase 让录像 / 抢杠 (Chankan) 等场景
+/// 有明确 hook 点 (虽然当前 engine 抢杠未实现).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwaitRinshanDrawState {
     pub common: CommonRound,
+    /// 杠完即将岭上摸的家.
     pub turn: Seat,
 }
 
-/// 当前家已切牌, 等其它玩家是否鸣 (Pon / Chi / Minkan / Ron) 或 Pass.
+/// **AwaitCalls** — 当前家已切牌, 鸣牌窗口 (鳴き / Naki window) 打开.
+///
+/// 其它 3 家可选: 碰 ([`AtomicOp::Pon`]) / 吃 ([`AtomicOp::Chi`], 限上家) /
+/// 明杠 ([`AtomicOp::Minkan`]) / 荣和 ([`AtomicOp::Ron`]) / 跳过 ([`AtomicOp::Pass`]).
+///
+/// 实际上层 driver 通常按优先级收集所有 3 家响应 ([`legal_ops`] 提供
+/// per-seat 查询), 头跳规则 (Atamahane) 决定多家荣和谁优先.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwaitCallsState {
     pub common: CommonRound,
-    /// 切牌方 + 切的牌. 类型保证 Some.
+    /// 切牌方 + 刚切出的那张牌.
     pub last_discard: (Seat, Tile),
 }
 
-/// 局已结束 (和 / 流局). 不接受任何 op. 持有 RoundResult 供 summarize_round 抽 RoundOutcome.
+/// **RoundEnd** — 局已结束 (和了 / 流局 / 山摸尽).
+///
+/// 不接受任何 op (返 [`OpError::AlreadyEnded`]). 调用方:
+/// 1. 读 [`RoundEndState::result`] 知和家 / 役 / 流局原因
+/// 2. 调 [`summarize_round`] 抽 [`crate::engine::match_state::RoundOutcome`]
+/// 3. 喂给 [`crate::engine::match_state::match_apply`] 更新 MatchState
+/// 4. [`init_round`] 起下一局
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoundEndState {
     pub common: CommonRound,
+    /// 和了 / 流局结果.
     pub result: RoundResult,
 }
 
-/// 公开 RoundState — 外部唯一看到的 round 类型. 内部按 phase 拆 typed state.
+/// 局状态机. **driver 唯一面对的 round 类型**.
+///
+/// 6 个 variant 对应 6 个 phase, 每个 variant 包一个 typed state struct
+/// (字段精确反映该 phase 必有的信息). 详见模块顶部 doc.
+///
+/// # 推进方式
+///
+/// 用 [`round_apply`] 喂 [`AtomicOp`]. 不应直接构造 / mutate variant 内部字段.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RoundState {
+    /// 等摸牌. driver 通常立即喂 [`AtomicOp::Draw`].
     AwaitDraw(AwaitDrawState),
+    /// 等切牌 / 立直 / 自摸 / 杠决策.
     AwaitDiscard(AwaitDiscardState),
+    /// 立直宣告后必须切牌, 唯一合法 op = `Discard`.
     AwaitRiichiDiscard(AwaitRiichiDiscardState),
+    /// 杠后必须岭上摸, driver 通常立即喂 `RinshanDraw`.
     AwaitRinshanDraw(AwaitRinshanDrawState),
+    /// 切牌后鸣牌窗口, 等其它 3 家响应或 Pass.
     AwaitCalls(AwaitCallsState),
+    /// 局已结束 — 调 [`summarize_round`] + [`crate::engine::match_state::match_apply`].
     RoundEnd(RoundEndState),
 }
 
 impl RoundState {
+    /// 取该 phase 的共享字段 (rules / 4 家 / 牌山 / etc.).
     pub fn common(&self) -> &CommonRound {
         match self {
             RoundState::AwaitDraw(s) => &s.common,
@@ -372,9 +506,29 @@ fn hand_contains(player: &PlayerState, tile_id: u16) -> bool {
 // 公开 entry: round_apply / legal_ops / summarize_round / init_round
 // ============================================================
 
-/// 公开 round_apply — engine 暴露的局层转移函数.
-/// 接 untrusted AtomicOp, 内部 dispatch 到 typed state 的 try_op + apply.
-/// 失败时 caller state 不动 (内部已 clone 自 &state).
+/// 局层转移函数 — engine 公开的主 entry point.
+///
+/// 输入当前 [`RoundState`] + 一个 [`AtomicOp`], 返回新 state + 该步 emit 的
+/// [`GameEvent`] 列表 (供 driver / UI / 录像消费).
+///
+/// # 错误模型
+///
+/// - 输入合法 → `Ok((new_state, events))`. caller 应 *替换* 自己的 state,
+///   旧 state 引用应丢弃.
+/// - 输入不合法 → `Err(OpError)`. **caller state 不动** (内部已 clone 自 `&state`).
+///
+/// # 不变量
+///
+/// - 是 *pure function*: 同样 `(state, op)` 永远产生同样输出
+/// - 内部不做副作用 (不打 log, 不 push 录像, 不 mutate input)
+/// - clone 整个 state, 性能 O(n) 但与游戏总步数比可忽略
+///
+/// # Phase 分发
+///
+/// 内部根据 [`RoundState`] variant 分发到对应 typed state 的 `try_op + apply`:
+/// - `AwaitDraw / AwaitDiscard / AwaitRiichiDiscard / AwaitRinshanDraw / AwaitCalls`
+///   → 该 typed state 处理
+/// - `RoundEnd` → 永远返 [`OpError::AlreadyEnded`]
 pub fn round_apply(
     state: &RoundState,
     op: AtomicOp,
@@ -409,30 +563,55 @@ pub fn round_apply(
     }
 }
 
-/// 当前 RoundState 下哪些 AtomicOp 合法 — 给 driver / AI 决策用.
+/// 当前 [`RoundState`] 下合法动作的结构化汇总 — 供 driver / AI 决策用.
 ///
-/// 返回结构汇总各 phase 下可执行算子. 实现思路: 调 try_op 走遍所有可能 op,
-/// 收集成功的. 但当前实现简化: 仅返回结构化能力 (per-player call 选项 +
-/// 自家 self 选项), 不返回完整 AtomicOp 列表.
+/// **不返回完整 [`AtomicOp`] 列表**, 而是按"自家可宣"+"四家可响应"的结构
+/// 让 UI / AI 直接渲染 / 决策. 调用方需要时手动 build [`AtomicOp`] 喂回
+/// [`round_apply`].
+///
+/// # 字段语义
+///
+/// - 前 4 个字段 (`can_tsumo` / `riichi_discards` / `ankan` / `shouminkan`)
+///   仅在 `AwaitDiscard` phase 有意义 — 当前家自己可主动宣的动作
+/// - `calls[seat.index()]` 仅在 `AwaitCalls` phase 有意义 — 各家对刚弃出的牌
+///   可作的响应
+///
+/// 其它 phase 调用 [`legal_ops`] 返默认空 `LegalOps` (所有字段 default).
 #[derive(Debug, Clone, Default)]
 pub struct LegalOps {
-    /// 自家 (turn) 在 AwaitDiscard 阶段可宣的动作 (类似旧 SelfOptions).
+    /// 当前家 (turn) 是否能自摸和了 (考虑了役 / 番符 + 是否有 last_drawn).
     pub can_tsumo: bool,
+    /// 切哪几张可立直成立 (按 kind 去重: 同 kind 只列一张代表). 空 = 不能立直.
     pub riichi_discards: Vec<Tile>,
+    /// 当前家手中可暗杠的 kind 集合 (4 张同 kind 的 kind).
     pub ankan: Vec<TileIndex>,
+    /// 当前家可加杠的 kind 集合 (有副露 Pon 且自手第 4 张).
     pub shouminkan: Vec<TileIndex>,
-    /// 各家在 AwaitCalls 阶段可响应的动作 (类似旧 CallOptions, 4 家分别).
+    /// 各家在 `AwaitCalls` 阶段可响应的动作.
+    /// 索引: `Seat::index()`. 切牌方 (`from`) 的 `PerSeatCalls` 全部 default.
     pub calls: [PerSeatCalls; 4],
 }
 
+/// 单家对刚弃牌 (`AwaitCallsState::last_discard`) 的合法响应集合.
+///
+/// 立直方所有响应都禁 (本 engine 简化), 即对应玩家 `pon` / `chi` / `minkan`
+/// 全 None / 空 vec, `ron` 仍可能 true (立直方仍能荣和).
 #[derive(Debug, Clone, Default)]
 pub struct PerSeatCalls {
+    /// 碰: `Some([t1, t2])` = 鸣方手中可出的两张 (pair). None = 不能碰.
     pub pon: Option<[Tile; 2]>,
+    /// 吃: 多种顺子方案. 例: 弃牌是 5m, 自手有 3m/4m + 4m/6m + 6m/7m
+    /// 三种吃法都列出. 仅上家可吃, 其它家恒为空 vec.
     pub chi: Vec<[Tile; 2]>,
+    /// 明杠: `Some([t1, t2, t3])` = 鸣方手中三张同 kind. None = 不能.
     pub minkan: Option<[Tile; 3]>,
+    /// 是否能荣和.
     pub ron: bool,
 }
 
+/// 计算当前 [`RoundState`] 下的合法动作.
+///
+/// 复杂度近似 O(玩家数 × 手牌数), 单次调用 < 1ms. 是 pure query, 不改 state.
 pub fn legal_ops(state: &RoundState) -> LegalOps {
     let mut ops = LegalOps::default();
     match state {
@@ -561,8 +740,14 @@ pub fn legal_ops(state: &RoundState) -> LegalOps {
     ops
 }
 
-/// 局结束 (RoundState::RoundEnd) 时抽 RoundOutcome 喂给 match_apply.
-/// 其它 phase 返 None.
+/// 抽取局结果给庄层用. 仅 [`RoundState::RoundEnd`] 时返 `Some`, 否则 `None`.
+///
+/// 流局 (Ryuukyoku) 时同时计算 *庄家是否听牌* (dealer_tenpai) — 决定连庄
+/// (Renchan) 还是进局 (i.e. dealer 推到下家). 和了时数据直接来自
+/// [`RoundResult::Win`].
+///
+/// 输出喂给 [`crate::engine::match_state::match_apply`] 推进
+/// [`crate::engine::match_state::MatchState`].
 pub fn summarize_round(state: &RoundState) -> Option<crate::engine::match_state::RoundOutcome> {
     if let RoundState::RoundEnd(s) = state {
         match &s.result {
@@ -595,9 +780,16 @@ pub fn summarize_round(state: &RoundState) -> Option<crate::engine::match_state:
     }
 }
 
-/// 给定 MatchState + seed 创建一局新 RoundState (起手是 AwaitDraw, 等 driver 喂 Draw).
+/// 起一局新的 [`RoundState`].
 ///
-/// 返回的 state.turn = MatchState.dealer (新庄家先摸).
+/// 流程:
+/// 1. 4 家 [`PlayerState::new`] 用 [`MatchState::scores`](crate::engine::match_state::MatchState::scores) 注入分数
+/// 2. [`Wall::shuffled`] 用 `seed` 洗牌 (确定性, 同 seed 同结果, 适合 replay)
+/// 3. 配牌 (Haipai): 13×4 = 52 张分发, 按东→南→西→北轮转
+/// 4. 各家手牌排序 (UI 友好)
+/// 5. 庄家 (`m.dealer`) 进 [`RoundState::AwaitDraw`], 等首张摸牌
+///
+/// `seed` 通常 = 庄 seed XOR 局序号, 让每局牌山可复现且互不相关.
 pub fn init_round(
     m: &crate::engine::match_state::MatchState,
     seed: u64,
@@ -1409,19 +1601,29 @@ typed_op! {
 }
 
 // ============================================================
-// NextXxxState — 各 typed state 转移目标的 enum, 供 typed apply 返回
-// 阶段 5c 实现具体转移逻辑, 这里先占位
+// NextXxxState — typed apply 函数的返回类型
+//
+// 把"该 phase 的 apply 可能转去哪些下一 phase" 编码进类型. 通过 From impl
+// 升回公开 RoundState. 主要价值: 编译期穷尽性检查, 防止 typed apply 返
+// 不该返的 phase (例: AwaitRiichiDiscard 切完只能进 AwaitCalls, 不会进 RoundEnd).
 // ============================================================
 
-/// AwaitDraw 转移可能去向: AwaitDiscard (摸完牌) / RoundEnd (山摸尽 → 流局).
+/// [`AwaitDrawState::apply`] 的可能去向.
+///
+/// - `AwaitDiscard` — 摸到牌, 等切牌
+/// - `RoundEnd` — 牌山摸尽 (`Wall::remaining() == 0`) → 荒牌流局
 #[derive(Debug, Clone)]
 pub enum NextAwaitDrawState {
     AwaitDiscard(AwaitDiscardState),
     RoundEnd(RoundEndState),
 }
 
-/// AwaitDiscard 转移可能去向: Calls (普通切) / RiichiDiscard (立直宣告) /
-/// RinshanDraw (暗杠/加杠) / RoundEnd (自摸).
+/// [`AwaitDiscardState::apply`] 的可能去向 (4 选 1).
+///
+/// - `AwaitCalls` — 普通切牌后等其它 3 家响应
+/// - `AwaitRiichiDiscard` — 立直宣告后, 限定切某张
+/// - `AwaitRinshanDraw` — 暗杠 / 加杠 后, 必须岭上摸
+/// - `RoundEnd` — 自摸和了
 #[derive(Debug, Clone)]
 pub enum NextAwaitDiscardState {
     AwaitCalls(AwaitCallsState),
@@ -1430,23 +1632,30 @@ pub enum NextAwaitDiscardState {
     RoundEnd(RoundEndState),
 }
 
-/// AwaitRiichiDiscard 转移可能去向: Calls (切牌后等鸣).
+/// [`AwaitRiichiDiscardState::apply`] 的可能去向 (单一).
+///
+/// 立直切牌后必然进 [`AwaitCalls`](RoundState::AwaitCalls), 没有其它分支.
+/// (立直切牌不能直接和了, 因为立直瞬间已经过自摸判定.)
 #[derive(Debug, Clone)]
 pub enum NextAwaitRiichiDiscardState {
     AwaitCalls(AwaitCallsState),
 }
 
-/// AwaitRinshanDraw 转移可能去向: AwaitDiscard (摸完岭上) / RoundEnd (岭上摸到导致流局, 罕见).
+/// [`AwaitRinshanDrawState::apply`] 的可能去向.
+///
+/// - `AwaitDiscard` — 岭上摸到, 等鸣方切牌
+/// - `RoundEnd` — 岭上区耗尽 (理论 4 杠子流局, 当前简化为 Howaipai)
 #[derive(Debug, Clone)]
 pub enum NextAwaitRinshanDrawState {
     AwaitDiscard(AwaitDiscardState),
     RoundEnd(RoundEndState),
 }
 
-/// AwaitCalls 转移可能去向:
-/// - AwaitDiscard (Pon/Chi/Minkan 鸣完, 鸣方接切, last_drawn=None)
-/// - AwaitDraw (Pass 没人鸣, 推到下家摸)
-/// - RoundEnd (Ron)
+/// [`AwaitCallsState::apply`] 的可能去向 (3 选 1).
+///
+/// - `AwaitDiscard` — Pon/Chi/Minkan 鸣完, turn 转给鸣方等切牌 (`last_drawn = None`)
+/// - `AwaitDraw` — Pass 4 家都不响应, 推到切牌方下家摸
+/// - `RoundEnd` — Ron 荣和
 #[derive(Debug, Clone)]
 pub enum NextAwaitCallsState {
     AwaitDiscard(AwaitDiscardState),

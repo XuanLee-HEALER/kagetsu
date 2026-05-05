@@ -1,38 +1,85 @@
-//! 番符计算与点数分配.
+//! 番符计算 (役判定 + 番符 + 等级 + 支付分配) 与终局排名.
 //!
-//! 详见 docs/spec/scoring.md
+//! # 日麻计分流程
+//!
+//! 1. 牌型分解 ([`crate::engine::domain::decompose::decompose`]) → 4 面子 + 雀头
+//! 2. 役判定 ([`detect_yaku`]) → `Vec<(Yaku, han)>`
+//! 3. 符 (符 / Fu) 计算 ([`calculate_fu`]) → 雀头 / 待牌 / 面子等加分
+//! 4. 番符 → 基本点 (Basic Points / 基本点)
+//! 5. 基本点 + 庄家 / 自摸 / 本场 → 各家支付 ([`distribute`])
+//!
+//! # 番 (Han) 与 符 (Fu)
+//!
+//! - **番** (翻 / 飜 / Han): 役本身的等级, 越多番点数越高
+//! - **符** (符 / Fu): 牌型细节加分 (雀头 / 待牌 / 面子结构), 单位 10
+//!
+//! 基本点 = `fu × 2^(han + 2)`, 上限 2000. 满贯及以上按 [`ScoreLevel`] 封顶.
 
 use crate::engine::domain::decompose::{Decomposition, Mentsu, WaitKind};
 use crate::engine::domain::meld::{Meld, MeldKind, Seat};
 use crate::engine::domain::yaku::{WinContext, Yaku, detect_yaku};
-use crate::engine::rules::GameRules;
 use crate::engine::player::PlayerState;
+use crate::engine::rules::GameRules;
 
+/// 和了等级 (得点ランク / 得点等级).
+///
+/// 当番符达到一定阈值时, 基本点封顶为固定值, 不再按 `fu × 2^(han+2)` 算.
+///
+/// | Level | 番数阈值 | 基本点 | 子家荣和 (非庄) |
+/// |-------|----------|-------|----------------|
+/// | Normal | 1-4 番 | fu×2^(han+2), ≤2000 | 实际计算 |
+/// | Mangan (満貫) | 5 番 / 4番40符 / 3番70符 | 2000 | 8000 |
+/// | Haneman (跳満) | 6-7 番 | 3000 | 12000 |
+/// | Baiman (倍満) | 8-10 番 | 4000 | 16000 |
+/// | Sanbaiman (三倍満) | 11-12 番 | 6000 | 24000 |
+/// | KazoeYakuman (数え役満) | 13+ 番 (累计) | 8000 | 32000 |
+/// | Yakuman(n) (役満) | 役满 n 倍 | 8000 × n | 32000 × n |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ScoreLevel {
+    /// 普通和了 (低于满贯).
     Normal,
+    /// 满贯 (満貫 / Mangan). 5 番 / 4 番 40 符 / 3 番 70 符.
     Mangan,
+    /// 跳满 (跳満 / Haneman). 6-7 番.
     Haneman,
+    /// 倍满 (倍満 / Baiman). 8-10 番.
     Baiman,
+    /// 三倍满 (三倍満 / Sanbaiman). 11-12 番.
     Sanbaiman,
+    /// 累计役满 (数え役満 / Kazoe Yakuman). 13+ 番累计.
+    /// 仅 `rules.kazoe_yakuman = true` 时启用.
     KazoeYakuman,
-    /// n 倍役满.
+    /// 役满 (役満 / Yakuman). 参数 = 倍数 (1 = 单倍, 2 = 双倍).
+    /// 双倍役满见 [`crate::engine::rules::GameRules::double_yakuman`].
     Yakuman(u8),
 }
 
+/// 评分完整结果 — [`evaluate`] 返回值, 写入 [`crate::engine::round_state::RoundResult::Win::score`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScoreResult {
+    /// 总番数 (含 dora / 赤宝牌 / 里宝牌).
     pub han: u32,
+    /// 总符数 (向上取整到 10, 最低 30 — 七对子固定 25, 国士 30 占位).
     pub fu: u32,
+    /// 役列表: 每条 `(役, 该役番数)`. 含真役 + 宝牌 (Dora / AkaDora / UraDora).
     pub yaku: Vec<(Yaku, u32)>,
+    /// 基本点 (基本点 / Basic Points). distribute 据此乘 4/6/2/1 算各家支付.
     pub base_points: u32,
+    /// 和了等级 (满贯 / 跳满 / 役满 / 等).
     pub level: ScoreLevel,
 }
 
+/// 单笔点数转移. `from` 付给 `to` `amount` 点.
+///
+/// 特殊: `from == to == winner` 表示立直棒池清算给和家 (self-payment).
+/// [`crate::engine::match_state::match_apply`] 处理时仅给 `to` 加分, 不从 `from` 扣.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PaymentDistribution {
+    /// 付款方 (放铳家 / 子家自摸时的庄家 / etc.).
     pub from: Seat,
+    /// 收款方 (通常 = 和家).
     pub to: Seat,
+    /// 转移点数 (正数). 已含本场 +300 / 立直棒 +1000.
     pub amount: i32,
 }
 
@@ -315,20 +362,32 @@ pub fn distribute(
     out
 }
 
-/// 终局后某家的最终成绩(返点 + uma + oka, 单位 K = 千点).
+/// 终局某家的最终成绩 — 返点 + 赌马 (uma) + 头名奖 (oka), 单位 K (千点).
+///
+/// 由 [`final_ranking`] 计算返回 (整庄结束时调).
+///
+/// # 公式
+///
+/// - `return_diff_k` = (`raw_score` - `target_score`) / 1000
+/// - `uma` = 按 1..=4 位从 `rules.uma[0..4]` 取
+/// - `oka` = 头名独得 (其余 0): `(target_score - starting_score) × 4 / 1000`
+/// - `final_score` = return_diff_k + uma + oka
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Ranking {
+    /// 该家座位.
     pub seat: Seat,
-    /// 1..=4
+    /// 顺位 (1..=4). 1 = 第一名.
     pub place: u8,
+    /// 整庄结束时的原始持点.
     pub raw_score: i32,
-    /// 返点差 = (raw_score - target_score), 单位千点(已除 1000).
+    /// 返点差 = (raw_score - target_score) / 1000, 单位千点.
+    /// 例: 34000 raw - 30000 target = +4 K.
     pub return_diff_k: i32,
-    /// uma (单位 K, 来自 config.uma).
+    /// 赌马 (ウマ / Uma) 加减分, 单位 K. 来自 [`GameRules::uma`].
     pub uma: i32,
-    /// oka (单位 K, 仅 1 位非 0).
+    /// 头名奖 (オカ / Oka), 单位 K. 仅 1 位非 0.
     pub oka: i32,
-    /// final = return_diff_k + uma + oka.
+    /// 最终得分 = `return_diff_k + uma + oka`.
     pub final_score: i32,
 }
 

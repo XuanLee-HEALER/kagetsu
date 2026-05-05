@@ -1,49 +1,79 @@
-//! 和牌型拆解.
+//! 和牌型 (和了形 / Agari-kei) 分解.
 //!
-//! 三种和牌结构:
-//! - 标准型: 4 面子 + 1 雀头
-//! - 七对子: 7 组不同对子
-//! - 国士无双: 13 种幺九各一 + 任一为雀头
+//! 日麻三种合法和牌结构:
+//! - **标准型** (4 面子 + 1 雀头, 14 张): 最常见. 4 个 [`Mentsu`] + 1 对子.
+//! - **七对子** (七対子 / Chiitoitsu): 7 组不同的对子.
+//! - **国士无双** (国士無双 / Kokushi-musou): 13 种幺九牌各一 + 任一为雀头.
 //!
-//! 算法详见 docs/spec/winning-shapes.md
+//! [`decompose`] 函数枚举所有可能的拆解 (一手牌可能有多解, 例: 平和能拆成
+//! 不同顺子组合), 调用方按 yaku 评估选最优.
+//!
+//! 算法详见 `docs/spec/winning-shapes.md`.
 
 use crate::engine::domain::meld::Meld;
 use crate::engine::domain::tile::TileIndex;
 
+/// 面子 (面子 / Mentsu) — 标准型和牌的基本组成单位.
+///
+/// 4 个面子 + 1 雀头构成 14 张和牌. 鸣牌副露也算面子, 但本 enum 仅描述
+/// 暗手分解出的面子 (副露见 [`Meld`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mentsu {
-    /// 顺子(同花色连续三张). 索引为起始牌.
+    /// 顺子 (順子 / Shuntsu) — 同花色连续 3 张. 参数 = 起始牌 (例: 3m4m5m → `Shuntsu(3m)`).
     Shuntsu(TileIndex),
-    /// 刻子. (kind, concealed). 拆解阶段统一标 concealed=true,
-    /// 由调用方在荣和+双碰时修正为明刻.
+    /// 刻子 (刻子 / Koutsu) — 同 kind 3 张.
+    /// 参数: `(kind, concealed)`. 拆解阶段统一标 `concealed=true`, 调用方在
+    /// 荣和 + 双碰待 时修正为明刻.
     Koutsu(TileIndex, bool),
-    /// 杠子. (kind, concealed).
+    /// 杠子 (槓子 / Kantsu) — 同 kind 4 张.
+    /// 参数: `(kind, concealed)`. 暗杠 = true, 明杠 / 加杠 = false.
     Kantsu(TileIndex, bool),
 }
 
+/// 听牌型 (待ち / Wait / Machi) — 和牌时填入 `winning_tile` 那张的等待结构.
+///
+/// 5 种待型, 影响符 (Fu) 计算 + 平和 (Pinfu) 役判定 (仅 Ryanmen 算平和).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitKind {
-    Tanki,   // 单骑
-    Kanchan, // 嵌张
-    Penchan, // 边张
-    Ryanmen, // 两面
-    Shanpon, // 双碰
+    /// 单骑 (単騎 / Tanki) — 等雀头. +2 符.
+    Tanki,
+    /// 嵌张 (嵌張 / Kanchan) — 顺子中间缺一张, 例: 3m_5m 等 4m. +2 符.
+    Kanchan,
+    /// 边张 (辺張 / Penchan) — 顺子边端缺一张, 例: 1m2m 等 3m, 8m9m 等 7m. +2 符.
+    Penchan,
+    /// 两面 (両面 / Ryanmen) — 顺子两端可和, 例: 4m5m 等 3m/6m. 0 符 (平和必要条件).
+    Ryanmen,
+    /// 双碰 (双碰 / Shanpon) — 两对中任一对升级成刻子, 例: 4m4m 5p5p 等 4m 或 5p.
+    Shanpon,
 }
 
+/// 和牌拆解结果 — [`decompose`] 输出.
 #[derive(Debug, Clone)]
 pub enum Decomposition {
+    /// 标准型: 4 面子 + 1 雀头. 含具体的待型 + 和牌张.
     Standard {
+        /// 雀头 (頭 / Atama / 对子).
         pair: TileIndex,
+        /// 4 个面子.
         mentsu: Vec<Mentsu>,
+        /// 和牌张 kind (用于鉴定该张所在面子是否明刻).
         winning_tile: TileIndex,
+        /// 听牌型.
         wait: WaitKind,
     },
+    /// 七对子型. 7 组不同对子 + 待对子的最后 1 张 = 14 张.
     Chiitoitsu {
+        /// 7 个雀头 (含和了对).
         pairs: [TileIndex; 7],
+        /// 和牌张 (与某 pair 的另 1 张配对).
         winning_tile: TileIndex,
     },
+    /// 国士无双型 (国士無双). 13 种幺九各 1 张 + 任 1 张作雀头.
     Kokushi {
+        /// 和牌张.
         winning_tile: TileIndex,
+        /// 是否 13 面待 (即手牌已是 13 种幺九各 1 张, 任和 1 张).
+        /// `true` 时升级为双倍役满 (若 `rules.double_yakuman` 开).
         thirteen_wait: bool,
     },
 }

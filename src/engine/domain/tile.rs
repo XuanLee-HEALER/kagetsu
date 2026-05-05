@@ -1,42 +1,63 @@
-//! 牌张定义
+//! 牌 (Tile / 牌 / Hai) 定义.
 //!
-//! 一副牌 136 张:
-//! - 数牌(suupai): 万 9 × 4 + 筒 9 × 4 + 索 9 × 4 = 108
-//! - 字牌(jihai): 风 4 × 4 + 三元 3 × 4 = 28
+//! 一副日麻牌 136 张:
+//! - **数牌** (数牌 / 数牌 / Suupai): 万子 / 筒子 / 索子 各 9 种 × 4 = 108 张
+//! - **字牌** (字牌 / 字牌 / Jihai): 风牌 (东南西北) 4 种 + 三元牌 (白發中) 3 种 = 7 种 × 4 = 28 张
 //!
-//! 加 3 张赤宝牌时: 各花色 5 各替换 1 张为红色版本.
+//! *赤宝牌* (赤ドラ / Aka-Dora): 各花色的 5 各替换 1 张为红色版本 (5m / 5p / 5s).
+//! 实战常加 3 张赤五, 总数仍 136 但每副有 3 张红 5.
 //!
-//! 用 `TileIndex` 表示"种类"(0..34), 用 `Tile` 表示具体某一张(带 id, 用于区分赤五和重复种).
+//! # Tile vs TileIndex
+//!
+//! - [`TileIndex`] = "牌的种类" (0..34), 不区分同 kind 的 4 张. 用于评分 / 役判定.
+//! - [`Tile`] = "具体某一张" (带 `id` 唯一标识, `red` 标志赤宝牌). 用于鸣牌 /
+//!   弃牌 / 录像 — 需要精确定位 *哪一张* 时.
 
 use serde::{Deserialize, Serialize};
 
-/// 花色.
+/// 花色 (Suit).
+///
+/// 数牌 3 种 (Man / Pin / Sou) + 字牌 2 种 (Wind / Dragon).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Suit {
-    Man,    // 万
-    Pin,    // 筒
-    Sou,    // 索
-    Wind,   // 风(东南西北)
-    Dragon, // 三元(白发中)
+    /// 万子 (萬子 / マンズ / Manzu) — 1m..9m.
+    Man,
+    /// 筒子 (筒子 / ピンズ / Pinzu) — 1p..9p.
+    Pin,
+    /// 索子 (索子 / ソウズ / Souzu) — 1s..9s.
+    Sou,
+    /// 风牌 (風牌 / カゼハイ / Kazehai) — 东南西北 (Ton/Nan/Sha/Pee).
+    Wind,
+    /// 三元牌 (三元牌 / サンゲンパイ / Sangenpai) — 白發中 (Haku/Hatsu/Chun).
+    Dragon,
 }
 
-/// 牌的种类索引 (0..34).
+/// 牌种类索引 (0..34). **同 kind 的 4 张共用同一 TileIndex**.
 ///
-/// | 范围   | 含义        |
-/// |-------|-------------|
-/// | 0..9  | 1m..9m      |
-/// | 9..18 | 1p..9p      |
-/// |18..27 | 1s..9s      |
-/// |27..31 | 东 南 西 北 |
-/// |31..34 | 白 發 中    |
+/// 编码:
+///
+/// | 范围      | 含义            |
+/// |-----------|-----------------|
+/// | 0..9      | 1m..9m (万子)   |
+/// | 9..18     | 1p..9p (筒子)   |
+/// | 18..27    | 1s..9s (索子)   |
+/// | 27..31    | 东 / 南 / 西 / 北 |
+/// | 31..34    | 白 / 發 / 中    |
+///
+/// 常量 [`TileIndex::EAST`] / [`TileIndex::HAKU`] 等提供命名访问.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TileIndex(pub u8);
 
-/// 一张具体的牌.
+/// 一张具体的牌. 带唯一 `id` 用于区分同 kind 的 4 张, 区分红 5 vs 普通 5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Tile {
+    /// 种类 (0..34).
     pub kind: TileIndex,
+    /// 是否赤宝牌 (红色版本). 仅 5m / 5p / 5s 可能为 true.
+    /// 红 5 算 1 番宝牌但牌种仍是普通 5.
     pub red: bool,
+    /// 牌山中唯一 id (0..136). 用于精确定位某张牌 — 例: 切牌 / 鸣牌时确定
+    /// 是 4 张 5m 中的哪一张, 或区分两张普通 5m vs 一张红 5m.
     pub id: u16,
 }
 

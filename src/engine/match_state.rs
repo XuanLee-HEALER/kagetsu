@@ -1,7 +1,34 @@
-//! 庄 (Match) 层 — 跨局累积 state + 转移函数 match_apply.
+//! 庄 (Match / 半庄 / 一庄 / 東風戦) 层状态 + 转移函数.
 //!
-//! Match 是一庄完整比赛 (东风 / 半庄 / 一庄). 一庄含多局 (Round), 每局结束生成
-//! `RoundOutcome` 喂回来推进 MatchState. 见 docs/design/abstract-model.md §Layer 1.
+//! 一庄 (Match) 是一次完整比赛 — 4 家从同一起始分数出发, 经过若干局
+//! ([`crate::engine::round_state::RoundState`]) 直到长度规则 (
+//! [`crate::engine::rules::LengthRule`]) 满足. 比赛结束时 4 家分数即最终
+//! 排名依据.
+//!
+//! # 长度规则
+//!
+//! - **东风战** (Tonpuusen / 東風戦): 仅东风圈, 东 1 → 东 4 共 4 局
+//! - **半庄** (Hanchan / 半荘): 东 1 → 东 4 → 南 1 → 南 4 共 8 局
+//! - 一庄 (Ichijou / 一荘): 东南西北全跑, 16 局 — 本 engine 不支持
+//!
+//! # 庄/局关系
+//!
+//! 庄 (Match) 是 *外层 fold*, 局 (Round) 是 *内层 fold*:
+//!
+//! ```text
+//! match_state = ROUNDS.fold(match_apply, init_match)
+//! round_state = OPS.try_fold(round_apply, init_round)
+//! ```
+//!
+//! [`MatchState`] 在两局间充当 canonical 数据源:
+//! 1. 上局结束 → [`crate::engine::round_state::summarize_round`] 抽 [`RoundOutcome`]
+//! 2. [`match_apply`] 用 outcome 更新 scores / dealer / honba / kyoku / round_wind
+//! 3. 检测是否整庄结束 (`ended = true`)
+//! 4. 若没结束, [`crate::engine::round_state::init_round`] 起下局
+//!
+//! # 引用
+//!
+//! 设计文档: `docs/design/abstract-model.md` §Layer 1
 
 use crate::engine::domain::meld::Seat;
 use crate::engine::rules::{GameRules, LengthRule};
@@ -11,30 +38,45 @@ use serde::{Deserialize, Serialize};
 
 /// 跨局累积的庄状态.
 ///
-/// 局间 canonical 数据源. 局开始时由 init_round 注入 RoundState 的 CommonRound,
-/// 局结束时 summarize_round 抽 RoundOutcome 喂回 match_apply 更新本 struct.
+/// 一庄比赛的 *canonical 数据源*. 局间维护 4 家分数 + 当前庄家 + 局序号 +
+/// 本场 + 立直棒池 + 整庄是否结束.
+///
+/// # 与 RoundState 的关系
+///
+/// MatchState 数据在局开始时通过 [`crate::engine::round_state::init_round`]
+/// *拷贝* 进 [`crate::engine::round_state::CommonRound`]. 局内变化 (摸牌 / 切牌 /
+/// 立直 / 等) 都改 RoundState, *不直接改* MatchState. 局结束后 [`match_apply`]
+/// 把 [`RoundOutcome`] 投影回 MatchState — 这是 outcome 唯一能改 MatchState 的入口.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchState {
-    /// 4 家分数, 索引 = Seat::index().
+    /// 4 家分数 (持点 / Mochiten). 索引 = `Seat::index()` (East=0, South=1, ...).
+    /// 初始 = `rules.starting_score` (默认 25000), 整庄分数和恒定为 100000
+    /// (除供托外, 杠点 / 立直棒等都在 4 家间转移).
     pub scores: [i32; 4],
-    /// 当前庄家.
+    /// 当前庄家 (亲家 / Oya). 庄家和 / 流局听牌时连庄 (Renchan), 否则下庄.
     pub dealer: Seat,
-    /// 场风 (东 / 南 / 西 / 北).
+    /// 场风 (場風 / Bakaze) — 决定字牌役牌身份 + 整庄进度.
     pub round_wind: RoundWind,
-    /// 局序号 (1..=4 in each round_wind).
+    /// 局序号 (局数 / Kyoku). 取值 `1..=4`, 每个 `round_wind` 内独立编号.
+    /// 例: 半庄共 8 局 = 东 1/2/3/4 + 南 1/2/3/4.
     pub kyoku: u8,
-    /// 本场数. 庄家和 / 流局连庄 +1, 子家和 0.
+    /// 本场数 (本場 / Honba). 庄家连和 / 流局每次 +1, 子家和清零, 进局清零.
+    /// 影响和点 (每本场 +300 自摸 / +300 荣和).
     pub honba: u8,
-    /// 桌面累积立直棒池 (× 1000 点). 和家整池领走, 流局保留.
+    /// 立直棒池 (供托 / Kyoutaku). 累积尚未被领走的 1000 点立直棒.
+    /// 局内有人立直 → +1; 和家通过 payments 整池领走; 流局保留到下局.
     pub riichi_sticks_pool: u32,
-    /// 整庄规则参数 (开庄冻结, 整庄不变).
+    /// 整庄规则参数. 开庄时冻结, 整庄内不允许修改.
     pub rules: GameRules,
-    /// 是否整庄结束.
+    /// 是否整庄结束. `true` 时不应再调 [`match_apply`] / `init_round`,
+    /// 改用 [`crate::engine::score::final_ranking`] 算最终排名.
     pub ended: bool,
 }
 
 impl MatchState {
     /// 整庄初始 state.
+    ///
+    /// 4 家初始分数 = `rules.starting_score`, 庄家 = East, 起 *东 1 局 0 本场*.
     pub fn new(rules: GameRules) -> Self {
         let starting = rules.starting_score;
         Self {
@@ -50,35 +92,54 @@ impl MatchState {
     }
 }
 
-/// 一局的产出, 喂给 match_apply 推进 MatchState.
+/// 一局结束的庄层产出. 由 [`crate::engine::round_state::summarize_round`] 抽出,
+/// 喂给 [`match_apply`] 推进 [`MatchState`].
+///
+/// 与 [`crate::engine::round_state::RoundResult`] 的区别: `RoundResult` 是局
+/// *内部* 视角 (含完整 ScoreResult / 役), `RoundOutcome` 是 *庄层视角* (只关心
+/// 谁赢 + 怎么算分 + 是否连庄).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RoundOutcome {
-    /// 和牌局.
+    /// 和了局.
     Win {
+        /// 和家.
         winner: Seat,
+        /// `true` = 自摸; `false` = 荣和.
         is_tsumo: bool,
-        /// 放铳家 (荣和才 Some, 自摸 None).
+        /// 放铳家. 自摸 `None` (4 家分摊 / 庄家平摊), 荣和 `Some(切牌方)`.
         loser: Option<Seat>,
-        /// 由 score::distribute 计算的支付列表 (含立直棒转移给和家的 self-payment).
+        /// 完整支付列表 (由 [`crate::engine::score::distribute`] 算出).
+        /// 含立直棒转移给和家的 *self-payment* (from == to == winner) — 表示
+        /// 立直棒池清算给和家.
         payments: Vec<PaymentDistribution>,
     },
     /// 流局.
     Ryuukyoku {
+        /// 流局类型 (本 engine 当前仅 `Howaipai` 真触发).
         kind: RyuukyokuKind,
-        /// 庄家是否听牌 (决定连庄 vs 进局).
+        /// 庄家是否听牌 (Tenpai). 决定本局连庄 vs 进局:
+        /// - 听 → `dealer` 不变, `honba += 1` (连庄)
+        /// - 不听 → `dealer = dealer.next()`, `honba += 1` (进局)
+        ///
+        /// 注: 听牌罚符 (听者从不听者收 ±1000~3000) 当前未实现, future work.
         dealer_tenpai: bool,
-        // 注: 听牌罚符 (1-3 听者间 ±1000~3000) MVP 未实现, 留 TODO.
-        // tenpai_payments: Vec<PaymentDistribution>,
     },
 }
 
-/// 庄层转移函数: 用 RoundOutcome 推进 MatchState.
+/// 庄层转移函数 — 用 [`RoundOutcome`] 推进 [`MatchState`].
 ///
-/// 应用顺序:
-/// 1. 把 payments 应用到 scores (含立直棒).
-/// 2. 立直棒池清算 (Win → 0, Ryuukyoku → 不变).
-/// 3. 决定 dealer / honba / kyoku / round_wind 推进.
-/// 4. 检测整庄是否结束.
+/// pure function (不改 input, 返新 state).
+///
+/// # 应用顺序
+///
+/// 1. 把 `payments` 应用到 scores (含立直棒 self-payment)
+/// 2. 立直棒池清算: `Win` → 0 (和家领走); `Ryuukyoku` → 不变 (留下局)
+/// 3. 庄家 / 本场 / 局序号 / 场风 推进:
+///    - 庄家和 → 连庄, `honba += 1`
+///    - 子家和 → 进局, `honba = 0`, `dealer = dealer.next()`
+///    - 流局听 → 连庄, `honba += 1`
+///    - 流局不听 → 进局, `honba += 1`, `dealer = dealer.next()`
+/// 4. 检测整庄是否结束 (按 `LengthRule`)
 pub fn match_apply(state: &MatchState, outcome: RoundOutcome) -> MatchState {
     let mut s = state.clone();
     match outcome {
@@ -142,7 +203,9 @@ fn advance_kyoku(s: &mut MatchState) {
     }
 }
 
-/// 检测整庄是否结束. advance_kyoku 内部已显式 set ended, 此处不动 (保留作扩展点).
+/// 是否整庄结束. 当前实现仅返 `s.ended` (`advance_kyoku` 内部已显式 set).
+///
+/// 留作扩展点 — 未来若加规则 (例: 任何家分数 < 0 即终止), 可在此实现.
 pub fn check_match_ended(s: &MatchState) -> bool {
     s.ended
 }

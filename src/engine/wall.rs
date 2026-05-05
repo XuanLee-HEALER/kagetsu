@@ -1,10 +1,27 @@
-//! 牌山 + 王牌 + dora 指示牌.
+//! 牌山 (牌山 / Wall / Yama) — 含活牌区 / 死墙 / 宝牌指示.
 //!
-//! 一副牌共 136 张, 王牌固定 14 张:
-//! - 4 张岭上(rinshan)
-//! - 5 对 dora 指示牌(上层为表 dora, 下层为里 dora)
+//! # 牌山结构 (136 张总数)
 //!
-//! 活牌山可摸 `136 - 14 - 13×4 = 70` 张.
+//! - **活牌区** (live wall / 山): 122 张, 摸牌从这里 pop. 配牌 13×4 = 52 张消耗后,
+//!   剩 70 张是真正能摸的 (荒牌流局 / 海底牌 / Haitei 都基于这个).
+//! - **死墙** (王牌 / Wanpai / 死牌): 14 张, 不参与正常摸牌. 内部:
+//!   - **岭上区** (嶺上 / Rinshan): 4 张, 给杠后摸 ([`Wall::rinshan_drawn`])
+//!   - **宝牌区** (ドラ / Dora): 10 张 (5 对). 偶数索引 = 表宝牌指示牌,
+//!     奇数索引 = 里宝牌 (Ura-Dora) 指示牌
+//!
+//! # Dora 翻牌规则
+//!
+//! - 局开始翻第 1 枚表宝牌指示
+//! - 每次杠后翻新一枚 (新ドラ / Shin-Dora)
+//! - 立直方和了时翻全部已翻位置对应的里宝牌
+//!
+//! # API: `&mut self` vs `consume self`
+//!
+//! 提供两套 API:
+//! - **mut 版** (`draw` / `rinshan_draw` / `reveal_next_dora`): legacy 风格,
+//!   原 GameState 用.
+//! - **pure 版** (`drawn` / `rinshan_drawn` / `revealed_next_dora`):
+//!   consume self 返新 Wall, type-state apply 内部用.
 
 use crate::engine::domain::tile::{Tile, standard_set};
 use rand::SeedableRng;
@@ -16,15 +33,18 @@ const DEAD_WALL_LEN: usize = 14;
 const RINSHAN_LEN: usize = 4;
 const DORA_INDICATORS_MAX: usize = 5;
 
+/// 牌山实例. 由 [`Wall::shuffled`] 用确定性 seed 构造.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wall {
-    /// 活牌山(从尾部摸: pop()).
+    /// 活牌区 (Live wall). 摸牌从尾部 pop. 配牌后剩 70 张.
     live: Vec<Tile>,
-    /// 王牌区(共 14 张). 索引约定:
-    /// `[0..4]` 岭上(从 0 开始消耗),
-    /// `[4..14]` dora 区, 偶数 index = 表 dora 表牌, 奇数 = 对应里 dora.
+    /// 死墙 (Dead wall, 14 张). 内部分布:
+    /// - `[0..4]` 岭上区 (Rinshan), 杠后从 index 0 起消耗
+    /// - `[4..14]` 宝牌区, 偶数 = 表宝牌指示, 奇数 = 对应里宝牌 (Ura-Dora) 指示
     dead: Vec<Tile>,
+    /// 已用岭上张数 (0..=4).
     rinshan_used: usize,
+    /// 已翻表宝牌指示张数 (1..=5). 局开始 = 1, 每次杠后 +1, 上限 5.
     dora_revealed: usize,
 }
 
