@@ -3,6 +3,33 @@
 设计概念见 [`abstract-model.md`](abstract-model.md). 本文档是实施侧的范围 / 步骤 /
 风险登记.
 
+## 当前进度 (commits 在 `pure-fn-refactor` 分支)
+
+✅ **阶段 1-5 完成** (engine 核心重构):
+- 阶段 1: domain 下沉为 engine::domain 子模块
+- 阶段 2: Wall pure 化 (新方法共存)
+- 阶段 3: AtomicOp + OpError + typed_op! 宏
+- 阶段 4: MatchState + match_apply
+- 阶段 5a-d: type-state RoundState (AwaitDraw / AwaitDiscard / AwaitRiichiDiscard /
+  AwaitRinshanDraw / AwaitCalls / RoundEnd) + try_op (validity gate) + typed apply
+  (total + emit events) + 公开 entry (round_apply / legal_ops / summarize_round /
+  init_round)
+
+测试: 436 lib 测试全绿 (新增 ~30 个覆盖 op / match_state / round_state).
+
+⏸️ **阶段 6-8 (UI 适配 + 删旧) — 留作 follow-up**:
+- 阶段 6a: UI 单机驱动切换 (game.rs 74 处 GameState 引用 + 结构性大改)
+- 阶段 6b: 其它调用方签名层适配
+- 阶段 7: 删旧 GameState / do_*
+- 阶段 8: 收尾 + 手动单机验证
+
+**理由**: stage 6a 是大手术 (跨 paint/handle_event/advance 多个互联模块), 中间
+状态可能编不过. 适合在专注的小段时间内逐 chunk 推进 + 手动 smoke test, 不适合
+连续自主跑.
+
+**新旧 API 共存**: 当前 main + pure-fn-refactor 分支都能 cargo build, 单机游戏
+仍走老 GameState. 新 RoundState/MatchState 已就绪但 UI 未对接.
+
 ---
 
 ## 0. 动机 + 目标
