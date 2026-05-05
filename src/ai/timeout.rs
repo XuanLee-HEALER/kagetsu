@@ -5,11 +5,66 @@
 //! 其他阶段 Pass.
 
 use crate::engine::domain::action::Action;
-use crate::engine::phase::Phase;
-use crate::legacy_state::GameState;
+use crate::engine::round_state::RoundState;
 
 /// 玩家单步思考超时时执行的默认动作.
-pub fn default_action_on_timeout(state: &GameState) -> Action {
+pub fn default_action_on_timeout(state: &RoundState) -> Action {
+    match state {
+        RoundState::AwaitDiscard(s) => {
+            let me = s.turn;
+            if let Some(t) = s.last_drawn {
+                return Action::Discard(t);
+            }
+            if let Some(&t) = s.common.players[me.index()].hand.closed.last() {
+                return Action::Discard(t);
+            }
+            Action::Pass
+        }
+        RoundState::AwaitRiichiDiscard(s) => Action::Discard(s.last_drawn),
+        _ => Action::Pass,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::match_state::MatchState;
+    use crate::engine::op::AtomicOp;
+    use crate::engine::round_state::{init_round, round_apply};
+    use crate::engine::rules::GameRules;
+
+    #[test]
+    fn timeout_default_discards_last_drawn() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        let drawn = r
+            .last_drawn()
+            .expect("Draw 后 AwaitDiscard 必有 last_drawn");
+        let action = default_action_on_timeout(&r);
+        match action {
+            Action::Discard(t) => assert_eq!(t.id, drawn.id, "应切刚摸到的那张"),
+            other => panic!("期望 Discard, 得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn timeout_default_pass_outside_discard_phase() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 0);
+        // AwaitDraw, 应 Pass.
+        assert!(matches!(default_action_on_timeout(&r), Action::Pass));
+    }
+}
+
+// ──────────────────────────────────────────────────────────
+// Legacy bridge — net 模块过渡期.
+// ──────────────────────────────────────────────────────────
+
+#[allow(deprecated)]
+#[doc(hidden)]
+pub fn default_action_on_timeout_legacy(state: &crate::legacy_state::GameState) -> Action {
+    use crate::engine::phase::Phase;
     match state.phase {
         Phase::AwaitDiscard => {
             let me = state.turn;
@@ -22,30 +77,5 @@ pub fn default_action_on_timeout(state: &GameState) -> Action {
             Action::Pass
         }
         _ => Action::Pass,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::engine::rules::GameRules;
-
-    #[test]
-    fn timeout_default_discards_last_drawn() {
-        let mut g = GameState::new(GameRules::default());
-        g.start_round(42);
-        let drawn = g.do_draw().unwrap();
-        let action = default_action_on_timeout(&g);
-        match action {
-            Action::Discard(t) => assert_eq!(t.id, drawn.id, "应切刚摸到的那张"),
-            other => panic!("期望 Discard, 得到 {:?}", other),
-        }
-    }
-
-    #[test]
-    fn timeout_default_pass_outside_discard_phase() {
-        let g = GameState::new(GameRules::default());
-        // Phase::Deal
-        assert!(matches!(default_action_on_timeout(&g), Action::Pass));
     }
 }

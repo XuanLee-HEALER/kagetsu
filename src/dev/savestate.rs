@@ -1,10 +1,14 @@
-//! GameState savestate (dev-only).
+//! Savestate (dev-only).
 //!
 //! F5 = quick save → `savestates/quick.json`,
 //! F9 = quick load ← 同文件.
 //! 路径: `dirs::config_dir() / tui-majo / savestates / <slot>.json`.
+//!
+//! 泛型实现, 不绑定具体 state 类型: caller (UI 层) 决定要序列化什么 — 现在是
+//! GameEngine, 早期是 GameState. 只要实现 Serialize / DeserializeOwned 即可.
 
-use crate::legacy_state::GameState;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::path::PathBuf;
 
 /// savestates 目录, 不存在时创建.
@@ -26,16 +30,16 @@ fn slot_path(slot: &str) -> std::io::Result<PathBuf> {
     Ok(p)
 }
 
-/// 写一份 GameState 到 `<slot>.json`, 返回最终路径.
-pub fn save(state: &GameState, slot: &str) -> std::io::Result<PathBuf> {
+/// 写一份 state 到 `<slot>.json`, 返回最终路径.
+pub fn save<T: Serialize>(state: &T, slot: &str) -> std::io::Result<PathBuf> {
     let path = slot_path(slot)?;
     let s = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
     std::fs::write(&path, s)?;
     Ok(path)
 }
 
-/// 从 `<slot>.json` 读 GameState.
-pub fn load(slot: &str) -> std::io::Result<GameState> {
+/// 从 `<slot>.json` 读 state.
+pub fn load<T: DeserializeOwned>(slot: &str) -> std::io::Result<T> {
     let path = slot_path(slot)?;
     let s = std::fs::read_to_string(&path)?;
     serde_json::from_str(&s).map_err(std::io::Error::other)
@@ -44,20 +48,23 @@ pub fn load(slot: &str) -> std::io::Result<GameState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::rules::GameRules;
+
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    struct DummyState {
+        seed: u64,
+        kyoku: u8,
+    }
 
     #[test]
-    fn roundtrip_initial_state() {
-        let mut g = GameState::new(GameRules::default());
-        g.start_round(42);
-        // 用临时 slot 名避免冲突.
+    fn roundtrip_dummy_state() {
+        let g = DummyState {
+            seed: 42,
+            kyoku: 3,
+        };
         let slot = format!("__test_{}", std::process::id());
         save(&g, &slot).unwrap();
-        let g2 = load(&slot).unwrap();
-        assert_eq!(g.round_seed, g2.round_seed);
-        assert_eq!(g.kyoku, g2.kyoku);
-        assert_eq!(g.players[0].hand.closed.len(), g2.players[0].hand.closed.len());
-        // 清理.
+        let g2: DummyState = load(&slot).unwrap();
+        assert_eq!(g, g2);
         let _ = std::fs::remove_file(slot_path(&slot).unwrap());
     }
 }

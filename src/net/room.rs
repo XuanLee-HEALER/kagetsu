@@ -875,7 +875,7 @@ impl RoomActor {
                     }
                     let action = {
                         let game = self.game.as_ref().unwrap();
-                        crate::ai::dummy::ai_choose_discard(game)
+                        crate::ai::dummy::ai_choose_discard_legacy(game)
                     };
                     self.apply_ai_action(action);
                 }
