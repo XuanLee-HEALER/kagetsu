@@ -175,8 +175,9 @@ impl GameEngine {
     pub fn do_draw(&mut self) -> Option<Tile> {
         let res = round_apply(&self.round, AtomicOp::Draw);
         match res {
-            Ok((next, _events)) => {
+            Ok((next, evs)) => {
                 self.round = next;
+                self.push_events(evs);
                 // 如果转 RoundEnd, 缓存 result.
                 if let Some(r) = self.round.result() {
                     self.last_result = Some(r.clone());
@@ -194,8 +195,9 @@ impl GameEngine {
     /// 的 phase 推进.
     fn auto_rinshan_if_needed(&mut self) -> Result<(), OpError> {
         if matches!(self.round, RoundState::AwaitRinshanDraw(_)) {
-            let (next, _) = round_apply(&self.round, AtomicOp::RinshanDraw)?;
+            let (next, evs) = round_apply(&self.round, AtomicOp::RinshanDraw)?;
             self.round = next;
+            self.push_events(evs);
             if let Some(r) = self.round.result() {
                 self.last_result = Some(r.clone());
             }
@@ -205,40 +207,45 @@ impl GameEngine {
 
     /// 切牌.
     pub fn do_discard(&mut self, tile: Tile) -> Result<(), OpError> {
-        let (next, _events) = round_apply(&self.round, AtomicOp::Discard { tile })?;
+        let (next, evs) = round_apply(&self.round, AtomicOp::Discard { tile })?;
         self.round = next;
+        self.push_events(evs);
         Ok(())
     }
 
     /// 立直宣告 + 切牌 (legacy 一步, engine 两步).
     pub fn do_riichi(&mut self, tile: Tile) -> Result<(), OpError> {
-        let (next, _) = round_apply(&self.round, AtomicOp::RiichiDeclare)?;
+        let (next, evs) = round_apply(&self.round, AtomicOp::RiichiDeclare)?;
         self.round = next;
+        self.push_events(evs);
         // 紧接着切牌.
-        let (next2, _) = round_apply(&self.round, AtomicOp::Discard { tile })?;
+        let (next2, evs2) = round_apply(&self.round, AtomicOp::Discard { tile })?;
         self.round = next2;
+        self.push_events(evs2);
         Ok(())
     }
 
     /// 暗杠 + 自动岭上摸.
     pub fn do_ankan(&mut self, kind: TileIndex) -> Result<(), OpError> {
-        let (next, _) = round_apply(&self.round, AtomicOp::Ankan { kind })?;
+        let (next, evs) = round_apply(&self.round, AtomicOp::Ankan { kind })?;
         self.round = next;
+        self.push_events(evs);
         self.auto_rinshan_if_needed()?;
         Ok(())
     }
 
     /// 加杠 + 自动岭上摸.
     pub fn do_shouminkan(&mut self, kind: TileIndex) -> Result<(), OpError> {
-        let (next, _) = round_apply(&self.round, AtomicOp::Shouminkan { kind })?;
+        let (next, evs) = round_apply(&self.round, AtomicOp::Shouminkan { kind })?;
         self.round = next;
+        self.push_events(evs);
         self.auto_rinshan_if_needed()?;
         Ok(())
     }
 
     /// 碰.
     pub fn do_pon(&mut self, who: Seat, two: [Tile; 2]) -> Result<(), OpError> {
-        let (next, _) = round_apply(
+        let (next, evs) = round_apply(
             &self.round,
             AtomicOp::Pon {
                 who,
@@ -246,12 +253,13 @@ impl GameEngine {
             },
         )?;
         self.round = next;
+        self.push_events(evs);
         Ok(())
     }
 
     /// 吃.
     pub fn do_chi(&mut self, who: Seat, two: [Tile; 2]) -> Result<(), OpError> {
-        let (next, _) = round_apply(
+        let (next, evs) = round_apply(
             &self.round,
             AtomicOp::Chi {
                 who,
@@ -259,12 +267,13 @@ impl GameEngine {
             },
         )?;
         self.round = next;
+        self.push_events(evs);
         Ok(())
     }
 
     /// 明杠 + 自动岭上摸.
     pub fn do_minkan(&mut self, who: Seat, three: [Tile; 3]) -> Result<(), OpError> {
-        let (next, _) = round_apply(
+        let (next, evs) = round_apply(
             &self.round,
             AtomicOp::Minkan {
                 who,
@@ -272,6 +281,7 @@ impl GameEngine {
             },
         )?;
         self.round = next;
+        self.push_events(evs);
         self.auto_rinshan_if_needed()?;
         Ok(())
     }
@@ -295,9 +305,10 @@ impl GameEngine {
 
     /// 自摸宣告. score 参数兼容 legacy API; 实际从 round_apply 的 RoundEnd 取.
     pub fn declare_tsumo(&mut self, _score: ScoreResult) {
-        let (next, _) = round_apply(&self.round, AtomicOp::Tsumo)
+        let (next, evs) = round_apply(&self.round, AtomicOp::Tsumo)
             .expect("declare_tsumo: round_apply Tsumo should succeed (caller must try_tsumo first)");
         self.round = next;
+        self.push_events(evs);
         if let Some(r) = self.round.result() {
             self.last_result = Some(r.clone());
         }
@@ -317,9 +328,10 @@ impl GameEngine {
     }
 
     pub fn declare_ron(&mut self, who: Seat, _score: ScoreResult) {
-        let (next, _) = round_apply(&self.round, AtomicOp::Ron { who })
+        let (next, evs) = round_apply(&self.round, AtomicOp::Ron { who })
             .expect("declare_ron: round_apply Ron should succeed (caller must try_ron first)");
         self.round = next;
+        self.push_events(evs);
         if let Some(r) = self.round.result() {
             self.last_result = Some(r.clone());
         }
@@ -329,9 +341,10 @@ impl GameEngine {
     /// 其它 phase 调 advance_turn 是 noop (engine 内 do_discard 等已自动转 phase).
     pub fn advance_turn(&mut self) {
         if matches!(self.round, RoundState::AwaitCalls(_)) {
-            let (next, _) = round_apply(&self.round, AtomicOp::Pass)
+            let (next, evs) = round_apply(&self.round, AtomicOp::Pass)
                 .expect("advance_turn: AwaitCalls Pass 永远合法");
             self.round = next;
+            self.push_events(evs);
         }
     }
 

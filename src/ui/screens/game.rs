@@ -29,7 +29,7 @@ use crate::engine::domain::meld::{MeldKind, Seat};
 use crate::engine::domain::tile::{Tile, TileIndex};
 use crate::engine::event::GameEvent;
 use crate::engine::phase::Phase;
-use crate::engine::round_state::{RoundResult, RyuukyokuKind};
+use crate::engine::round_state::RoundResult;
 use crate::engine::rules::GameRules;
 use crate::engine::score::final_ranking;
 use crate::ui::screens::game_engine::{CallOptions, GameEngine};
@@ -686,62 +686,23 @@ impl GameScreenState {
         }
     }
 
-    /// 如果 record_replays 开了, 给当前 GameState 装上录像缓冲并
-    /// snapshot 初态. 局开始时调用. 必须在任何 do_* 之前.
+    /// 录像 snapshot. **stage 6 stub**: 录像 schema 还在 GameState 形态,
+    /// 跟 GameEngine 不兼容. 等 RoundRecording 重设计 (拿 RoundState +
+    /// MatchState + Vec<AtomicOp>) 后恢复.
     #[cfg(feature = "dev-tools")]
     fn maybe_start_recording(&mut self) {
         if !self.record_replays {
             return;
         }
-        // serde clone GameState (struct 没有 derive Clone 的关键字段, 用 serde 复制).
-        match serde_json::to_string(&self.engine)
-            .and_then(|s| serde_json::from_str::<GameState>(&s).map_err(Into::into))
-        {
-            Ok(snapshot) => {
-                self.recording_initial = Some(snapshot);
-                self.engine.recorded_actions = Some(Vec::new());
-            }
-            Err(e) => {
-                tracing::warn!("录像 snapshot 失败: {e}");
-            }
-        }
+        // FIXME stage 6 follow-up: 重设计 RoundRecording schema 后恢复录像.
     }
 
-    /// 局结算时把当前 recording flush 到磁盘. 失败仅记 message.
-    /// 文件名: `<UTC ISO>_seed<game_seed>_e<round_index>.json`.
+    /// 同上, **stage 6 stub**.
     #[cfg(feature = "dev-tools")]
     fn flush_recording_if_any(&mut self) {
-        let Some(initial_state) = self.recording_initial.take() else {
-            return;
-        };
-        let actions = self.engine.recorded_actions.take().unwrap_or_default();
-        let rec = crate::dev::recorder::RoundRecording {
-            initial_state,
-            actions,
-        };
-        let now = time::OffsetDateTime::now_local()
-            .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        let stamp = format!(
-            "{:04}{:02}{:02}_{:02}{:02}{:02}",
-            now.year(),
-            u8::from(now.month()),
-            now.day(),
-            now.hour(),
-            now.minute(),
-            now.second()
-        );
-        let filename = format!(
-            "{}_seed{}_e{}",
-            stamp, self.game_seed, self.round_index
-        );
-        match crate::dev::recorder::save(&rec, &filename) {
-            Ok(path) => {
-                tracing::info!("录像写入 {}", path.display());
-            }
-            Err(e) => {
-                tracing::warn!("录像写入失败: {e}");
-            }
-        }
+        // FIXME stage 6 follow-up: 重设计 RoundRecording schema 后恢复录像.
+        let _ = self.recording_initial.take();
+        self.engine.recorded_actions = None;
     }
 
     /// F8 (App 层调用) 切换录像开关. 当前局已开始的录像不变 (flag 仅
