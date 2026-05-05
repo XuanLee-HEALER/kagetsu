@@ -1,498 +1,182 @@
-# Pure Functional Refactor — 设计 scratchpad
+# Pure Functional Refactor — 实施计划
 
-> 这是一份**开放问题清单**, 不是最终设计. 每节列出待决策点 + 当前候选 + tradeoff,
-> 一节一节讨论清楚后再开始动代码. 决策定下来就把候选标 ✅ 并补一句 rationale.
+设计概念见 [`abstract-model.md`](abstract-model.md). 本文档是实施侧的范围 / 步骤 /
+风险登记.
+
+---
 
 ## 0. 动机 + 目标
 
 - **动机**: 技术学习实践, 不是为了解某个具体痛点.
-- **目标**: 把 `engine` 层 (至少) 改成 pure functional, 让 lib 可以被任何
-  wrapper (UI / net / replay / test fixture) 当作纯函数库使用.
+- **目标**: 把 `engine` 模块改成 pure functional, 分清 lib (engine) + 外部 wrapper.
 - **非目标**:
-  - 性能不要求超过现状 (clone-everywhere 可接受, 性能优化下次再说).
-  - UI 不要求一并 pure (UI 状态机本身留 mutable, 只是它调用的 engine 是 pure).
+  - 性能不超过现状 (clone-everywhere 接受).
+  - UI 不要求一并 pure (UI 状态机本身留 mutable, 它调用的 engine 是 pure).
   - 不引入 `no_std` 限制.
 
-## 1. 范围 / 边界
-
-哪些模块进 "lib"? 哪些留 "wrapper"?
-
-候选:
-- A. **最窄**: 仅 `engine::state` + 它的依赖 (`domain` 已经基本 pure). UI / net / ai / mental_poker 都是 wrapper.
-- B. **中**: A + `engine::wall` + `engine::score` + `ai` (AI 决策本来就只读 state).
-- C. **宽**: B + `mental_poker` (多者已经 pure 了, 顺手统一接口).
-- D. **最宽**: C + `net` 层改成 pure 转换 + tokio driver.
-
-> 决策: TODO. 当前倾向 B (engine 全套 + ai).
-
-tradeoff:
-- 范围越窄越快, 但 wrapper 内还是混着 mut 风格, 不太完整.
-- 范围越宽改动越大, 风险越高, 但成果越漂亮.
-
-## 2. "Pure" 的具体定义
-
-到底多严? 候选维度:
-
-- **API 层面 mut**: 
-  - 所有 `do_*` 方法 `self -> Result<Self, Err>` (consume + return). 内部实现可以借助 `&mut`.
-  - 或更严: 内部也不允许 `&mut`, 全部 `&self -> NewSelf`.
-- **共享数据结构**:
-  - 直接 clone `Vec<Tile>` 等 (简单, 每动作几十次小 alloc).
-  - 引入 `im::Vector` / `rpds` persistent structure (结构共享, 内存友好, 但加依赖).
-- **副作用**:
-  - RNG: 把 seed 显式作为参数, 返回 (NewState, NewRngState) 这种风格.
-  - 时间 / IO / 日志: 完全推到 wrapper.
-  - `tracing::info!`: 视为副作用 (把它去掉) 还是允许 (作为非语义副作用)?
-- **trait object / Box<dyn>**: 用不用?
-- **错误**: typed enum vs `&'static str`?
-
-> 决策: TODO.
-
-tradeoff:
-- "API 纯, 内部 mut" 够实用, 不绑死 Rust 习惯. **"内外都不 mut"** 工艺洁癖度更高
-  但代码更啰嗦 (每个内部 helper 都要 thread state).
-- `im` 加依赖换可读性 + 性能; clone 简单粗暴.
-
-## 3. 数据模型
-
-### 3.1 GameState 是否拆?
-
-当前: 一个 `GameState` 含 phase + players + wall + 历史 + 录像缓冲...
-
-#### 候选 A: 保持单一 struct (status quo)
-
-```rust
-struct RoundState {
-    phase: Phase,                         // enum tag, 运行时 dispatch
-    last_drawn: Option<Tile>,             // AwaitDiscard 时 Some
-    last_discard: Option<(Seat, Tile)>,   // AwaitCalls 时 Some
-    // ...
-}
-```
-
-#### 候选 B: type-state 模式
-
-把状态机的"当前所在状态"提升到**类型层面**, 每个 phase 一个 struct 携带只有那个 phase
-合法的字段:
-
-```rust
-enum RoundState {
-    AwaitDiscard(AwaitDiscardState),
-    AwaitRiichiDiscard(AwaitRiichiDiscardState),
-    AwaitCalls(AwaitCallsState),
-    RoundEnd(RoundEndState),
-    // Phase::Draw 不存在: Draw 是瞬时 op 内部完成, 不是 dwell state
-}
-
-struct AwaitDiscardState {
-    common: CommonRound,         // 共享字段子 struct
-    turn: Seat,
-    last_drawn: Tile,            // 不是 Option, 编译期保证
-}
-
-struct AwaitCallsState {
-    common: CommonRound,
-    last_discard: (Seat, Tile),  // 不是 Option
-}
-
-impl AwaitDiscardState {
-    fn apply(self, op: AwaitDiscardOp) -> Result<NextDiscardState, Err>;
-}
-
-enum AwaitDiscardOp {
-    Discard(Tile),
-    RiichiDeclare,
-    Tsumo,
-    Ankan(TileIndex),
-    Shouminkan(TileIndex),
-    // 没有 Pon/Chi/Ron — 那是 AwaitCallsOp 的事
-}
-
-enum NextDiscardState {
-    AwaitCalls(AwaitCallsState),  // Discard 之后
-    RoundEnd(RoundEndState),       // Tsumo 之后
-    AwaitRiichiDiscard(...),       // RiichiDeclare 之后
-}
-```
-
-#### 对比
-
-| 维度 | 候选 A (单 struct) | 候选 B (type-state) |
-|---|---|---|
-| 非法状态 | 运行时 Err / panic | 编译期不可表示 |
-| 代码量 | 少 (一个 struct) | 多 (N 个 struct + N 个 op enum) |
-| 模式匹配 | 每个 op handler 内 match phase | 调用前 match RoundState 选 handler |
-| serde | 一个 struct 序列化 | 多 variant 序列化 (能搞但麻烦) |
-| 重构成本 | 改 enum 添 phase | 加 struct + 加 transition |
-| 与"统一 AtomicOp"愿景 | 兼容 | 冲突 — op 也得按 phase 拆 |
-
-#### 与 AtomicOp 关系: 数据层 vs 行为层 (canonical pattern)
-
-⚠️ **更正之前的"二选一"误判**: 这不是鱼与熊掌. 通过分清"数据层"和"行为层"两者可以并存.
-
-**思路**: AtomicOp 是 **数据** (wire format / 录像 / 网络包), type-state 是 **行为** (engine 内部不变量). 两者在不同层级, 用一个 bridge function 连接.
-
-```rust
-// L1 数据层: 单一 AtomicOp (统一算子代数, 外部全用这个)
-enum AtomicOp { Draw, Discard(Tile), RiichiDeclare, Pon{..}, Pass, ... }
-
-// L2 类型化 state
-enum RoundState { AwaitDiscard(...), AwaitRiichiDiscard(...), AwaitCalls(...), RoundEnd(...) }
-
-// L3 类型化 op (每个 state 接受的子集, engine 内部用)
-enum AwaitDiscardOp { Discard(Tile), RiichiDeclare, Tsumo, Ankan(..), Shouminkan(..) }
-enum AwaitCallsOp   { Pon{..}, Chi{..}, Minkan{..}, Ron{..}, Pass }
-
-// L4 bridge: 唯一 runtime 合法性检查处
-impl AwaitDiscardState {
-    fn try_op(&self, op: AtomicOp) -> Result<AwaitDiscardOp, OpError> {
-        match op {
-            AtomicOp::Discard(t) => Ok(AwaitDiscardOp::Discard(t)),
-            AtomicOp::RiichiDeclare => Ok(AwaitDiscardOp::RiichiDeclare),
-            // ...
-            _ => Err(OpError::IllegalForPhase),
-        }
-    }
-    fn apply(self, op: AwaitDiscardOp) -> Result<NextDiscardState, ApplyError> {
-        // 编译期已保证 op 是这个 state 能接受的, 内部代码没有 phase 检查 / Option unwrap.
-    }
-}
+---
+
+## 1. 范围
+
+### 进 engine (refactor 范围)
+
+- `src/domain/*` — 几乎已经 pure, 走查 + 补 derive.
+- `src/engine/state.rs` — 重写为 type-state.
+- `src/engine/wall.rs` — `draw(&self) -> (Wall, Option<Tile>)`.
+- `src/engine/score.rs` — 函数形式 + 已经基本 pure.
+- `src/engine/event.rs` — 保留 GameEvent, 但从 GameState 移到 round_apply 返回值.
+- 新文件 `src/engine/op.rs` — AtomicOp + OpError + typed_op! 宏.
+- 新文件 `src/engine/match_state.rs` — MatchState + match_apply.
+
+### 不进 engine
+
+- `src/ai/*` — **独立模块**. AI 通过 engine 公开 API (读 RoundState, 调 legal_ops, 输出 AtomicOp). 不在 engine 内, engine 也不知道 ai 存在.
+- `src/net/*` — 不在本次 refactor 强制范围. 调用 engine 的代码点跟着新签名改, 但 actor 模型保持现状.
+- `src/ui/*` — 不变, 继续是 mutable driver.
+- `src/dev/recorder.rs` — replay 函数从循环改成 `try_fold(round_apply)`. 录像写盘逻辑不变.
+- `src/mental_poker/*` — 已经基本 pure, 不动.
+
+---
+
+## 2. "Pure" 严格度
+
+- **API 层面**: 公开函数全是 `(&state, op) -> Result<state, err>`, 不 consume self.
+- **内部实现**: typed apply 内可以 `let mut s = self.common; ...; NextState{ common: s, ... }` 这种 ownership 流转, 编译器允许的范围内.
+- **共享数据结构**: 直接 clone Vec / HashMap. 不引入 `im` / `rpds`.
+- **副作用**: RNG 显式 seed 参数, 没有 IO / tracing / 全局变量.
+- **错误**: typed enum + thiserror.
+
+---
+
+## 3. 性能策略
+
+clone-everywhere. 每次 `round_apply` 内部 `state.clone()` 一次再走转移. 估算:
+- RoundState ≈ 几 KB (4 玩家 × Vec<Tile> + Wall 70+14 张 + events queue).
+- Turn-based 节奏 ~100ms/op, clone 几 KB << 1ms 完全可接受.
+
+未来如果发现瓶颈 (一般不会), 可以引入 `im::Vector` 让 player.river clone 变 O(1).
+本次 refactor 不优化.
+
+---
+
+## 4. 实施步骤 (bottom-up)
+
+每阶段一个 commit, 每 commit 全测试 (408 lib + 54 集成) 必须绿. **测试本身不允许改**
+(测试是 ground truth — 测试需要改的 helper 适配 API 变化是允许的, 但 assertion 语义不改).
+
+### 阶段 1: domain 层走查
+- `Tile` / `TileIndex` / `Seat` / `Meld` / `Hand`: 确认无 `&mut self` 方法.
+- 必要的 derive 补齐 (Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize).
+
+### 阶段 2: Wall pure 化
+- `Wall::draw(&self) -> (Wall, Option<Tile>)`.
+- `Wall::rinshan_draw(&self) -> (Wall, Option<Tile>)`.
+- `Wall::reveal_next_dora(&self) -> Wall`.
+- 调用方 (state.rs 旧 do_*) 暂时通过本地 `let (w, t) = self.wall.draw(); self.wall = w;` 适配, 为后面 type-state 重写铺路.
+
+### 阶段 3: AtomicOp + OpError + typed_op! 宏
+- 新文件 `src/engine/op.rs`.
+- `AtomicOp` enum (含 Draw / RinshanDraw / Discard / RiichiDeclare / Tsumo / Ankan / Shouminkan / Pon / Chi / Minkan / Ron / Pass).
+- `AtomicOpKind` (variant kind only, 用作 OpError 字段).
+- `OpError` enum (thiserror).
+- `typed_op!` declarative macro 生成 typed-op enum + try_from_atomic + From 反向.
+
+### 阶段 4: MatchState
+- 新文件 `src/engine/match_state.rs`.
+- `MatchState` struct.
+- `RoundOutcome` enum.
+- `match_apply(&MatchState, RoundOutcome) -> MatchState`.
+- `init_match(GameRules) -> MatchState`.
+- `check_match_ended(&MatchState) -> bool`.
+
+### 阶段 5: type-state RoundState 重写
+最大一步. `src/engine/state.rs` 新结构:
+- `CommonRound` 子 struct (共享字段).
+- 每个 phase 的 typed state struct.
+- 每个 typed state 的 `try_op` (完整 validity gate).
+- 每个 typed state 的 typed `apply` (total).
+- `NextXxxState` enum + `From<NextXxxState> for RoundState`.
+- 公开 `RoundState` enum 包装.
+- 公开 `round_apply(&RoundState, AtomicOp) -> Result<RoundState, OpError>`.
+- 公开 `legal_ops(&RoundState) -> LegalOps`.
+- 公开 `summarize_round(&RoundState) -> Option<RoundOutcome>`.
+- 公开 `init_round(&MatchState, seed: u64) -> RoundState`.
+- events 从 state 字段拆出: `round_apply` 返回 `Result<(RoundState, Vec<GameEvent>), OpError>`. (TBD: 也可能保留 events 在 state 里方便 driver 读, 实施时定.)
+
+### 阶段 6: 删遗留
+- engine 中的 `tracing::info!` / `warn!` 全删.
+- `recorded_actions: Option<Vec<RecordedAction>>` 字段删 (engine 不知道录像).
+- `do_riichi` pop-and-replace hack 删 (新结构里 RiichiDeclare 是独立 op).
+- 旧 `do_*` 方法删.
+
+### 阶段 7: 适配外部
+- `src/dev/recorder.rs`:
+  - `RecordedAction` 等同 `engine::AtomicOp` (要么改用 engine::AtomicOp, 要么 type alias).
+  - `replay` 函数重写成 `ops.iter().try_fold(initial, |s, op| engine::round_apply(&s, op))`.
+- `src/ai/dummy.rs`:
+  - `ai_choose_discard(&RoundState) -> AtomicOp`.
+  - `ai_react_to_discard(&RoundState, who: Seat) -> AtomicOp`.
+- `src/ui/screens/game.rs`:
+  - 持 `RoundState` (替代 GameState).
+  - 用 `round_apply(&self.state, op)?` 替代 `self.game.do_*`.
+  - 内部 driver loop: 读 state phase, 决定下一 op 来源 (玩家 / AI / 自动 Draw).
+- `src/net/room.rs` / `online_game.rs`:
+  - 跟着新签名改. actor 内部仍 `&mut server_state`, 但 `server_state.engine_state = round_apply(&server_state.engine_state, op)?` 走 pure 函数.
 
-// 公开 entry: 接 AtomicOp, 内部 dispatch 到 typed
-pub fn round_apply(state: RoundState, op: AtomicOp) -> Result<RoundState, OpError> {
-    match state {
-        RoundState::AwaitDiscard(s) => Ok(s.apply(s.try_op(op)?)?.into()),
-        RoundState::AwaitCalls(s)   => Ok(s.apply(s.try_op(op)?)?.into()),
-        ...
-    }
-}
-```
+### 阶段 8: 测试 + benchmark
+- 全 408 lib + 54 集成测试跑过.
+- (可选) 加几个 benchmark 看 clone 开销 (一般不超过 1ms / op).
 
-**收益**:
-- 外部 (录像 / 网络 / 应用层) 看到统一 AtomicOp, 单一算子代数, 序列化简单.
-- Engine 内部代码类型安全, 没有 `state.last_drawn.unwrap()`.
-- Runtime 合法性 check 只在 L4 的 `try_op` 集中, 主转移代码干净.
+---
 
-**boilerplate 用宏消化** (用户提议, 采纳):
+## 5. 容忍 (非完美但接受)
 
-L3 的 typed-op enum + L4 的 try_op 函数都是机械生成. 用 declarative macro:
+- **RNG**: 仅用于 `Wall::shuffled(seed, with_aka)`, 一次性洗完后不再用. 直接 seed 参数喂入就够, 不上升到 `RngStream` trait 抽象. 影响仅限 wall 生成.
+- **events 是否完全脱离 state**: 阶段 5 实施时拍. 倾向脱离 (每次 round_apply 返新 events Vec), 但如果 driver 实际方便操作历史, 留在 state 也行. 对核心模型不影响.
+- **Pass 粒度**: 单一 op (整个 call window 关闭一次). 不按家拆 4 个.
+- **Crate 拆分**: 保持单 crate, lib 部分 re-export 在 `tui_majo::engine::*`. 不切 workspace.
 
-```rust
-typed_op! {
-    AwaitDiscardOp from AtomicOp {
-        Discard(Tile),
-        RiichiDeclare,
-        Tsumo,
-        Ankan(TileIndex),
-        Shouminkan(TileIndex),
-    }
-}
+---
 
-// 宏展开生成:
-//   1. enum AwaitDiscardOp { Discard(Tile), RiichiDeclare, Tsumo, Ankan(TileIndex), Shouminkan(TileIndex) }
-//   2. impl TryFrom<AtomicOp> for AwaitDiscardOp { type Error = OpError; ... }
-//      (match 列出的 variant, 其它 -> Err::IllegalForPhase)
-//   3. impl From<AwaitDiscardOp> for AtomicOp (双向, 录像反向用)
-```
+## 6. 风险登记
 
-每个 state 一行 `typed_op!{}` 就配齐了. 真正手写的只有 `apply` (实际转移逻辑),
-那才是业务逻辑.
+### 真实风险
 
-这是个标准模式 (协议解析器 / CRDT / 游戏引擎都这套). 并不是设计折衷, 而是 layer separation.
+- **net 层调用点适配**: `room.rs` / `online_game.rs` / `online_zerotrust_game.rs` 都调用 engine. 签名换了之后这些调用点都得动. mental_poker 的 actor 已经接近 pure, mp_swarm 没那么干净, 但都不深.
+- **录像 schema 演化**: AtomicOp 加 variant / RoundState 加字段会让老录像反序列化失败. 加 `schema_version` 字段, 或文档化"录像不跨 minor 版本兼容".
+- **type-state state 数量增加成本**: 每加一种 phase 加一个 struct + 一组 typed-op + 一组 apply. mahjong phase 数稳定 (5-6 个), 短期不会爆.
 
-#### 对比 (3 选 1)
+### 已通过设计消除的风险
 
-| 维度 | A: 单 struct | B: type-state 拆 op | **C: type-state + 统一 AtomicOp + bridge** |
-|---|---|---|---|
-| 外部 op 一致性 | ✅ | ❌ (op 按 phase 拆) | ✅ |
-| 内部类型安全 | ❌ | ✅ | ✅ |
-| 录像 / 序列化 | 简单 | 多 variant 麻烦 | 简单 (用 AtomicOp) |
-| Boilerplate | 最少 | 多 | 中 (多一层 bridge) |
-| 学习价值 | 低 | 高 | 最高 |
-
-→ **当前倾向 C** (4 层 canonical pattern). 决策待用户确认.
-
-### 3.2 Wall 重新设计
-
-当前: `Wall { live: Vec<Tile>, dead: Vec<Tile>, rinshan_used: usize, dora_revealed: usize }`,
-`draw()` 会 mutate live (pop).
-
-候选:
-- **保持 Vec, draw consume self**: `fn draw(self) -> (Self, Option<Tile>)`. 简单直接.
-- **抽象成 `Stream<Tile>` + 内部 cursor**: 不动牌, 只移指针. 更省内存但要重写.
-
-### 3.3 历史 / 事件
-
-`events: VecDeque<GameEvent>` 当前是 ring buffer (UI 用最近 32 条).
-`recorded_actions: Option<Vec<RecordedAction>>` 是录像 sink.
-
-候选:
-- **从 GameState 拿出去**: `apply` 函数返回 `(new_state, Vec<event_emitted_by_this_step>)`,
-  state 不带历史. wrapper 自己累积 (UI 维护 ring buffer, recorder 维护完整 log).
-- **保留在 state 内**: state 仍带 events 字段, 但每次 transition 只追加这步产生的.
-
-> 决策: TODO. 强烈倾向"events 出 state". 这是 pure FP 标准模式
-> (Erlang/Elixir/EventSourcing 都这么干), 而且能消灭 `recorded_actions` 这个杂质字段.
-
-## 4. Transition / Action 模型
-
-### 4.1 入口数量
-
-✅ **决策: 单一入口** `(state, op) -> Result<state, err>`. 标准 fold 形式.
-
-不引入分解多入参 (上一选手 + 影响值 + 新选手 init), 保持简洁可读.
-
-### 4.2 Action / Op enum
-
-✅ **决策: 单一 enum AtomicOp**, 类似关系代数的预定义算子集. 见 abstract-model.md §"操作算子集".
-
-⚠️ 与 §3.1 type-state 互斥, 见 §3.1 末尾"关键 tradeoff".
-
-### 4.3 自动转换 / Draw 阶段处理
-
-✅ **决策: 一步只走一步, driver 循环调**. Draw 也是显式 op (由 driver 见 phase=Draw 时自动喂入), 录像里能看到 Draw 这一步, 完整可重放.
-
-## 5. 副作用 / 边缘
-
-### 5.1 RNG
-
-当前: `Wall::shuffled(seed: u64, ...)` 一次性洗完, 后续不再用 RNG.
-
-如果以后引擎要在中途用 RNG (比如 AI 决策), 怎么传?
-- 把 `ChaCha8Rng` 扔进 state? (state 不再 Eq).
-- 每次 apply 显式传 `(state, action, &mut rng)` → wrapper 责任?
-- 或抽象成 `RngStream` trait, state 持 `RngStream::Cursor`?
-
-> 决策: TODO. 短期内不影响, 但要先想好.
-
-### 5.2 时间
-
-UI 顶栏 hh:mm:ss 时钟、AI_STEP_DELAY_MS 节流、思考时间倒计时—— 全是 wrapper 责任,
-不进 lib. ✅
-
-### 5.3 IO + 日志
-
-✅ **决策**:
-- 文件存档 / 网络 IO 全在 driver, 不进 engine.
-- Engine **不允许** `tracing::info!` / `warn!` / `error!` (运行时副作用).
-- Engine 仅允许 `tracing::debug!` 用作测试场景插桩, release build 自动抹掉.
-- 正确性靠**测试覆盖**保证, 不靠运行时日志兜底.
-
-## 6. 错误模型
-
-### 6.1 错误的本质 (重要概念)
-
-`OpError` **不是计算错误**, 是**输入合法性裁定**.
-
-类比: `1 + 1` 永远是 2, 没有计算错误. mahjong `apply(state, op)` 的转移逻辑也是
-total — 给一个**合法**的 (state, op), 下一 state 是确定的. 但 `(RoundState, AtomicOp)`
-的笛卡尔积里有大量"语义无效"对 (AwaitCalls 时给 Discard / 切不在手里的牌 / 立直时未
-听牌 ...), 这些不在合法输入域. 公开 API 的 Result 标记 "你的 op 是否在这个域内".
-
-**engine 永远不该有"calculation error"** (那是 bug, 应该 panic). 所有 Err 都是
-"输入无效"的细分.
-
-### 6.2 OpError variant 设计
-
-按"无效原因"组织, 每个 variant 反映 mahjong 规则的某条反面陈述:
-
-```rust
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum OpError {
-    // ─── 数据级 (op 引用了 state 里不存在的东西) ───
-    #[error("手中无 id={0} 的牌")]
-    TileNotInHand(u16),
-    #[error("当前无 last_discard, 无法响应")]
-    NoLastDiscard,
-    #[error("当前家手中无 4 张 {0:?} 同 kind 牌, 不能暗杠")]
-    InsufficientForAnkan(TileIndex),
-    #[error("当前家无 {0:?} 同 kind 的副露刻子, 不能加杠")]
-    NoMatchingPonForShouminkan(TileIndex),
-
-    // ─── 规则级 (op 违反 mahjong 规则) ───
-    #[error("立直方必须摸切")]
-    RiichiMustTsumogiri,
-    #[error("有副露不能立直")]
-    NotMenzen,
-    #[error("切此牌后未听牌, 不能立直")]
-    NotTenpaiAfterDiscard,
-    #[error("分数 < 1000, 不能立直")]
-    InsufficientScore,
-    #[error("牌山剩余 < 4, 不能立直")]
-    InsufficientWall,
-    #[error("不能碰自己的弃牌")]
-    PonOwnDiscard,
-    #[error("吃只能从上家")]
-    ChiNotFromUpper,
-    #[error("明杠的三张需与弃牌同 kind")]
-    MinkanKindMismatch,
-    #[error("自摸 / 荣和 但牌型不和")]
-    NotWinning,
-    #[error("和了但无役")]
-    NoYaku,
-
-    // ─── Phase 错配 (type-state 路径下大部分编译期消, 落地这里只剩兜底) ───
-    #[error("op 在当前 phase 不合法")]
-    IllegalForPhase {
-        op_kind: AtomicOpKind,
-        phase_kind: PhaseKind,
-    },
-}
-```
-
-driver 负责展示文案 (用户语言 / i18n / TUI 错误条). engine 只提供结构化分类.
-
-注意: **没有 `Internal(&'static str)` variant**. 如果 engine 走到了"理论不可达",
-那是 engine bug, 应该 panic, 不该作为 OpError 漏给 caller. Caller 看到 OpError 应该
-能保证是输入问题, 不是 engine 问题.
-
-### 6.3 Result vs total apply (设计选择)
-
-理论上 3 种放置 validity check 的方式:
-
-- A. `apply(s, op) -> Result<s, OpError>` (单一入口, Result 在 apply)
-- B. `validate(&s, &op) -> Result<(), OpError>; apply(s, op) -> s` (validate 单独, apply total + debug_assert)
-- C. `try_new(&s, op) -> Result<ValidOp<S>, OpError>; apply(s, ValidOp<S>) -> s` (smart constructor 产生 token, apply total)
-
-**总 runtime check 次数都一样** — 区别只是 Err 的位置. ABC 各有理论纯度, 但实际:
-
-- A 最 idiomatic (Rust 标准 Result), 写起来最直接
-- B 把 validate 露出来给 caller "想先看看是否合法可以单独问", 但 apply 内还得
-  debug_assert, 多一层
-- C 最纯 (apply 真 total), 但 ValidOp token 在无 dependent types 的 Rust 里
-  绑死特定 state 实例需要 phantom type + 工程量大, 收益边际
-
-✅ **决策: A**. apply 公开 API 返 Result, 内部 (type-state typed-op 已 validated 后)
-转移逻辑 total — 真正的 `1+1` 在 type-state 内层.
-
-### 6.4 错误回退语义 (state ownership)
-
-apply 失败时 caller 怎么拿回原 state?
-
-- A. `apply(self, op) -> Result<Self, (Self, OpError)>` — Err 带回原 state. 严谨但啰嗦.
-- B. caller 在 apply 前 clone, Err 时丢弃新副本. 最简单.
-- C. `apply(&self, op) -> Result<Self, OpError>` — engine 内部 clone, 失败不影响原 state. 折中.
-
-✅ **决策: C**. clone 已被 §7 接受 (clone-everywhere). engine 内部 clone, 失败时
-caller state 不动, 心智最干净, 调用站点也无需 clone 包装.
-
-```rust
-pub fn round_apply(state: &RoundState, op: AtomicOp) -> Result<RoundState, OpError>;
-```
-
-## 7. 性能预算
-
-当前 GameState 大小估算:
-- 4 玩家 × `Vec<Tile>` (闭手 13-14 张, river 24 张, melds 几个) ≈ 几 KB
-- Wall: 70 张 live + 14 张 dead × Tile ≈ 1 KB
-- events: VecDeque<GameEvent> 32 条 ≈ 1 KB
-
-每动作 clone 整个 GameState ≈ 几 KB allocate, 在 100ms 节流的 turn-based 游戏里
-完全可接受 (< 1 ms overhead).
-
-候选优化路径 (用上时再做):
-- 持久化数据结构 (`im::Vector<Tile>`) 让 player.river clone 变 O(1)
-- COW: `Cow<'_, GameState>`, 只在 mut 时 clone
-
-> 决策: 不优化. 默认 clone. 文档化.
-
-## 8. 测试 + 迁移路径
-
-### 8.1 测试不动
-
-408 lib 测试 + 54 集成测试都得继续过. **测试是 ground truth**, 不许修测试以适配 API
-变化 — 如果测试要改, 说明引擎语义变了, 要单独 audit.
-
-例外: 测试里直接构造 GameState 的 helper 必须改 API 适配.
-
-### 8.2 迁移顺序 (bottom-up)
-
-1. `domain` 层 — 几乎已经 pure, 复查一遍, 确认没有 mut self 方法.
-2. `engine::wall` — Wall 改 consume-and-return.
-3. `engine::state` — GameState 内部 do_* 改, 加 `apply` 入口.
-4. `dev/recorder.rs` — 把 replay 重写成 fold.
-5. `ai` — 适配新 API (大概率只需改函数签名, 决策逻辑不动).
-6. `ui::screens::game` 等 wrapper — 适配新调用.
-7. `net::room` 等 — 适配 (这层最痛).
-
-每步都要全测试通过才能动下一步.
-
-### 8.3 中间状态
-
-big-bang 一次改完没法 review. 拆 PR 但都在 `pure-fn-refactor` 分支:
-- commit-1: domain 复查 + Wall consume.
-- commit-2: GameState do_* consume.
-- commit-3: 引入 apply + 删 recorded_actions hack.
-- commit-4: type-state 拆分 (如果决定做).
-- commit-5+: wrapper 适配.
-
-每 commit 自包含, 全测试绿.
-
-## 9. 命名 / 结构
-
-主 crate 切不切?
-- A. 保持单 crate, lib 部分 re-export 在 `tui_majo::engine::*`.
-- B. workspace + 子 crate `tui-majo-engine`, 可独立发版到 crates.io.
-- C. 不切, 但 `[lib]` 标记一些 pub 的 entry point 当作"lib API contract".
-
-> 决策: TODO. 倾向 A. B 的好处是清楚, 但 workspace 改 Cargo.toml + CI 一连串牵动.
-
-## 10. 风险登记
-
-- **net 层难映射 pure**: actor 是 long-running, msg-driven. 改成纯 `(state, msg) -> (state, [out])`
-  + tokio 外层 driver 可行, 但 mental_poker actor 已经是这风格, p2p swarm 不是. (但这层不在
-  本次 refactor 强制范围内, 见 §1 倾向 B.)
-- **type-state 状态数量增加**: 每加一种 phase 就要新加 struct. mahjong phase 数量
-  稳定 (Draw 瞬时省掉, 实际 4-5 个), 不太会爆.
-- **AtomicOp + state 演化兼容性**: 录像文件依赖 AtomicOp / RoundState 序列化格式.
-  以后加 op variant / 改 state 字段, 老录像可能反序列化失败. 加 schema version
-  字段, 或接受老录像 invalidation.
-- **学习收益 vs 时间成本不对等**: 设计都讨论清楚后, 实施部分只是机械 typing,
-  风险点都集中在前面这些决策上.
-
-**已通过设计消除的风险**:
-- ~~Recorder pop-and-replace hack~~ → engine 不再持 `recorded_actions` 字段, 录像在外部.
+- ~~Recorder pop-and-replace hack~~ → engine 不持 `recorded_actions`, 录像在外部.
 - ~~Type-state vs 统一 AtomicOp 互斥~~ → 4 层架构, 数据层与行为层分离.
 - ~~Type-state boilerplate 爆炸~~ → declarative macro `typed_op!{}` 消化.
-
-## 决策状态总览
-
-| 节 | 决策 | 状态 |
-|---|---|---|
-| 1 | 范围 | ⬜ (倾向 B: engine 全套 + ai) |
-| 2 | "Pure" 严格度 | ⬜ |
-| 3.1 | GameState 拆不拆 | ⬜ (倾向 C: type-state + 统一 AtomicOp + bridge) |
-| 3.2 | Wall consume 模式 | ⬜ |
-| 3.3 | events 出 state | ⬜ (倾向 出 state) |
-| 4.1 | apply 入口 | ✅ 单一 `(state, op) -> Result` |
-| 4.2 | AtomicOp enum | ✅ 单一统一算子集 (数据层) |
-| 4.3 | 自动转换 | ✅ 一步一 op, driver 循环 |
-| 5.1 | RNG 模型 | ⬜ (短期 wall 一次洗完, 不影响) |
-| 5.3 | tracing | ✅ engine 不带 info!, debug! 仅测试用 |
-| 6 | Error 性质 | ✅ "输入合法性裁定", 不是 calculation error |
-| 6 | Error 类型 | ✅ thiserror enum `OpError` |
-| 6 | apply 签名 | ✅ A. 公开返 Result, type-state 内部 total |
-| 6 | 错误回退语义 | ✅ C. `&self` 内部 clone |
-| 7 | 性能策略 | ✅ clone-everywhere |
-| 8.1 | 测试不动 | ✅ |
-| 8.2 | bottom-up 迁移 | ✅ |
-| 9 | crate 拆分 | ⬜ (倾向 A: 单 crate) |
-| 9 | Riichi 是否拆 op | ✅ 拆 2 op (RiichiDeclare + Discard) |
-| 9 | 岭上摸是否独立 op | ✅ 独立 (RinshanDraw) |
-| 9 | Pass 粒度 | ⬜ (倾向 单一 op) |
+- ~~Engine 内日志副作用~~ → 设计原则禁止, 测试覆盖代替.
+- ~~错误回退时 state 丢失~~ → `&self` + 内部 clone, 失败不动 caller state.
 
 ---
 
-## 已确立的核心模型
+## 7. 决策状态总览
 
-抽象概念 + 三层 fold 结构见 [`abstract-model.md`](abstract-model.md).
-
-要点 (用户已确认):
-- 3 层: 庄 (Match) / 局 (Round) / 操作 (AtomicOp).
-- "操作" = 原子单位, 摸是一个 op, 切是另一个. 没有"轮次/巡"作为独立层.
-- 鸣牌问题: 在原子模型下退化, 每个鸣牌就是一个 op, 不再"跨边界".
-
----
-
-**讨论顺序**: §1 (范围) + §2 (严格度) → §3-§4 (数据 + 转换模型) → §5+.
-当前 abstract-model.md 已锁住宏观结构, 剩下决策对应 scratchpad 各小节.
+| 议题 | 决策 |
+|---|---|
+| 范围 | engine 模块 + domain 走查; ai/net/ui/mental_poker 不进, 仅适配调用点 |
+| Pure 严格度 | API 全 `(&state, op) -> Result`; 内部 ownership 流转随便; clone-everywhere |
+| RoundState 结构 | type-state (4 层架构: AtomicOp / try_op / typed-op / typed state) |
+| Wall | `&self -> (Wall, Tile)` consume-and-return 风格 |
+| events 字段位置 | 倾向脱离 state (round_apply 返 Vec<Event>), 实施时定细节 |
+| apply 入口 | 单一 `round_apply`, 内部 dispatch |
+| AtomicOp 形态 | 单一统一 enum, 数据层. type-state 内部用 typed-op (宏生成) |
+| 自动转换 | 一步一 op, driver 循环 (Draw / RinshanDraw 也是显式 op) |
+| Riichi | 拆 2 op (RiichiDeclare + Discard), 中间 phase=AwaitRiichiDiscard |
+| 岭上摸 | 独立 RinshanDraw op, 中间 phase=AwaitRinshanDraw |
+| Pass | 单一 op (call window 整体关闭) |
+| RNG | 仅 wall shuffle, seed 显式参数, 容忍, 不抽象 RngStream |
+| tracing | engine 不允许 info!/warn!/error!; debug! 仅测试场景 |
+| Error 性质 | 输入合法性裁定, 不是 calculation error; calculation bug 应 panic |
+| Error 类型 | thiserror enum `OpError`, variants 反映规则反面陈述 |
+| 错误回退 | `&self` + 内部 clone, 失败时 caller state 不动 |
+| 性能 | clone-everywhere, 不优化 (turn-based < 1ms/op) |
+| 测试不动 | 是 (assertion 语义不变, 仅 helper 签名适配) |
+| 迁移顺序 | bottom-up (domain → wall → op → match → state → 删旧 → 适配外部) |
+| Crate 拆分 | 不切, 单 crate re-export `tui_majo::engine::*` |
