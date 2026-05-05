@@ -55,12 +55,20 @@ impl Wall {
         }
     }
 
-    /// 摸一张活牌(从尾部).
+    /// 摸一张活牌(从尾部). [`&mut self`] 版本, 旧 do_* 仍在用.
     pub fn draw(&mut self) -> Option<Tile> {
         self.live.pop()
     }
 
-    /// 杠后从岭上摸牌.
+    /// 摸一张活牌, **pure 风格**: consume self, 返新 Wall + Option<Tile>.
+    /// 用于 type-state apply 内部.
+    pub fn drawn(self) -> (Self, Option<Tile>) {
+        let mut next = self;
+        let t = next.live.pop();
+        (next, t)
+    }
+
+    /// 杠后从岭上摸牌. [`&mut self`] 版本, 旧 do_* 仍在用.
     pub fn rinshan_draw(&mut self) -> Option<Tile> {
         if self.rinshan_used >= RINSHAN_LEN {
             return None;
@@ -70,11 +78,31 @@ impl Wall {
         Some(t)
     }
 
-    /// 揭开新一张表 dora 指示牌(在杠成立后调用).
+    /// 杠后岭上摸, **pure 风格**: consume self.
+    pub fn rinshan_drawn(self) -> (Self, Option<Tile>) {
+        if self.rinshan_used >= RINSHAN_LEN {
+            return (self, None);
+        }
+        let t = self.dead[self.rinshan_used];
+        let mut next = self;
+        next.rinshan_used += 1;
+        (next, Some(t))
+    }
+
+    /// 揭开新一张表 dora 指示牌. [`&mut self`] 版本.
     pub fn reveal_next_dora(&mut self) {
         if self.dora_revealed < DORA_INDICATORS_MAX {
             self.dora_revealed += 1;
         }
+    }
+
+    /// 揭开新一张表 dora, **pure 风格**: consume self, 返新 Wall.
+    pub fn revealed_next_dora(self) -> Self {
+        let mut next = self;
+        if next.dora_revealed < DORA_INDICATORS_MAX {
+            next.dora_revealed += 1;
+        }
+        next
     }
 
     /// 当前已揭开的表 dora 指示牌列表.
@@ -287,6 +315,48 @@ mod tests {
         let live = (0..70).map(|i| mk(0, i)).collect();
         let dead = (70..84).map(|i| mk(0, i)).collect();
         let _ = Wall::from_components(live, dead, 0);
+    }
+
+    /// pure 版 drawn 与 mut 版 draw 行为等价.
+    #[test]
+    fn drawn_pure_equivalent_to_mut_draw() {
+        let mut w_mut = Wall::shuffled(42, false);
+        let mut w_pure = Wall::shuffled(42, false);
+        for _ in 0..5 {
+            let t_mut = w_mut.draw();
+            let (next_pure, t_pure) = w_pure.drawn();
+            w_pure = next_pure;
+            assert_eq!(t_mut.map(|t| t.id), t_pure.map(|t| t.id));
+            assert_eq!(w_mut.remaining(), w_pure.remaining());
+        }
+    }
+
+    /// pure 版 rinshan_drawn 行为正确, 4 次后返 None.
+    #[test]
+    fn rinshan_drawn_pure_capped_at_4() {
+        let w = Wall::shuffled(42, false);
+        let mut current = w;
+        for i in 0..4 {
+            let (next, t) = current.rinshan_drawn();
+            assert!(t.is_some(), "第 {i} 张应有");
+            current = next;
+        }
+        let (_, t) = current.rinshan_drawn();
+        assert!(t.is_none(), "第 5 张应无");
+    }
+
+    /// pure 版 revealed_next_dora 行为正确.
+    #[test]
+    fn revealed_next_dora_pure_caps() {
+        let mut w = Wall::shuffled(42, false);
+        assert_eq!(w.dora_indicators().len(), 1);
+        for expected in 2..=5 {
+            w = w.revealed_next_dora();
+            assert_eq!(w.dora_indicators().len(), expected);
+        }
+        // 已 5 张, 再 reveal 应 no-op.
+        w = w.revealed_next_dora();
+        assert_eq!(w.dora_indicators().len(), 5);
     }
 
     /// from_components dead 长度 ≠ 14 → panic.
