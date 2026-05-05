@@ -46,9 +46,31 @@ Engine 的唯一职责是给定 (state, op) 永远返回同 (state', err). 由 t
 
 `apply(state, op) -> Result<state, error>`. 2 入参, 不引入结构性分解.
 
-### 4. 结构化错误
+### 4. 错误是"输入合法性裁定", 不是"计算错误"
 
-`OpError` 是 typed enum (thiserror 派生). driver 决定如何展示 / 重试 / 中断.
+⚠️ 重要区分: `OpError` 不代表"计算出错了" (engine 永远不该有 calculation error;
+那种是 bug 应当 panic). 它代表"caller 喂的 op 在当前 state 下没意义".
+
+类比: 你的 `apply` 不是 `(i32, i32) -> i32` 那种全函数 — 它的输入域不是
+`(RoundState, AtomicOp)` 的全集, 而是其中"语义合法对"那个子集. Result 标记
+"caller 喂的 op 是不是在这个合法子集里".
+
+具体三类无效输入:
+
+| 类别 | 例子 | 检测层 |
+|---|---|---|
+| Phase 错配 | AwaitCalls 时给 Discard | type-state 编译期消; 不能消时 runtime |
+| 数据级错配 | Discard 一张不在手里的 tile | runtime, 必须查 state 实际值 |
+| 规则级错配 | Riichi 时未听牌 / 无役而和 | runtime, 必须查 state 实际值 |
+
+后两类 Rust 类型系统无能为力 (无 dependent types), 必然 runtime check.
+
+`OpError` enum 各 variant **就是** mahjong 规则书的反面陈述, 读 enum = 读"什么输入
+会被拒绝", 与 `AtomicOp` (合法算子集) 互补构成完整业务契约. 数据直接体现业务.
+
+`apply` 内部 (type-state 路径下, typed-op 已 validated 后) 的转移逻辑是 **total**
+没有 Result — 真正的 `1+1` 计算在那层. 公开 API 包一层 Result 是因为 caller 喂
+的 AtomicOp 是 untrusted, 必须裁定一次合法性.
 
 ## 术语
 
