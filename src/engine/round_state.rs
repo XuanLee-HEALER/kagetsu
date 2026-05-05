@@ -213,6 +213,48 @@ impl RoundState {
             RoundState::RoundEnd(s) => &s.common,
         }
     }
+
+    /// 当前轮到哪家 (RoundEnd / AwaitCalls 阶段无单一 turn 概念, None).
+    pub fn turn(&self) -> Option<Seat> {
+        match self {
+            RoundState::AwaitDraw(s) => Some(s.turn),
+            RoundState::AwaitDiscard(s) => Some(s.turn),
+            RoundState::AwaitRiichiDiscard(s) => Some(s.turn),
+            RoundState::AwaitRinshanDraw(s) => Some(s.turn),
+            RoundState::AwaitCalls(_) => None,
+            RoundState::RoundEnd(_) => None,
+        }
+    }
+
+    /// AwaitCalls 阶段的最近弃牌 (切牌方 + 弃出的那张). 其它 phase None.
+    pub fn last_discard(&self) -> Option<(Seat, Tile)> {
+        match self {
+            RoundState::AwaitCalls(s) => Some(s.last_discard),
+            _ => None,
+        }
+    }
+
+    /// 局是否已结束 (RoundEnd phase).
+    pub fn is_ended(&self) -> bool {
+        matches!(self, RoundState::RoundEnd(_))
+    }
+
+    /// AwaitDiscard / AwaitRiichiDiscard / AwaitRinshanDraw 阶段当前家刚摸到的牌 (None 若鸣牌后或非这些阶段).
+    pub fn last_drawn(&self) -> Option<Tile> {
+        match self {
+            RoundState::AwaitDiscard(s) => s.last_drawn,
+            RoundState::AwaitRiichiDiscard(s) => Some(s.last_drawn),
+            _ => None,
+        }
+    }
+
+    /// RoundEnd 阶段的结果, 其它 phase None.
+    pub fn result(&self) -> Option<&RoundResult> {
+        match self {
+            RoundState::RoundEnd(s) => Some(&s.result),
+            _ => None,
+        }
+    }
 }
 
 impl CommonRound {
