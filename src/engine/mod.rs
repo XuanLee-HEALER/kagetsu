@@ -14,6 +14,7 @@ pub mod event;
 pub mod match_state;
 pub mod op;
 pub mod phase;
+pub mod round_state;
 pub mod rules;
 pub mod score;
 pub mod state;
