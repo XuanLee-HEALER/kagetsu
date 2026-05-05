@@ -3,6 +3,17 @@
 > 基于用户提出的 3 层抽象: 庄 / 局 / 操作 (atomic op).
 > 概念 + 伪代码, 不涉及实施细节. 配套 scratchpad 见 `pure-functional-refactor.md`.
 
+## 设计原则 (已锁定)
+
+这些是后续所有设计选择的硬约束:
+
+1. **Engine = 计算库**, 算子集 + 转移函数. 类似 SQL relational algebra 那种"预定义算子, 别处实现都基于此".
+2. **Engine 的唯一职责是计算正确性**. 由测试用例验证, **不依靠运行时日志 / 防御性兜底**.
+3. **Driver (调用方) 负责所有副作用**: 业务操作序列调度 / 用户交互 / 网络同步 / 持久化 / 日志 / 错误展示.
+4. **Engine 内 `tracing::info!` 等运行时日志 = 副作用, 不出现**. 仅在测试场景用 `tracing::debug!` 辅助 (或干脆不用, 全靠 assertion).
+5. **签名形式**: 标准 fold 风格 `(state, op) -> Result<state, error>`. 2 个入参, 不引入"前一选手 / 影响值 / 新选手初始" 这种结构性分解.
+6. **错误是结构化的**: engine 返回 typed `OpError` enum, driver 决定怎么展示 / 重试 / 中断.
+
 ## 术语
 
 | 中文 | 英文 | 含义 | 时间跨度 |
@@ -272,38 +283,49 @@ struct RoundState {
 }
 
 enum Phase {
-    Draw,            // 等 turn 玩家摸
-    AwaitDiscard,    // 等 turn 玩家切 (或自摸/立直/暗杠/加杠)
-    AwaitCalls,      // 等其他玩家是否鸣 (Pon/Chi/Kan/Ron) 或 Pass
-    RoundEnd,        // 局已结束, 不再接受 op
+    Draw,                  // 等 turn 玩家摸
+    AwaitDiscard,          // 等 turn 玩家切 (或自摸/立直宣告/暗杠/加杠)
+    AwaitRiichiDiscard,    // 立直已宣告, 必须切立直牌 (无其它选项)
+    AwaitCalls,            // 等其他玩家是否鸣 (Pon/Chi/Kan/Ron) 或 Pass
+    RoundEnd,              // 局已结束, 不再接受 op
 }
 ```
 
-### Event 输入 (AtomicOp)
+### Event 输入 (AtomicOp) — 算子集
+
+AtomicOp 是 engine 暴露给 driver 的**唯一**计算原语集合 — 类似关系代数的 σ/π/⋈,
+所有上层逻辑都基于这些算子组合. 不增不减.
 
 ```rust
 enum AtomicOp {
-    // 引擎自动注入 (Draw 阶段无玩家决策)
+    // ─── 引擎自动注入 (无玩家决策, driver 调度时识别 phase 自行喂入) ───
     Draw,                                          // 从 wall pop 一张到 turn 玩家
     RinshanDraw,                                   // 杠后从岭上摸
 
-    // 玩家决策 (AwaitDiscard 阶段)
-    Discard(Tile),
-    Riichi(Tile),                                  // 立直 + 摸切宣告牌
-    Tsumo,
-    Ankan(TileIndex),
-    Shouminkan(TileIndex),
+    // ─── AwaitDiscard 阶段算子 ───
+    Discard(Tile),                                 // 普通切牌
+    RiichiDeclare,                                 // 仅"宣告立直", 不含切. 之后 phase=AwaitRiichiDiscard
+    Tsumo,                                         // 自摸
+    Ankan(TileIndex),                              // 暗杠
+    Shouminkan(TileIndex),                         // 加杠
 
-    // 玩家决策 (AwaitCalls 阶段)
+    // ─── AwaitRiichiDiscard 阶段算子 (唯一合法 op 是 Discard) ───
+    //     (复用上面的 Discard, 不需要单独 variant. 内部据 phase 区分语义)
+
+    // ─── AwaitCalls 阶段算子 ───
     Pon  { who: Seat, hand_tile_ids: [u16; 2] },
     Chi  { who: Seat, hand_tile_ids: [u16; 2] },
     Minkan { who: Seat, hand_tile_ids: [u16; 3] },
     Ron  { who: Seat },
-
-    // 跳过整个鸣牌窗口 (没人响应)
-    Pass,
+    Pass,                                          // 整个鸣牌窗口关闭, 没人响应
 }
 ```
+
+**Riichi 拆 2 op 的设计意图** (已锁定):
+- `RiichiDeclare`: 设立 player.riichi=true, 扣 1000 点, 标记 ippatsu_active. **不涉及切牌**.
+- 其后 phase = `AwaitRiichiDiscard`, 唯一合法 op 是 `Discard(t)`.
+- `Discard(t)` 在 `AwaitRiichiDiscard` 下执行时, 顺便把 t 在 river 中的索引写入 `riichi_river_idx` (UI 横置用).
+- 这样 record/replay 看到的就是 `[..., RiichiDeclare, Discard(8m), ...]` 两步, 没有 pop-and-replace 那种 hack.
 
 ### Transition
 
@@ -335,11 +357,22 @@ fn round_apply(s: RoundState, op: AtomicOp) -> Result<RoundState, OpError> {
             remove_from_hand(p, t.id);
             p.river.push(t);
             p.last_drawn = None;
+            // 立直宣告后的第一切: 写入 river 索引 (UI 横置用)
+            if s.phase == Phase::AwaitRiichiDiscard {
+                p.riichi_river_idx = Some(p.river.len() - 1);
+            }
             s.last_discard = Some((s.turn, t));
             s.phase = Phase::AwaitCalls;
         }
+
+        RiichiDeclare => {
+            apply_riichi_flag(&mut s.players[s.turn.idx()]);  // riichi=true, ippatsu_active=true, score-=1000
+            s.riichi_sticks_pool += 1;
+            s.phase = Phase::AwaitRiichiDiscard;              // 唯一合法下一 op = Discard
+        }
+
         Pon { who, hand_tile_ids } => {
-            let (from, called) = s.last_discard.expect("AwaitCalls must have last_discard");
+            let (from, called) = s.last_discard.ok_or(NoDiscard)?;
             apply_meld_pon(&mut s.players[who.idx()], hand_tile_ids, called, from);
             s.consume_discard(from);
             s.turn = who;
@@ -351,17 +384,9 @@ fn round_apply(s: RoundState, op: AtomicOp) -> Result<RoundState, OpError> {
         Ankan(kind) => {
             apply_ankan(&mut s.players[s.turn.idx()], kind);
             s.wall = reveal_next_dora(s.wall);
-            // 暗杠后还要摸岭上, 但那个是下一个 op (RinshanDraw), 不在这里做
-            s.phase = Phase::Draw;               // 实际是岭上摸: 用 RinshanDraw op
-        }
-
-        Riichi(t) => {
-            // 立直 = 一个 op 内含 "标记立直" + "切牌". 也可以拆成 RiichiDeclare + Discard 两个 op.
-            // (这里放一个 op 是为了让 record/replay 能区分"立直时切"和"立直后正常摸切")
-            apply_riichi(&mut s.players[s.turn.idx()]);
-            // 然后等同于 Discard(t)
-            apply_discard(&mut s, t);
-            s.players[s.turn.idx()].riichi_river_idx = Some(s.players[s.turn.idx()].river.len() - 1);
+            // 杠后必须摸岭上 → 由 driver 见 phase=Draw 并已杠的状态时, 喂入 RinshanDraw op
+            // (而不是普通 Draw). engine 据 last_meld_was_kan flag 区分.
+            s.phase = Phase::Draw;
         }
 
         Tsumo => {
@@ -380,12 +405,15 @@ fn round_apply(s: RoundState, op: AtomicOp) -> Result<RoundState, OpError> {
             s.turn = s.turn.next();
             s.last_discard = None;
             s.phase = Phase::Draw;
-            // (上面 Draw op 内会处理 wall 摸尽 → RoundEnd)
+            // 注: wall 摸尽 → RoundEnd 由下一个 Draw op 内处理
         }
     }
     Ok(s)
 }
 ```
+
+注: 上面伪代码用 `&mut s` 是为了易读. 真实实现按 §1 决策 (consume self / clone-and-return /
+type-state) 改写——**外观签名仍是 `(state, op) -> Result<state, err>`**.
 
 ### Summary
 
@@ -411,56 +439,88 @@ fn summarize_round(r: &RoundState) -> RoundOutcome {
 
 录像 (`RecordedAction`) **就是 AtomicOp 的序列化形式**. replay = 把 AtomicOp 流重新喂给 round_apply.
 
-## 组合 (Driver / Wrapper 层)
+## Engine 责任 vs Driver 责任
 
-driver 不是 pure 的——它要从外部 (UI / AI / 网络) 拉 op, 推给 round_apply, 处理时序:
+这是核心分工原则, 涉及任何具体实现都要回到这里检验.
+
+### Engine 只做一件事: 计算正确性
+
+| 项 | Engine ✅ | Driver ❌ |
+|---|---|---|
+| 状态转移 (`round_apply` / `match_apply`) | ✓ | |
+| 算子合法性判定 (`legal_ops(state)`) | ✓ | |
+| 算分 / 役判定 / 副露解析 | ✓ | |
+| 立直 / 振听 / 头跳 等规则 | ✓ | |
+| 牌山随机化 (洗牌算法) | ✓ | |
+| Pure & deterministic, 给定 (state, op) 永远同 (state', err) | ✓ | |
+
+**Engine 不做**:
+- 任何 IO (文件 / 网络 / stdout)
+- `tracing::info!` 等运行时日志 (副作用)
+- 用户提示文案 / 错误展示 / i18n
+- 业务序列调度 (谁先谁后 / 超时怎么办 / 网络延迟怎么办)
+
+测试用例覆盖正确性, 不靠日志兜底. `tracing::debug!` 只允许在测试场景临时插桩,
+release build 等同删除 (`cfg(debug_assertions)` 或 `RUST_LOG=off` 默认).
+
+### Driver 负责一切副作用
+
+| 项 | Driver ✅ |
+|---|---|
+| 决策来源调度: 谁的回合 → 找谁要 op (本地用户 / AI / 网络对手 / 录像) | ✓ |
+| 思考超时 / fallback op | ✓ |
+| 把 engine 返回的 typed Err 翻译成用户可读消息 | ✓ |
+| 状态持久化 / 录像存档 / 网络同步 | ✓ |
+| UI 渲染节流 / 动画时序 | ✓ |
+| 日志 (`tracing::info!` / `warn!` / `error!`) | ✓ |
+| Recovery: engine 返回 Err 后是重试 / 跳过 / 中断 | ✓ |
+
+### 实现模板
 
 ```rust
-fn play_round(init: RoundState, decision_source: impl FnMut(&RoundState) -> AtomicOp) -> RoundState {
+// engine 暴露
+pub fn round_apply(state: RoundState, op: AtomicOp) -> Result<RoundState, OpError>;
+pub fn match_apply(state: MatchState, outcome: RoundOutcome) -> MatchState;
+pub fn legal_ops(state: &RoundState) -> LegalOps;
+pub fn summarize_round(state: &RoundState) -> RoundOutcome;
+
+// engine 错误是结构化的
+#[derive(Debug, thiserror::Error)]
+pub enum OpError {
+    #[error("op {op:?} 在 phase {phase:?} 下不合法")]
+    IllegalForPhase { op: AtomicOpKind, phase: Phase },
+    #[error("立直方必须切立直牌")]
+    RiichiMustTsumogiri,
+    #[error("手中无 id={0} 的牌")]
+    TileNotInHand(u16),
+    // ...
+}
+
+// driver 是普通(可有副作用) Rust 代码
+fn play_round(init: RoundState, mut driver: impl Driver) -> Result<RoundState, DriverError> {
     let mut s = init;
     while s.phase != Phase::RoundEnd {
-        let op = match s.phase {
-            Phase::Draw       => AtomicOp::Draw,           // 自动
-            Phase::AwaitDiscard | Phase::AwaitCalls => decision_source(&s),
-            Phase::RoundEnd   => unreachable!(),
+        let op = driver.next_op(&s);          // 副作用: 等用户 / 查 AI / 收网络
+        s = match round_apply(s, op) {
+            Ok(s) => s,
+            Err(e) => {
+                driver.on_engine_error(&e);   // 副作用: 提示, 决定是否重试 / 中断
+                return Err(DriverError::EngineRejected(e));
+            }
         };
-        s = round_apply(s, op).unwrap();   // 非法 op 在 driver 层应该不出现
     }
-    s
-}
-
-fn play_match(init: MatchState, mut driver: impl Driver) -> MatchState {
-    let mut m = init;
-    while !m.ended {
-        let r_init  = init_round_from_match(&m);
-        let r_final = play_round(r_init, |s| driver.next_op(s));
-        m = match_apply(m, summarize_round(&r_final));
-    }
-    m
+    Ok(s)
 }
 ```
 
-UI 是 driver 实现:
-```rust
-impl Driver for UiDriver {
-    fn next_op(&mut self, s: &RoundState) -> AtomicOp {
-        match s.turn_owner() {
-            Owner::Local  => self.wait_for_local_input(s),
-            Owner::AI(i)  => self.ai[i].decide(s),
-            Owner::Remote => self.recv_from_network(s),
-        }
-    }
-}
-```
+driver 多实例:
+- `UiDriver`: 本地交互, 用 channel 等用户键盘 op.
+- `AiDriver`: 本地计算 op, 立刻返回.
+- `NetDriver`: 等远程对手 op 包.
+- `ReplayDriver`: 从 `Vec<AtomicOp>` 顺序 pop.
+- `TestDriver`: 测试 fixture 喂指定 op 序列.
 
-录像 driver 直接从录像 vec 取:
-```rust
-impl Driver for ReplayDriver {
-    fn next_op(&mut self, _: &RoundState) -> AtomicOp {
-        self.ops.pop_front().expect("ops 序列耗尽")
-    }
-}
-```
+每种 driver 共用同一个 engine, 互相不知道对方存在.
 
 ## 一局完整 trace 示例
 
@@ -469,21 +529,30 @@ initial_round (East 庄, dealer 配 13 张, 其它三家 13 张, wall 70 张):
 ```
 phase=Draw, turn=East
 ops:
-  1.  Draw                                  → East last_drawn=4m, phase=AwaitDiscard
-  2.  Discard(9p)                           → 河 [9p], phase=AwaitCalls, last_discard=(East,9p)
-  3.  Pass                                  → turn=South, phase=Draw
-  4.  Draw                                  → South last_drawn=2s, phase=AwaitDiscard
-  5.  Discard(2s)                           → 河 [2s], phase=AwaitCalls
-  6.  Pon{who=North,hand=[2s,2s]}           → North 副露 [2s 2s 2s], turn=North, phase=AwaitDiscard
-  7.  Discard(W风)                          → 河 [W], phase=AwaitCalls
-  8.  Pass                                  → turn=East, phase=Draw
-  9.  Draw                                  → East last_drawn=...
-  ... (省略 N 步)
- K.   Riichi(8m)                            → East 立直, riichi_river_idx 记入, phase=AwaitCalls
- K+1. Pass
- K+2. Draw                                  → South 摸
- ... 
- N.   Tsumo                                 → 当前 turn 自摸, last_result=Win{...}, phase=RoundEnd
+  1.   Draw                                 → East last_drawn=4m, phase=AwaitDiscard
+  2.   Discard(9p)                          → 河 [9p], phase=AwaitCalls, last_discard=(East,9p)
+  3.   Pass                                 → turn=South, phase=Draw
+  4.   Draw                                 → South last_drawn=2s, phase=AwaitDiscard
+  5.   Discard(2s)                          → 河 [2s], phase=AwaitCalls
+  6.   Pon{who=North,hand=[2s,2s]}          → North 副露 [2s 2s 2s], turn=North, phase=AwaitDiscard
+  7.   Discard(W风)                         → 河 [W], phase=AwaitCalls
+  8.   Pass                                 → turn=East, phase=Draw
+  9.   Draw                                 → East last_drawn=...
+  ...  (省略 N 步)
+ K.    RiichiDeclare                        → East riichi=true, score-=1000,
+                                              phase=AwaitRiichiDiscard
+ K+1.  Discard(8m)                          → 河末尾 8m, riichi_river_idx 自动写入,
+                                              phase=AwaitCalls
+ K+2.  Pass
+ K+3.  Draw                                 → South 摸
+  ...
+ M.    Ankan(发)                            → East 暗杠发, 翻新 dora, phase=Draw
+                                              (last_meld_was_kan=true)
+ M+1.  RinshanDraw                          → East 摸岭上, phase=AwaitDiscard
+ M+2.  Discard(...)
+  ...
+ N.    Tsumo                                → 当前 turn 自摸,
+                                              last_result=Win{...}, phase=RoundEnd
 ```
 
 `summarize_round` 抽出 `RoundOutcome::Win{winner, score, payments, ...}`,
@@ -492,14 +561,52 @@ ops:
 下一 round_init 由 `init_round_from_match(&match_state)` 给出 (新的 dealer / honba /
 立直棒池 / 重新洗 wall). 进入下一轮 fold.
 
-## 待定问题 (defer 到下一轮讨论)
+## 已确认决策
 
-- **输入模型**: round_apply 的签名是 `(state, op) -> state` 还是分解多入参形式? 用户决定后置.
+- ✅ **输入模型**: 标准 fold 2 入参, `(state, op) -> Result<state, err>`. 多入参形式不引入.
+- ✅ **AtomicOp = 数据层** (单一统一算子集), **type-state = 行为层** (内部不变量), 通过 bridge 函数 `try_op` 连接. 见下面 "数据层 vs 行为层" 一节.
+- ✅ **Riichi 拆 2 op**: `RiichiDeclare` + `Discard(t)`. 中间用 phase=`AwaitRiichiDiscard` 锁住, 唯一合法下一 op 是 Discard. `riichi_river_idx` 在 Discard 时自动写入.
+- ✅ **岭上摸独立 op**: `Ankan` / `Minkan` 后 phase=Draw, driver 据 last_meld_was_kan flag 喂入 `RinshanDraw` 而非 `Draw`. 录像粒度更明确, 翻新 dora 时机也清晰.
+- ✅ **Engine 不带运行时日志**: 没 `tracing::info!`. 仅 `tracing::debug!` 用作测试插桩, release build 自动抹掉.
+- ✅ **错误是结构化 typed enum** (`OpError`), driver 负责展示文案.
+
+## 数据层 vs 行为层 — type-state 与统一 AtomicOp 的共存方式
+
+(详细伪代码见 scratchpad §3.1.)
+
+外部 (录像 / 网络 / driver) 用单一 `AtomicOp` enum, 这是数据 — 序列化、传输、记录都用它.
+Engine 内部用 type-state — 每个 phase 一个 struct, 类型保证 transition 合法.
+两者通过每个 state 上的 `try_op(AtomicOp) -> Result<TypedOp>` bridge 函数连接.
+
+**4 层结构**:
+```
+L1  AtomicOp                                   ← 数据 (wire format)
+       ↓ try_op
+L4  AwaitDiscardOp / AwaitCallsOp / ...        ← 类型化算子子集 (engine 内部)
+       ↓ apply
+L2  AwaitDiscardState / AwaitCallsState / ...  ← typed state
+       ↓ .into()
+L3  RoundState (enum)                          ← 公开 state 类型
+```
+
+公开 API:
+```rust
+pub fn round_apply(state: RoundState, op: AtomicOp) -> Result<RoundState, OpError>;
+```
+
+外部只看到 `(RoundState, AtomicOp) -> Result<RoundState, OpError>` 这套统一签名,
+不关心内部 type-state 拆分. 录像/网络/replay 全都基于 AtomicOp, 单一算子代数.
+
+是不是要这样做仍是开放决策点 (`scratchpad §3.1`), 但**不再是与统一 AtomicOp 互斥的二选一**.
+
+## 待定问题 (下一轮讨论)
+
 - **State 拆分**: RoundState 单一 struct 还是 type-state 按 phase 拆? (`scratchpad §3.1`)
-- **Riichi 是 1 op 还是 2 op**: 当前模型 `Riichi(t)` 一个 op 内含切. 拆成 `RiichiDeclare` + `Discard(t)` 两个连续 op 也合理 (但要保证只能在 RiichiDeclare 后立刻切, 不能插别的). 影响 record 粒度.
-- **岭上摸**: 上面写法是 Ankan 后 phase=Draw + 下个 op 是 RinshanDraw. 也可以把岭上摸合并进 Ankan op 的 effect (Ankan 内部直接摸). 影响 op 粒度 + record.
-- **Pass 是单一 op 还是按家拆**: 现在是单一 op, 表示"call window 整个关闭". 按家拆会让录像更细但本质上多余 (没有"部分 Pass" 这种状态).
-- **错误回退**: round_apply 失败时 state 丢不丢? (`scratchpad §6`)
+  - 配套子问题: AtomicOp 是否也按 phase 拆 (`AwaitDiscardOp` / `AwaitCallsOp` ...)?
+    保持单一 enum 与"统一算子集"愿景一致, 但 type-state 下 driver 调度更别扭.
+- **Pass 粒度**: 单一 op (整窗口关闭) vs 按家拆 4 op? 倾向单一. 待最终拍板.
+- **错误回退语义**: round_apply Err 时, 老 state 怎么还回 caller?
+  (`scratchpad §6`: A. Err 带回 state / B. 内部 clone / C. consume self 失败时 state 丢)
 
 ## 与现有 codebase 的对应关系
 
