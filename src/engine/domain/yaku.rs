@@ -7,9 +7,9 @@
 //! - 全部役满完整实现
 //! - 古役: 类型完整, 实现按需逐个补 (默认关闭)
 
-use crate::domain::decompose::{Decomposition, Mentsu, WaitKind};
-use crate::domain::meld::Meld;
-use crate::domain::tile::TileIndex;
+use crate::engine::domain::decompose::{Decomposition, Mentsu, WaitKind};
+use crate::engine::domain::meld::Meld;
+use crate::engine::domain::tile::TileIndex;
 use crate::engine::rules::GameRules;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -334,11 +334,11 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
         // 役牌 (副露刻子: pon/kan)
         for meld in melds {
             let first_tile = match &meld.kind {
-                crate::domain::meld::MeldKind::Pon { tiles } => Some(tiles[0]),
-                crate::domain::meld::MeldKind::Minkan { tiles } => Some(tiles[0]),
-                crate::domain::meld::MeldKind::Shouminkan { tiles } => Some(tiles[0]),
-                crate::domain::meld::MeldKind::Ankan { tiles } => Some(tiles[0]),
-                crate::domain::meld::MeldKind::Chi { .. } => None,
+                crate::engine::domain::meld::MeldKind::Pon { tiles } => Some(tiles[0]),
+                crate::engine::domain::meld::MeldKind::Minkan { tiles } => Some(tiles[0]),
+                crate::engine::domain::meld::MeldKind::Shouminkan { tiles } => Some(tiles[0]),
+                crate::engine::domain::meld::MeldKind::Ankan { tiles } => Some(tiles[0]),
+                crate::engine::domain::meld::MeldKind::Chi { .. } => None,
             };
             if let Some(t) = first_tile {
                 let han = yakuhai_for(t.kind, ctx);
@@ -371,7 +371,7 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
         // 对对和: 闭手全刻 + 副露全刻 (chi 视作顺子, 不计)
         let melds_all_koutsu = melds
             .iter()
-            .all(|m| !matches!(m.kind, crate::domain::meld::MeldKind::Chi { .. }));
+            .all(|m| !matches!(m.kind, crate::engine::domain::meld::MeldKind::Chi { .. }));
         if mentsu.iter().all(|m| !matches!(m, Mentsu::Shuntsu(_))) && melds_all_koutsu {
             out.push((Yaku::Toitoi, 2));
         }
@@ -763,19 +763,19 @@ fn mentsu_with_melds(closed: &[Mentsu], melds: &[Meld]) -> Vec<Mentsu> {
     let mut out: Vec<Mentsu> = closed.to_vec();
     for m in melds {
         match &m.kind {
-            crate::domain::meld::MeldKind::Chi { tiles, .. } => {
+            crate::engine::domain::meld::MeldKind::Chi { tiles, .. } => {
                 let mut kinds = [tiles[0].kind.0, tiles[1].kind.0, tiles[2].kind.0];
                 kinds.sort();
                 out.push(Mentsu::Shuntsu(TileIndex(kinds[0])));
             }
-            crate::domain::meld::MeldKind::Pon { tiles } => {
+            crate::engine::domain::meld::MeldKind::Pon { tiles } => {
                 out.push(Mentsu::Koutsu(tiles[0].kind, false));
             }
-            crate::domain::meld::MeldKind::Minkan { tiles }
-            | crate::domain::meld::MeldKind::Shouminkan { tiles } => {
+            crate::engine::domain::meld::MeldKind::Minkan { tiles }
+            | crate::engine::domain::meld::MeldKind::Shouminkan { tiles } => {
                 out.push(Mentsu::Kantsu(tiles[0].kind, false));
             }
-            crate::domain::meld::MeldKind::Ankan { tiles } => {
+            crate::engine::domain::meld::MeldKind::Ankan { tiles } => {
                 out.push(Mentsu::Kantsu(tiles[0].kind, true));
             }
         }
@@ -832,7 +832,7 @@ fn chanta_check(mentsu: &[Mentsu], pair: TileIndex, melds: &[Meld]) -> (bool, bo
     // 副露分析: chi 算 shuntsu (取最小 kind 判起始), pon/kan 算 koutsu/kantsu
     for meld in melds {
         match &meld.kind {
-            crate::domain::meld::MeldKind::Chi { .. } => {
+            crate::engine::domain::meld::MeldKind::Chi { .. } => {
                 has_shuntsu = true;
                 let min_kind = meld.tiles().iter().map(|t| t.kind.0).min().unwrap();
                 let r = min_kind % 9;
@@ -875,7 +875,7 @@ fn is_honroutou(mentsu: &[Mentsu], pair: TileIndex, melds: &[Meld]) -> bool {
     }
     // 副露含 chi → 含顺子 → 非 honroutou; 副露含非 yaochuu → 非 honroutou
     for meld in melds {
-        if matches!(meld.kind, crate::domain::meld::MeldKind::Chi { .. }) {
+        if matches!(meld.kind, crate::engine::domain::meld::MeldKind::Chi { .. }) {
             return false;
         }
         if !meld.tiles()[0].kind.is_yaochuu() {
@@ -986,7 +986,7 @@ fn single_suit(d: &Decomposition, melds: &[Meld]) -> Option<Option<()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::decompose::decompose;
+    use crate::engine::domain::decompose::decompose;
     use crate::engine::rules::GameRules;
 
     fn ctx_for(d: &Decomposition, menzen: bool) -> WinContext<'_> {

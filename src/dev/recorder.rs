@@ -8,8 +8,8 @@
 //! 入口推 action; UI 层 ([`crate::ui::screens::game::GameScreenState`])
 //! 负责在 round 起始时 snapshot, RoundEnd 时 flush 到磁盘.
 
-use crate::domain::meld::Seat;
-use crate::domain::tile::TileIndex;
+use crate::engine::domain::meld::Seat;
+use crate::engine::domain::tile::TileIndex;
 use crate::engine::state::GameState;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -171,7 +171,7 @@ fn find_tile_in_hand(
     g: &GameState,
     seat: Seat,
     tile_id: u16,
-) -> Option<crate::domain::tile::Tile> {
+) -> Option<crate::engine::domain::tile::Tile> {
     g.players[seat.index()]
         .hand
         .closed
@@ -184,7 +184,7 @@ fn find_two_in_hand(
     g: &GameState,
     seat: Seat,
     ids: [u16; 2],
-) -> Result<[crate::domain::tile::Tile; 2], String> {
+) -> Result<[crate::engine::domain::tile::Tile; 2], String> {
     let a = find_tile_in_hand(g, seat, ids[0])
         .ok_or_else(|| format!("hand_tile_ids[0]={} 不在 {:?} 手中", ids[0], seat))?;
     let b = find_tile_in_hand(g, seat, ids[1])
@@ -196,7 +196,7 @@ fn find_three_in_hand(
     g: &GameState,
     seat: Seat,
     ids: [u16; 3],
-) -> Result<[crate::domain::tile::Tile; 3], String> {
+) -> Result<[crate::engine::domain::tile::Tile; 3], String> {
     let a = find_tile_in_hand(g, seat, ids[0])
         .ok_or_else(|| format!("Minkan id[0]={} 不在手中", ids[0]))?;
     let b = find_tile_in_hand(g, seat, ids[1])
@@ -210,7 +210,7 @@ fn find_three_in_hand(
 mod tests {
     use super::*;
     use crate::ai::dummy::ai_choose_discard;
-    use crate::domain::action::Action;
+    use crate::engine::domain::action::Action;
     use crate::engine::phase::Phase;
     use crate::engine::rules::GameRules;
 

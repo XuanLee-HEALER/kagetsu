@@ -6,7 +6,7 @@
 //!
 //! 活牌山可摸 `136 - 14 - 13×4 = 70` 张.
 
-use crate::domain::tile::{Tile, standard_set};
+use crate::engine::domain::tile::{Tile, standard_set};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn from_components_preserves_state() {
-        use crate::domain::tile::TileIndex;
+        use crate::engine::domain::tile::TileIndex;
         let mk = |k: u8, id: u16| Tile {
             id,
             kind: TileIndex(k),
@@ -181,7 +181,7 @@ mod tests {
     /// 同一张表 dora 指示牌 (除非两张随机刚好相同).
     #[test]
     fn ura_dora_indices_distinct_from_omote() {
-        use crate::domain::tile::TileIndex;
+        use crate::engine::domain::tile::TileIndex;
         // 用 from_components 显式控制 dead 区让 omote/ura 必定不同.
         let mk = |k: u8, id: u16| Tile {
             id,
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "dora_revealed")]
     fn from_components_rejects_zero_dora() {
-        use crate::domain::tile::TileIndex;
+        use crate::engine::domain::tile::TileIndex;
         let mk = |k: u8, id: u16| Tile {
             id,
             kind: TileIndex(k),
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "dead wall 必须 14 张")]
     fn from_components_rejects_wrong_dead_size() {
-        use crate::domain::tile::TileIndex;
+        use crate::engine::domain::tile::TileIndex;
         let mk = |k: u8, id: u16| Tile {
             id,
             kind: TileIndex(k),

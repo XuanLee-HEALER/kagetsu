@@ -4,7 +4,7 @@
 //! (超时不替玩家判断是否要和牌). 仅在 AwaitDiscard 阶段切刚摸到的那张,
 //! 其他阶段 Pass.
 
-use crate::domain::action::Action;
+use crate::engine::domain::action::Action;
 use crate::engine::phase::Phase;
 use crate::engine::state::GameState;
 

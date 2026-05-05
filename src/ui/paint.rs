@@ -6,7 +6,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::style::{Modifier, Style};
 
-use crate::domain::tile::Tile;
+use crate::engine::domain::tile::Tile;
 use crate::ui::theme::Theme;
 
 /// 牌张视觉状态.
@@ -313,7 +313,7 @@ pub fn paint_boxed_row_hl(
     theme: &Theme,
     selected: Option<usize>,
     drawn_idx: Option<usize>,
-    highlight_kind: Option<crate::domain::tile::TileIndex>,
+    highlight_kind: Option<crate::engine::domain::tile::TileIndex>,
 ) {
     if tiles.is_empty() {
         return;
@@ -480,7 +480,7 @@ pub fn paint_discard_grid_wide_hl(
     river: &[Tile],
     theme: &Theme,
     riichi_at: Option<usize>,
-    highlight_kind: Option<crate::domain::tile::TileIndex>,
+    highlight_kind: Option<crate::engine::domain::tile::TileIndex>,
 ) {
     const COLS: usize = 6;
     const ROWS: usize = 4;
@@ -536,7 +536,7 @@ pub fn paint_meld_row_tight_hl(
     y: u16,
     tiles: &[Tile],
     theme: &Theme,
-    highlight_kind: Option<crate::domain::tile::TileIndex>,
+    highlight_kind: Option<crate::engine::domain::tile::TileIndex>,
 ) {
     for (i, t) in tiles.iter().enumerate() {
         let cx = x + (i as u16) * 3;

@@ -7,8 +7,8 @@
 //!
 //! 算法详见 docs/spec/winning-shapes.md
 
-use crate::domain::meld::Meld;
-use crate::domain::tile::TileIndex;
+use crate::engine::domain::meld::Meld;
+use crate::engine::domain::tile::TileIndex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mentsu {
@@ -315,7 +315,7 @@ pub fn tenpai_tiles(closed: &[u8; 34], melds: &[Meld]) -> Vec<TileIndex> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::tile::TileIndex;
+    use crate::engine::domain::tile::TileIndex;
 
     fn h(spec: &[(u8, u8)]) -> [u8; 34] {
         let mut a = [0u8; 34];

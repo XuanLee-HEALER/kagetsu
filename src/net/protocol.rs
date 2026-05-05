@@ -14,8 +14,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::meld::{Meld, Seat};
-use crate::domain::tile::{Tile, TileIndex};
+use crate::engine::domain::meld::{Meld, Seat};
+use crate::engine::domain::tile::{Tile, TileIndex};
 use crate::engine::event::GameEvent;
 use crate::engine::phase::Phase;
 use crate::engine::rules::GameRules;

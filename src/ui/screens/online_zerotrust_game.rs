@@ -603,10 +603,10 @@ impl ZeroTrustGameState {
         if win.player != self.args.own_index {
             return None;
         }
-        use crate::domain::decompose::decompose;
-        use crate::domain::meld::{Meld, MeldKind, Seat};
-        use crate::domain::tile::{Tile, TileIndex};
-        use crate::domain::yaku::{WinContext, detect_yaku};
+        use crate::engine::domain::decompose::decompose;
+        use crate::engine::domain::meld::{Meld, MeldKind, Seat};
+        use crate::engine::domain::tile::{Tile, TileIndex};
+        use crate::engine::domain::yaku::{WinContext, detect_yaku};
         use crate::engine::rules::GameRules;
         use crate::engine::score::evaluate;
 

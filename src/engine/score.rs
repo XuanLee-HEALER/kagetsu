@@ -2,9 +2,9 @@
 //!
 //! 详见 docs/spec/scoring.md
 
-use crate::domain::decompose::{Decomposition, Mentsu, WaitKind};
-use crate::domain::meld::{Meld, MeldKind, Seat};
-use crate::domain::yaku::{WinContext, Yaku, detect_yaku};
+use crate::engine::domain::decompose::{Decomposition, Mentsu, WaitKind};
+use crate::engine::domain::meld::{Meld, MeldKind, Seat};
+use crate::engine::domain::yaku::{WinContext, Yaku, detect_yaku};
 use crate::engine::rules::GameRules;
 use crate::engine::state::PlayerState;
 
@@ -114,7 +114,7 @@ fn mentsu_fu(
     m: &Mentsu,
     ctx: &WinContext,
     wait: WaitKind,
-    winning: crate::domain::tile::TileIndex,
+    winning: crate::engine::domain::tile::TileIndex,
 ) -> u32 {
     match m {
         Mentsu::Shuntsu(_) => 0,

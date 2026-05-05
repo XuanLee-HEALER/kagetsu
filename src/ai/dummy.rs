@@ -4,8 +4,8 @@
 //! - 摸牌后: 能自摸就和, 否则切刚摸的那张 (摸切).
 //! - 他家弃牌: 能荣和就和, 否则跳过 (不鸣牌).
 
-use crate::domain::action::Action;
-use crate::domain::meld::Seat;
+use crate::engine::domain::action::Action;
+use crate::engine::domain::meld::Seat;
 use crate::engine::state::GameState;
 
 /// 决定 AI 在 AwaitDiscard 阶段的动作.

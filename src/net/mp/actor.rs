@@ -1766,7 +1766,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_action_in_keyexchange_ignored_no_panic() {
-        use crate::domain::action::Action;
+        use crate::engine::domain::action::Action;
         let mut h = spawn_mp_player(test_cfg(0), Some(42));
         let mut rx = h.take_event_rx().unwrap();
         // 吞掉 init phase event

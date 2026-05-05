@@ -26,8 +26,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
-use crate::domain::meld::{MeldKind, Seat};
-use crate::domain::tile::{Tile, TileIndex};
+use crate::engine::domain::meld::{MeldKind, Seat};
+use crate::engine::domain::tile::{Tile, TileIndex};
 use crate::engine::event::GameEvent;
 use crate::engine::phase::Phase;
 use crate::net::protocol::{
@@ -942,8 +942,8 @@ impl OnlineGameState {
         );
         // 听牌检测: 仅在闭手 13 张时计算
         let waits = if view.my_hand.len() == 13 {
-            let counts = crate::domain::tile::count_by_kind(&view.my_hand);
-            crate::domain::decompose::tenpai_tiles(&counts, &me.melds)
+            let counts = crate::engine::domain::tile::count_by_kind(&view.my_hand);
+            crate::engine::domain::decompose::tenpai_tiles(&counts, &me.melds)
         } else {
             Vec::new()
         };
@@ -1308,7 +1308,7 @@ fn tiles_eq(a: &Tile, b: &Tile) -> bool {
     a.kind == b.kind && a.red == b.red
 }
 
-fn meld_tiles(meld: &crate::domain::meld::Meld) -> Vec<Tile> {
+fn meld_tiles(meld: &crate::engine::domain::meld::Meld) -> Vec<Tile> {
     match &meld.kind {
         MeldKind::Chi { tiles } | MeldKind::Pon { tiles } => tiles.to_vec(),
         MeldKind::Minkan { tiles } | MeldKind::Shouminkan { tiles } | MeldKind::Ankan { tiles } => {

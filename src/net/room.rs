@@ -25,8 +25,8 @@ use tokio::sync::{
 };
 use uuid::Uuid;
 
-use crate::domain::meld::Seat;
-use crate::domain::tile::Tile;
+use crate::engine::domain::meld::Seat;
+use crate::engine::domain::tile::Tile;
 use crate::engine::phase::Phase;
 use crate::engine::rules::GameRules;
 use crate::engine::score::final_ranking;
@@ -986,7 +986,7 @@ impl RoomActor {
         // hints 简化: 列出主要可用动作 (UI 自己渲染按键速查).
         let hints = vec![
             NetAction::Discard(crate::ui::screens::game::TileSpec {
-                kind: crate::domain::tile::TileIndex(0),
+                kind: crate::engine::domain::tile::TileIndex(0),
             }),
             NetAction::Tsumo,
         ];
@@ -1006,11 +1006,11 @@ impl RoomActor {
     }
 
     /// 把 AI 的 [`Action`] 转化成 GameState 调用. 失败时退化为摸切.
-    fn apply_ai_action(&mut self, action: crate::domain::action::Action) {
+    fn apply_ai_action(&mut self, action: crate::engine::domain::action::Action) {
         let Some(game) = self.game.as_mut() else {
             return;
         };
-        use crate::domain::action::Action;
+        use crate::engine::domain::action::Action;
         match action {
             Action::Discard(t) => {
                 let _ = game.do_discard(t);
@@ -1487,7 +1487,7 @@ mod tests {
     // RoomActor 内部单元测试 (直接 sync 调内部方法)
     // ============================================================================
 
-    use crate::domain::tile::TileIndex;
+    use crate::engine::domain::tile::TileIndex;
 
     /// 构造一个处于 InGame 状态的 RoomActor (sync, 不 spawn task).
     /// 玩家 id: 1=East, 2=South, 3=West, 4=North. is_ai 由 humans 列表决定.

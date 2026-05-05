@@ -1,7 +1,7 @@
 //! 手牌容器.
 
-use crate::domain::meld::Meld;
-use crate::domain::tile::{TILE_KINDS, Tile, count_by_kind};
+use crate::engine::domain::meld::Meld;
+use crate::engine::domain::tile::{TILE_KINDS, Tile, count_by_kind};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -35,8 +35,8 @@ impl Hand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::meld::{Meld, MeldKind, Seat};
-    use crate::domain::tile::TileIndex;
+    use crate::engine::domain::meld::{Meld, MeldKind, Seat};
+    use crate::engine::domain::tile::TileIndex;
 
     fn t(kind: u8, id: u16) -> Tile {
         Tile {

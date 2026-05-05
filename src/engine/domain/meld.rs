@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::tile::Tile;
+use crate::engine::domain::tile::Tile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Seat {
@@ -80,7 +80,7 @@ impl Meld {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::tile::TileIndex;
+    use crate::engine::domain::tile::TileIndex;
 
     fn t(kind: u8, id: u16) -> Tile {
         Tile {

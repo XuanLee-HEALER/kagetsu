@@ -7,7 +7,7 @@
 //! - event 不投影 GameStateView (Standard 隐藏他家手牌的概念), 因为 ZeroTrust
 //!   下他家手牌密文对所有人都是公开的, 各自 GameState 镜像直接渲染.
 
-use crate::domain::action::Action;
+use crate::engine::domain::action::Action;
 use crate::mental_poker::wire::MentalPokerMsg;
 
 use super::phase::MpPhase;
@@ -172,8 +172,8 @@ pub enum MpEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::meld::Seat;
-    use crate::domain::tile::{Tile, TileIndex};
+    use crate::engine::domain::meld::Seat;
+    use crate::engine::domain::tile::{Tile, TileIndex};
 
     #[test]
     fn local_action_carries_action_variant() {

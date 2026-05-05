@@ -24,9 +24,9 @@ use std::time::{Duration, Instant};
 
 use crate::ai::dummy::ai_choose_discard;
 use crate::ai::timeout::default_action_on_timeout;
-use crate::domain::action::Action;
-use crate::domain::meld::{MeldKind, Seat};
-use crate::domain::tile::{Tile, TileIndex};
+use crate::engine::domain::action::Action;
+use crate::engine::domain::meld::{MeldKind, Seat};
+use crate::engine::domain::tile::{Tile, TileIndex};
 use crate::engine::event::GameEvent;
 use crate::engine::phase::Phase;
 use crate::engine::rules::GameRules;
@@ -796,7 +796,7 @@ impl GameScreenState {
 
     /// 当前 selected 手牌的 kind (用于河/副露/手牌联动高亮).
     /// 仅自家 AwaitDiscard 阶段返回 Some, 其它阶段返回 None.
-    fn highlight_kind(&self) -> Option<crate::domain::tile::TileIndex> {
+    fn highlight_kind(&self) -> Option<crate::engine::domain::tile::TileIndex> {
         if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
             return None;
         }
@@ -1445,8 +1445,8 @@ impl GameScreenState {
         );
         // 听牌检测
         let waits = if p.hand.closed.len() == 13 {
-            crate::domain::decompose::tenpai_tiles(
-                &crate::domain::tile::count_by_kind(&p.hand.closed),
+            crate::engine::domain::decompose::tenpai_tiles(
+                &crate::engine::domain::tile::count_by_kind(&p.hand.closed),
                 &p.hand.melds,
             )
         } else {

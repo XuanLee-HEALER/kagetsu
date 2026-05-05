@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::meld::Seat;
-use crate::domain::tile::{Tile, TileIndex};
+use crate::engine::domain::meld::Seat;
+use crate::engine::domain::tile::{Tile, TileIndex};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameEvent {
@@ -25,7 +25,7 @@ pub(crate) const MAX_EVENTS: usize = 32;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::tile::TileIndex;
+    use crate::engine::domain::tile::TileIndex;
 
     fn t(kind: u8, id: u16) -> Tile {
         Tile {

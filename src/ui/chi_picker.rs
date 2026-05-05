@@ -8,7 +8,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use crate::domain::tile::Tile;
+use crate::engine::domain::tile::Tile;
 use crate::ui::paint::{paint_double_box, paint_fill, paint_str, paint_tile_wide};
 use crate::ui::theme::Theme;
 
@@ -142,7 +142,7 @@ impl ChiPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::tile::TileIndex;
+    use crate::engine::domain::tile::TileIndex;
     use crossterm::event::KeyModifiers;
 
     fn key(code: KeyCode) -> KeyEvent {
