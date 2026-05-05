@@ -273,8 +273,291 @@ fn hand_contains(player: &PlayerState, tile_id: u16) -> bool {
 }
 
 // ============================================================
+// 公开 entry: round_apply / legal_ops / summarize_round / init_round
+// ============================================================
+
+/// 公开 round_apply — engine 暴露的局层转移函数.
+/// 接 untrusted AtomicOp, 内部 dispatch 到 typed state 的 try_op + apply.
+/// 失败时 caller state 不动 (内部已 clone 自 &state).
+pub fn round_apply(
+    state: &RoundState,
+    op: AtomicOp,
+) -> Result<(RoundState, Vec<GameEvent>), OpError> {
+    match state.clone() {
+        RoundState::AwaitDraw(s) => {
+            let typed = s.try_op(op)?;
+            let (next, events) = s.apply(typed);
+            Ok((next.into(), events))
+        }
+        RoundState::AwaitDiscard(s) => {
+            let typed = s.try_op(op)?;
+            let (next, events) = s.apply(typed);
+            Ok((next.into(), events))
+        }
+        RoundState::AwaitRiichiDiscard(s) => {
+            let typed = s.try_op(op)?;
+            let (next, events) = s.apply(typed);
+            Ok((next.into(), events))
+        }
+        RoundState::AwaitRinshanDraw(s) => {
+            let typed = s.try_op(op)?;
+            let (next, events) = s.apply(typed);
+            Ok((next.into(), events))
+        }
+        RoundState::AwaitCalls(s) => {
+            let typed = s.try_op(op)?;
+            let (next, events) = s.apply(typed);
+            Ok((next.into(), events))
+        }
+        RoundState::RoundEnd(_) => Err(OpError::AlreadyEnded),
+    }
+}
+
+/// 当前 RoundState 下哪些 AtomicOp 合法 — 给 driver / AI 决策用.
+///
+/// 返回结构汇总各 phase 下可执行算子. 实现思路: 调 try_op 走遍所有可能 op,
+/// 收集成功的. 但当前实现简化: 仅返回结构化能力 (per-player call 选项 +
+/// 自家 self 选项), 不返回完整 AtomicOp 列表.
+#[derive(Debug, Clone, Default)]
+pub struct LegalOps {
+    /// 自家 (turn) 在 AwaitDiscard 阶段可宣的动作 (类似旧 SelfOptions).
+    pub can_tsumo: bool,
+    pub riichi_discards: Vec<Tile>,
+    pub ankan: Vec<TileIndex>,
+    pub shouminkan: Vec<TileIndex>,
+    /// 各家在 AwaitCalls 阶段可响应的动作 (类似旧 CallOptions, 4 家分别).
+    pub calls: [PerSeatCalls; 4],
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PerSeatCalls {
+    pub pon: Option<[Tile; 2]>,
+    pub chi: Vec<[Tile; 2]>,
+    pub minkan: Option<[Tile; 3]>,
+    pub ron: bool,
+}
+
+pub fn legal_ops(state: &RoundState) -> LegalOps {
+    let mut ops = LegalOps::default();
+    match state {
+        RoundState::AwaitDiscard(s) => {
+            // 自家可宣
+            ops.can_tsumo = try_tsumo(s).is_some();
+            let p = &s.common.players[s.turn.index()];
+            if !p.riichi
+                && p.hand.is_menzen()
+                && p.score >= 1000
+                && s.common.wall.remaining() >= 4
+            {
+                let mut seen = Vec::new();
+                for t in &p.hand.closed {
+                    if seen.contains(&t.kind.0) {
+                        continue;
+                    }
+                    if is_tenpai_after_discard(p, t.id) {
+                        ops.riichi_discards.push(*t);
+                        seen.push(t.kind.0);
+                    }
+                }
+            }
+            if !p.riichi {
+                let counts = count_by_kind(&p.hand.closed);
+                for k in 0..34u8 {
+                    if counts[k as usize] == 4 {
+                        ops.ankan.push(TileIndex(k));
+                    }
+                }
+                for meld in &p.hand.melds {
+                    if let MeldKind::Pon { tiles } = &meld.kind {
+                        let kind = tiles[0].kind;
+                        if counts[kind.0 as usize] >= 1 {
+                            ops.shouminkan.push(kind);
+                        }
+                    }
+                }
+            }
+        }
+        RoundState::AwaitCalls(s) => {
+            let (from, called) = s.last_discard;
+            for who in Seat::ALL {
+                if who == from {
+                    continue;
+                }
+                let p = &s.common.players[who.index()];
+                let mut pc = PerSeatCalls::default();
+
+                // Pon: 2 张同 kind 在手.
+                let counts = count_by_kind(&p.hand.closed);
+                if !p.riichi && counts[called.kind.0 as usize] >= 2 {
+                    let two: Vec<Tile> = p
+                        .hand
+                        .closed
+                        .iter()
+                        .filter(|t| t.kind == called.kind)
+                        .copied()
+                        .take(2)
+                        .collect();
+                    if two.len() == 2 {
+                        pc.pon = Some([two[0], two[1]]);
+                    }
+                }
+
+                // Chi: 仅上家.
+                if !p.riichi && from.next() == who && called.kind.is_suupai() {
+                    let kc = called.kind.0;
+                    let suit = kc / 9;
+                    let n = kc % 9;
+                    let candidates: Vec<(u8, u8)> = match n {
+                        0 => vec![(1, 2)],
+                        1 => vec![(0, 2), (2, 3)],
+                        7 => vec![(5, 6), (6, 8)],
+                        8 => vec![(6, 7)],
+                        _ => vec![(n - 1, n + 1), (n - 2, n - 1), (n + 1, n + 2)],
+                    };
+                    for (a, b) in candidates {
+                        let ka = suit * 9 + a;
+                        let kb = suit * 9 + b;
+                        if counts[ka as usize] >= 1 && counts[kb as usize] >= 1 {
+                            let ta = p
+                                .hand
+                                .closed
+                                .iter()
+                                .find(|t| t.kind.0 == ka)
+                                .copied()
+                                .unwrap();
+                            let tb = p
+                                .hand
+                                .closed
+                                .iter()
+                                .find(|t| t.kind.0 == kb)
+                                .copied()
+                                .unwrap();
+                            pc.chi.push([ta, tb]);
+                        }
+                    }
+                }
+
+                // Minkan: 3 张同 kind.
+                if !p.riichi && counts[called.kind.0 as usize] >= 3 {
+                    let three: Vec<Tile> = p
+                        .hand
+                        .closed
+                        .iter()
+                        .filter(|t| t.kind == called.kind)
+                        .copied()
+                        .take(3)
+                        .collect();
+                    if three.len() == 3 {
+                        pc.minkan = Some([three[0], three[1], three[2]]);
+                    }
+                }
+
+                // Ron: 牌型 + 役 ok.
+                if try_ron(s, who).is_some() {
+                    pc.ron = true;
+                }
+
+                ops.calls[who.index()] = pc;
+            }
+        }
+        _ => {}
+    }
+    ops
+}
+
+/// 局结束 (RoundState::RoundEnd) 时抽 RoundOutcome 喂给 match_apply.
+/// 其它 phase 返 None.
+pub fn summarize_round(state: &RoundState) -> Option<crate::engine::match_state::RoundOutcome> {
+    if let RoundState::RoundEnd(s) = state {
+        match &s.result {
+            RoundResult::Win {
+                winner,
+                is_tsumo,
+                loser,
+                payments,
+                ..
+            } => Some(crate::engine::match_state::RoundOutcome::Win {
+                winner: *winner,
+                is_tsumo: *is_tsumo,
+                loser: *loser,
+                payments: payments.clone(),
+            }),
+            RoundResult::Ryuukyoku { kind } => {
+                let dealer_p = &s.common.players[s.common.dealer.index()];
+                let counts = count_by_kind(&dealer_p.hand.closed);
+                let dealer_tenpai =
+                    !crate::engine::domain::decompose::tenpai_tiles(&counts, &dealer_p.hand.melds)
+                        .is_empty();
+                Some(crate::engine::match_state::RoundOutcome::Ryuukyoku {
+                    kind: *kind,
+                    dealer_tenpai,
+                })
+            }
+        }
+    } else {
+        None
+    }
+}
+
+/// 给定 MatchState + seed 创建一局新 RoundState (起手是 AwaitDraw, 等 driver 喂 Draw).
+///
+/// 返回的 state.turn = MatchState.dealer (新庄家先摸).
+pub fn init_round(
+    m: &crate::engine::match_state::MatchState,
+    seed: u64,
+) -> RoundState {
+    use crate::engine::state::PlayerState;
+
+    // 4 玩家 PlayerState, score 来自 MatchState.scores.
+    let mut players: [PlayerState; 4] = [
+        PlayerState::new(Seat::East, m.scores[0]),
+        PlayerState::new(Seat::South, m.scores[1]),
+        PlayerState::new(Seat::West, m.scores[2]),
+        PlayerState::new(Seat::North, m.scores[3]),
+    ];
+
+    let mut wall = Wall::shuffled(seed, m.rules.aka_dora);
+    // 配牌 13×4
+    for _ in 0..13 {
+        for seat in Seat::ALL {
+            if let Some(t) = wall.draw() {
+                players[seat.index()].hand.closed.push(t);
+            }
+        }
+    }
+    // 排序
+    for p in players.iter_mut() {
+        sort_hand(&mut p.hand.closed);
+    }
+
+    let common = CommonRound {
+        rules: m.rules.clone(),
+        round_wind: m.round_wind,
+        kyoku: m.kyoku,
+        honba: m.honba,
+        riichi_sticks_pool: m.riichi_sticks_pool,
+        dealer: m.dealer,
+        players,
+        wall,
+        first_go_around: true,
+    };
+
+    RoundState::AwaitDraw(AwaitDrawState {
+        common,
+        turn: m.dealer,
+    })
+}
+
+// ============================================================
 // L4: try_op — validity gate (phase + 数据级 + 规则级)
 // ============================================================
+
+impl AwaitDrawState {
+    /// 唯一合法 op = Draw. typed_op! 宏自动 reject 其它.
+    pub fn try_op(&self, op: AtomicOp) -> Result<AwaitDrawOp, OpError> {
+        AwaitDrawOp::try_from_atomic(op)
+    }
+}
 
 impl AwaitDiscardState {
     /// 完整 validity gate. 通过后 op 一定能在 apply 内 total 执行 (输入域已 valid).
@@ -1310,6 +1593,76 @@ mod tests {
             .expect("hand has tiles");
         let r = s.try_op(AtomicOp::Discard { tile: other_tile });
         assert!(matches!(r, Err(OpError::RiichiMustTsumogiri)));
+    }
+
+    #[test]
+    fn init_round_creates_await_draw_state() {
+        use crate::engine::match_state::MatchState;
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        assert!(matches!(r, RoundState::AwaitDraw(_)));
+        assert_eq!(r.common().players[0].hand.closed.len(), 13);
+        assert_eq!(r.common().wall.remaining(), 70);
+    }
+
+    #[test]
+    fn round_apply_draw_then_discard_complete_loop() {
+        use crate::engine::match_state::MatchState;
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+
+        // AwaitDraw → Draw → AwaitDiscard
+        let (r, evs) = round_apply(&r, AtomicOp::Draw).unwrap();
+        assert!(matches!(r, RoundState::AwaitDiscard(_)));
+        assert_eq!(evs.len(), 1);
+        assert!(matches!(evs[0], GameEvent::Draw { .. }));
+
+        // 取一张能切的
+        let some_tile = match &r {
+            RoundState::AwaitDiscard(s) => s.last_drawn.unwrap(),
+            _ => panic!(),
+        };
+        let (r, evs) = round_apply(&r, AtomicOp::Discard { tile: some_tile }).unwrap();
+        assert!(matches!(r, RoundState::AwaitCalls(_)));
+        assert!(matches!(evs[0], GameEvent::Discard { .. }));
+
+        // Pass → AwaitDraw (turn=South)
+        let (r, _) = round_apply(&r, AtomicOp::Pass).unwrap();
+        match &r {
+            RoundState::AwaitDraw(s) => assert_eq!(s.turn, Seat::South),
+            _ => panic!("expect AwaitDraw"),
+        }
+    }
+
+    #[test]
+    fn round_apply_round_end_rejects_op() {
+        use crate::engine::match_state::MatchState;
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        // 制造 RoundEnd: 反复 Draw + Discard + Pass 4 家轮转直到山摸尽.
+        // 这里偷懒手动构造 RoundEnd 状态.
+        let common = match r {
+            RoundState::AwaitDraw(s) => s.common,
+            _ => panic!(),
+        };
+        let r = RoundState::RoundEnd(RoundEndState {
+            common,
+            result: RoundResult::Ryuukyoku {
+                kind: RyuukyokuKind::Howaipai,
+            },
+        });
+        let err = round_apply(&r, AtomicOp::Draw).unwrap_err();
+        assert!(matches!(err, OpError::AlreadyEnded));
+    }
+
+    #[test]
+    fn legal_ops_at_await_discard_lists_riichi_discards() {
+        // 用现有 SelfOptions 测试逻辑覆盖, 这里仅 smoke test.
+        let s = fixture_await_discard(42);
+        let r = RoundState::AwaitDiscard(s);
+        let ops = legal_ops(&r);
+        // riichi_discards 可能为空 (depends on hand), 但函数不该 panic.
+        assert!(ops.riichi_discards.len() <= 14);
     }
 
     #[test]

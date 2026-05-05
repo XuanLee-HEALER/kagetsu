@@ -29,3 +29,8 @@ pub use domain::tile::{Tile, TileIndex};
 pub use domain::yaku::{Yaku, YakuhaiKind};
 pub use match_state::{MatchState, RoundOutcome, match_apply};
 pub use op::{AtomicOp, AtomicOpKind, OpError, PhaseKind};
+pub use round_state::{
+    AwaitCallsState, AwaitDiscardState, AwaitDrawState, AwaitRiichiDiscardState,
+    AwaitRinshanDrawState, CommonRound, LegalOps, PerSeatCalls, RoundEndState, RoundState,
+    init_round, legal_ops, round_apply, summarize_round,
+};
