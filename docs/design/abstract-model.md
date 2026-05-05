@@ -7,12 +7,48 @@
 
 这些是后续所有设计选择的硬约束:
 
-1. **Engine = 计算库**, 算子集 + 转移函数. 类似 SQL relational algebra 那种"预定义算子, 别处实现都基于此".
-2. **Engine 的唯一职责是计算正确性**. 由测试用例验证, **不依靠运行时日志 / 防御性兜底**.
-3. **Driver (调用方) 负责所有副作用**: 业务操作序列调度 / 用户交互 / 网络同步 / 持久化 / 日志 / 错误展示.
-4. **Engine 内 `tracing::info!` 等运行时日志 = 副作用, 不出现**. 仅在测试场景用 `tracing::debug!` 辅助 (或干脆不用, 全靠 assertion).
-5. **签名形式**: 标准 fold 风格 `(state, op) -> Result<state, error>`. 2 个入参, 不引入"前一选手 / 影响值 / 新选手初始" 这种结构性分解.
-6. **错误是结构化的**: engine 返回 typed `OpError` enum, driver 决定怎么展示 / 重试 / 中断.
+### 0. Engine 零外部感知 (最高原则)
+
+**Engine 不知道任何外部实体存在.** 没有 "driver" / "recorder" / "网络" / "UI" 这些
+概念在 engine 代码里 — engine 只见数据和计算.
+
+具体表现:
+- engine 代码 **零 import** 来自 `dev::recorder` / `net::*` / `ui::*` / `ai::*`.
+- engine 没有为某个外部模块设计的字段 / hook / callback / observer.
+  (如现状 `recorded_actions: Option<Vec<RecordedAction>>` 字段, refactor 后**必须消失**.
+  录像是外部对 AtomicOp 流的记录, engine 不需要知道这事.)
+- engine 不暴露 subscribe / on_event / dispatch 这种主动通知接口.
+
+**契约 = 三个数据类型**: `AtomicOp` (输入算子), `RoundState`/`MatchState` (累积值),
+`OpError` (拒绝原因). 任何外部模块都是"这套数据契约的消费者". engine 不区分谁在消费.
+
+这跟 SQLite 与应用程序的关系一样 — SQLite 不知道是谁在调用它, 只管 SQL 进、结果出.
+
+### 1. 数据直接体现业务
+
+`AtomicOp` 各 variant **就是**所有合法决策的全集 (不多不少).
+`RoundState` 字段 **就是**一局所有相关事实.
+`OpError` 各 variant **就是**所有失败模式.
+
+读类型 = 读规则书. 没有"内部码"/"魔术常数"/"orchestration 字段". 一个外部读者
+只看 type 定义就能复述出 mahjong 的核心规则结构.
+
+### 2. 计算正确性靠测试, 不靠运行时日志
+
+Engine 的唯一职责是给定 (state, op) 永远返回同 (state', err). 由 tests 验证.
+
+- 没有 `tracing::info!` / `warn!` / `error!` (运行时副作用).
+- `tracing::debug!` 仅在测试场景用作插桩, release build 自动抹除
+  (或干脆不用, 全靠 assertion).
+- 没有"防御性兜底" / 静默修复 / 容错 fallback. 拒绝就是 Err, 调用方自己决定怎么办.
+
+### 3. 标准 fold 签名
+
+`apply(state, op) -> Result<state, error>`. 2 入参, 不引入结构性分解.
+
+### 4. 结构化错误
+
+`OpError` 是 typed enum (thiserror 派生). driver 决定如何展示 / 重试 / 中断.
 
 ## 术语
 
@@ -439,88 +475,109 @@ fn summarize_round(r: &RoundState) -> RoundOutcome {
 
 录像 (`RecordedAction`) **就是 AtomicOp 的序列化形式**. replay = 把 AtomicOp 流重新喂给 round_apply.
 
-## Engine 责任 vs Driver 责任
+## Engine 是什么 / 不是什么
 
-这是核心分工原则, 涉及任何具体实现都要回到这里检验.
+⚠️ 这里说"driver"是文档读者的视角方便, **engine 自身代码里没有"driver"这个词**.
+engine 不知道有谁在调用它.
 
-### Engine 只做一件事: 计算正确性
-
-| 项 | Engine ✅ | Driver ❌ |
-|---|---|---|
-| 状态转移 (`round_apply` / `match_apply`) | ✓ | |
-| 算子合法性判定 (`legal_ops(state)`) | ✓ | |
-| 算分 / 役判定 / 副露解析 | ✓ | |
-| 立直 / 振听 / 头跳 等规则 | ✓ | |
-| 牌山随机化 (洗牌算法) | ✓ | |
-| Pure & deterministic, 给定 (state, op) 永远同 (state', err) | ✓ | |
-
-**Engine 不做**:
-- 任何 IO (文件 / 网络 / stdout)
-- `tracing::info!` 等运行时日志 (副作用)
-- 用户提示文案 / 错误展示 / i18n
-- 业务序列调度 (谁先谁后 / 超时怎么办 / 网络延迟怎么办)
-
-测试用例覆盖正确性, 不靠日志兜底. `tracing::debug!` 只允许在测试场景临时插桩,
-release build 等同删除 (`cfg(debug_assertions)` 或 `RUST_LOG=off` 默认).
-
-### Driver 负责一切副作用
-
-| 项 | Driver ✅ |
-|---|---|
-| 决策来源调度: 谁的回合 → 找谁要 op (本地用户 / AI / 网络对手 / 录像) | ✓ |
-| 思考超时 / fallback op | ✓ |
-| 把 engine 返回的 typed Err 翻译成用户可读消息 | ✓ |
-| 状态持久化 / 录像存档 / 网络同步 | ✓ |
-| UI 渲染节流 / 动画时序 | ✓ |
-| 日志 (`tracing::info!` / `warn!` / `error!`) | ✓ |
-| Recovery: engine 返回 Err 后是重试 / 跳过 / 中断 | ✓ |
-
-### 实现模板
+### Engine 暴露的全部 API
 
 ```rust
-// engine 暴露
+// 数据类型 (业务契约)
+pub enum AtomicOp { ... }
+pub struct RoundState { ... }   // 或 type-state enum
+pub struct MatchState { ... }
+pub enum OpError { ... }
+pub enum RoundOutcome { ... }
+
+// 纯函数
 pub fn round_apply(state: RoundState, op: AtomicOp) -> Result<RoundState, OpError>;
 pub fn match_apply(state: MatchState, outcome: RoundOutcome) -> MatchState;
-pub fn legal_ops(state: &RoundState) -> LegalOps;
+pub fn legal_ops(state: &RoundState) -> LegalOps;       // 当前 state 下哪些 op 合法
 pub fn summarize_round(state: &RoundState) -> RoundOutcome;
+pub fn init_round_from_match(m: &MatchState) -> RoundState;
+pub fn init_match(rules: GameRules) -> MatchState;
 
-// engine 错误是结构化的
-#[derive(Debug, thiserror::Error)]
-pub enum OpError {
-    #[error("op {op:?} 在 phase {phase:?} 下不合法")]
-    IllegalForPhase { op: AtomicOpKind, phase: Phase },
-    #[error("立直方必须切立直牌")]
-    RiichiMustTsumogiri,
-    #[error("手中无 id={0} 的牌")]
-    TileNotInHand(u16),
-    // ...
+// 牌山随机化 (engine 内, 但 RNG 显式)
+pub fn shuffle_wall(seed: u64, with_aka: bool) -> Wall;
+```
+
+就这些. 没有别的.
+
+### Engine 内部代码做的事
+
+- 状态转移逻辑
+- 算子合法性判定
+- 算分 / 役判定 / 副露解析
+- 立直 / 振听 / 头跳 等规则
+- 牌山结构定义
+
+### Engine 内部代码 *绝对不做* 的事
+
+- 任何 IO (文件 / 网络 / stdout / 任何 syscall)
+- `tracing::info!` / `warn!` / `error!`
+- 用户提示文案 / 错误展示 / i18n
+- 业务序列调度 (engine 没有"循环驱动" 的代码, 没有 `play_round` 函数 — 那是外部的事)
+- import 任何来自 `dev` / `net` / `ui` / `ai` 的类型
+
+### Engine 不知道 (但你作为应用开发者要知道) 的事
+
+外部世界要做这些事, 都基于 engine 暴露的数据契约 + pure 函数. engine 看不到外部:
+
+- **Recorder**: 把外部喂给 engine 的 AtomicOp 流另存一份到磁盘. engine 不知道.
+- **Network**: 把 AtomicOp / state 序列化通过网络同步. engine 不知道.
+- **UI**: 渲染 RoundState 给玩家看, 收键盘 / 鼠标产生 AtomicOp. engine 不知道.
+- **AI**: 读 RoundState 算出最优 AtomicOp. engine 不知道.
+- **超时**: 等用户输入超过 X 秒就喂个 fallback AtomicOp. engine 不知道.
+- **Replay**: 从磁盘读 AtomicOp 序列依次喂给 engine 看是否复现. engine 不知道.
+
+所有这些都是"外部对 AtomicOp + state 的不同使用模式", engine 完全无感知.
+
+### 外部使用模式示例 (这些代码不在 engine 里)
+
+外部应用层基于 engine 数据契约组装业务逻辑. 几个用法示意:
+
+```rust
+// 用法 1: 整局对战 (UI 应用层)
+fn run_game_loop(state: RoundState) -> RoundState {
+    let mut s = state;
+    while !is_round_end(&s) {
+        let op = pick_op_somehow(&s);                  // 应用层决定: 问 UI / 问 AI / 收网络
+        match engine::round_apply(s, op) {
+            Ok(next) => { s = next; }
+            Err(e)   => { show_error(&e); /* 重试 / 中断 */ }
+        }
+    }
+    s
 }
 
-// driver 是普通(可有副作用) Rust 代码
-fn play_round(init: RoundState, mut driver: impl Driver) -> Result<RoundState, DriverError> {
-    let mut s = init;
-    while s.phase != Phase::RoundEnd {
-        let op = driver.next_op(&s);          // 副作用: 等用户 / 查 AI / 收网络
-        s = match round_apply(s, op) {
-            Ok(s) => s,
-            Err(e) => {
-                driver.on_engine_error(&e);   // 副作用: 提示, 决定是否重试 / 中断
-                return Err(DriverError::EngineRejected(e));
-            }
-        };
-    }
-    Ok(s)
+// 用法 2: 录像 + 重放
+fn record(s: RoundState, op: AtomicOp, log: &mut Vec<AtomicOp>) -> Result<RoundState, OpError> {
+    log.push(op.clone());
+    engine::round_apply(s, op)
+}
+fn replay(initial: RoundState, ops: &[AtomicOp]) -> Result<RoundState, OpError> {
+    ops.iter().cloned().try_fold(initial, engine::round_apply)
+}
+
+// 用法 3: 网络同步
+fn on_network_op(local: RoundState, op_bytes: &[u8]) -> Result<RoundState, AppError> {
+    let op: AtomicOp = serde_json::from_slice(op_bytes)?;
+    engine::round_apply(local, op).map_err(AppError::from)
+}
+
+// 用法 4: 测试 fixture
+#[test]
+fn pon_after_discard() {
+    let s = setup_state_with_two_5p_in_south_hand();
+    let s = engine::round_apply(s, AtomicOp::Discard(tile_5p())).unwrap();   // East 切 5p
+    let s = engine::round_apply(s, AtomicOp::Pon { who: South, hand_tile_ids: [...] }).unwrap();
+    assert_eq!(s.turn, South);
 }
 ```
 
-driver 多实例:
-- `UiDriver`: 本地交互, 用 channel 等用户键盘 op.
-- `AiDriver`: 本地计算 op, 立刻返回.
-- `NetDriver`: 等远程对手 op 包.
-- `ReplayDriver`: 从 `Vec<AtomicOp>` 顺序 pop.
-- `TestDriver`: 测试 fixture 喂指定 op 序列.
-
-每种 driver 共用同一个 engine, 互相不知道对方存在.
+**注意**: 这些用法都是**外部代码**. engine 自己不持有 `run_game_loop` / `record` /
+`replay` / fixture setup 的代码. engine 只是被它们调用.
 
 ## 一局完整 trace 示例
 
@@ -566,7 +623,9 @@ ops:
 - ✅ **输入模型**: 标准 fold 2 入参, `(state, op) -> Result<state, err>`. 多入参形式不引入.
 - ✅ **AtomicOp = 数据层** (单一统一算子集), **type-state = 行为层** (内部不变量), 通过 bridge 函数 `try_op` 连接. 见下面 "数据层 vs 行为层" 一节.
 - ✅ **Riichi 拆 2 op**: `RiichiDeclare` + `Discard(t)`. 中间用 phase=`AwaitRiichiDiscard` 锁住, 唯一合法下一 op 是 Discard. `riichi_river_idx` 在 Discard 时自动写入.
-- ✅ **岭上摸独立 op**: `Ankan` / `Minkan` 后 phase=Draw, driver 据 last_meld_was_kan flag 喂入 `RinshanDraw` 而非 `Draw`. 录像粒度更明确, 翻新 dora 时机也清晰.
+- ✅ **岭上摸独立 op**: `Ankan` / `Minkan` 后 state 自身已表达"杠后下一摸是岭上"
+  (例如 phase + last_meld_was_kan 字段). 任何观察者读 state 就知道下一 op 必须是
+  `RinshanDraw`. engine 不指挥任何人, 只是 state 自洽.
 - ✅ **Engine 不带运行时日志**: 没 `tracing::info!`. 仅 `tracing::debug!` 用作测试插桩, release build 自动抹掉.
 - ✅ **错误是结构化 typed enum** (`OpError`), driver 负责展示文案.
 

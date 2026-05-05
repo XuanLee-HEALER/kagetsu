@@ -169,13 +169,34 @@ pub fn round_apply(state: RoundState, op: AtomicOp) -> Result<RoundState, OpErro
 ```
 
 **收益**:
-- 外部 (录像 / 网络 / driver) 看到统一 AtomicOp, 单一算子代数, 序列化简单.
+- 外部 (录像 / 网络 / 应用层) 看到统一 AtomicOp, 单一算子代数, 序列化简单.
 - Engine 内部代码类型安全, 没有 `state.last_drawn.unwrap()`.
 - Runtime 合法性 check 只在 L4 的 `try_op` 集中, 主转移代码干净.
 
-**代价**:
-- L3 的 typed-op enum 是 boilerplate, 但只是列出 AtomicOp 子集 (写起来快).
-- L4 的 try_op 函数也是 boilerplate, 但极其机械.
+**boilerplate 用宏消化** (用户提议, 采纳):
+
+L3 的 typed-op enum + L4 的 try_op 函数都是机械生成. 用 declarative macro:
+
+```rust
+typed_op! {
+    AwaitDiscardOp from AtomicOp {
+        Discard(Tile),
+        RiichiDeclare,
+        Tsumo,
+        Ankan(TileIndex),
+        Shouminkan(TileIndex),
+    }
+}
+
+// 宏展开生成:
+//   1. enum AwaitDiscardOp { Discard(Tile), RiichiDeclare, Tsumo, Ankan(TileIndex), Shouminkan(TileIndex) }
+//   2. impl TryFrom<AtomicOp> for AwaitDiscardOp { type Error = OpError; ... }
+//      (match 列出的 variant, 其它 -> Err::IllegalForPhase)
+//   3. impl From<AwaitDiscardOp> for AtomicOp (双向, 录像反向用)
+```
+
+每个 state 一行 `typed_op!{}` 就配齐了. 真正手写的只有 `apply` (实际转移逻辑),
+那才是业务逻辑.
 
 这是个标准模式 (协议解析器 / CRDT / 游戏引擎都这套). 并不是设计折衷, 而是 layer separation.
 
@@ -344,11 +365,20 @@ big-bang 一次改完没法 review. 拆 PR 但都在 `pure-fn-refactor` 分支:
 ## 10. 风险登记
 
 - **net 层难映射 pure**: actor 是 long-running, msg-driven. 改成纯 `(state, msg) -> (state, [out])`
-  + tokio driver 可行, 但 mental_poker actor 已经是这风格, p2p swarm 不是.
-- **Type-state 拆分会爆炸 match**: ai/UI 每个地方都要 dispatch 4-5 个 phase variant. 体验未必好.
-- **Recorder pop-and-replace 重构**: 那个 hack 消失后 recorder 实现要重写. 测试得重跑.
+  + tokio 外层 driver 可行, 但 mental_poker actor 已经是这风格, p2p swarm 不是. (但这层不在
+  本次 refactor 强制范围内, 见 §1 倾向 B.)
+- **type-state 状态数量增加**: 每加一种 phase 就要新加 struct. mahjong phase 数量
+  稳定 (Draw 瞬时省掉, 实际 4-5 个), 不太会爆.
+- **AtomicOp + state 演化兼容性**: 录像文件依赖 AtomicOp / RoundState 序列化格式.
+  以后加 op variant / 改 state 字段, 老录像可能反序列化失败. 加 schema version
+  字段, 或接受老录像 invalidation.
 - **学习收益 vs 时间成本不对等**: 设计都讨论清楚后, 实施部分只是机械 typing,
-  风险点都在前面这些决策上.
+  风险点都集中在前面这些决策上.
+
+**已通过设计消除的风险**:
+- ~~Recorder pop-and-replace hack~~ → engine 不再持 `recorded_actions` 字段, 录像在外部.
+- ~~Type-state vs 统一 AtomicOp 互斥~~ → 4 层架构, 数据层与行为层分离.
+- ~~Type-state boilerplate 爆炸~~ → declarative macro `typed_op!{}` 消化.
 
 ## 决策状态总览
 
