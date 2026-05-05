@@ -93,6 +93,7 @@ impl AtomicOp {
 /// Phase 的 variant kind, 用于 OpError 报错.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PhaseKind {
+    AwaitDraw,
     AwaitDiscard,
     AwaitRiichiDiscard,
     AwaitRinshanDraw,
