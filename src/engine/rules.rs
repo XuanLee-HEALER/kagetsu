@@ -2,7 +2,7 @@
 //!
 //! 不是软件级 "config" — 软件级用户偏好 (主题/语言/键位等) 见 [`crate::config`].
 //!
-//! GameRules 本质是 [`crate::engine::state::GameState`] 的初始化输入数据,
+//! GameRules 本质是 [`crate::legacy_state::GameState`] 的初始化输入数据,
 //! 由 RoomActor 在 lobby 阶段持有并允许整体替换 (`ClientMsg::UpdateRules`),
 //! 开局后通过 `GameState::new` 转移所有权进入状态机, 不再热更新.
 //!

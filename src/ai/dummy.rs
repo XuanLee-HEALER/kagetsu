@@ -6,7 +6,7 @@
 
 use crate::engine::domain::action::Action;
 use crate::engine::domain::meld::Seat;
-use crate::engine::state::GameState;
+use crate::legacy_state::GameState;
 
 /// 决定 AI 在 AwaitDiscard 阶段的动作.
 pub fn ai_choose_discard(state: &GameState) -> Action {

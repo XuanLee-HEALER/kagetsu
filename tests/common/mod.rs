@@ -24,8 +24,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use tui_majo::domain::meld::Seat;
-use tui_majo::domain::tile::{Tile, TileIndex};
+use tui_majo::engine::domain::meld::Seat;
+use tui_majo::engine::domain::tile::{Tile, TileIndex};
 use tui_majo::engine::event::GameEvent;
 use tui_majo::engine::phase::Phase;
 use tui_majo::engine::rules::GameRules;

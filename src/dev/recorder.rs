@@ -4,13 +4,13 @@
 //! 加上 UI/AI 在该局做的全部决策序列 ([`RecordedAction`]).
 //! [`replay`] 把 recording 跑成相同终态的 GameState.
 //!
-//! Recorder 由 [`crate::engine::state::GameState`] 自身在每个 do_* / declare_*
+//! Recorder 由 [`crate::legacy_state::GameState`] 自身在每个 do_* / declare_*
 //! 入口推 action; UI 层 ([`crate::ui::screens::game::GameScreenState`])
 //! 负责在 round 起始时 snapshot, RoundEnd 时 flush 到磁盘.
 
 use crate::engine::domain::meld::Seat;
 use crate::engine::domain::tile::TileIndex;
-use crate::engine::state::GameState;
+use crate::legacy_state::GameState;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -93,7 +93,7 @@ pub fn replay(rec: &RoundRecording) -> Result<GameState, String> {
     g.recorded_actions = None;
 
     use crate::engine::phase::Phase;
-    use crate::engine::state::CallOptions;
+    use crate::legacy_state::CallOptions;
 
     let mut iter = rec.actions.iter();
     loop {

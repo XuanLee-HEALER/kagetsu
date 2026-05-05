@@ -1,8 +1,12 @@
-//! 游戏状态机.
+//! 旧游戏状态机 (LEGACY).
 //!
-//! MVP+ 版本: 配牌 → 摸切 → 鸣牌(碰/吃/杠) → 立直 → 自摸/荣和 → 流局 → 下一局.
-//! 简化: 振听不强制(能和就和), 多家荣和按头跳, AI 不主动鸣牌(只荣和).
-//! 详见 docs/spec/game-flow.md
+//! 已从 engine 模块剥离. engine 现在的 canonical state machine 是
+//! `engine::round_state::RoundState` + `engine::match_state::MatchState`
+//! (基于 type-state + pure function fold). 本模块仅保留作为外部 (UI / net /
+//! ai / dev::recorder) 迁移到新 API 期间的过渡 — 原引用站点不强制立刻改,
+//! 各调用方逐步迁移完成后整体删除.
+//!
+//! 不要在新代码里 import 此模块.
 
 use std::collections::VecDeque;
 
@@ -15,7 +19,7 @@ use crate::engine::domain::tile::{Tile, TileIndex, count_by_kind};
 use crate::engine::domain::yaku::WinContext;
 use crate::engine::event::{GameEvent, MAX_EVENTS};
 use crate::engine::phase::Phase;
-// 共享类型已移到新 home, 这里 re-export 让 crate::engine::state::* 路径继续工作.
+// 共享类型已移到新 home, 这里 re-export 让 crate::legacy_state::* 路径继续工作.
 // 老 imports 暂不强制更新, 后续 stage 顺手清理.
 pub use crate::engine::player::PlayerState;
 pub use crate::engine::round_state::{RoundResult, RoundWind, RyuukyokuKind};

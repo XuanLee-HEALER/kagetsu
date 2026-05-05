@@ -31,7 +31,7 @@ use crate::engine::event::GameEvent;
 use crate::engine::phase::Phase;
 use crate::engine::rules::GameRules;
 use crate::engine::score::final_ranking;
-use crate::engine::state::{CallOptions, GameState, RoundResult, RyuukyokuKind};
+use crate::legacy_state::{CallOptions, GameState, RoundResult, RyuukyokuKind};
 use crate::ui::Transition;
 use crate::ui::paint::{
     TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row_hl,
@@ -766,7 +766,7 @@ impl GameScreenState {
         self.game.turn == PLAYER_SEAT
     }
 
-    fn player(&self) -> &crate::engine::state::PlayerState {
+    fn player(&self) -> &crate::legacy_state::PlayerState {
         &self.game.players[PLAYER_SEAT.index()]
     }
 
@@ -1943,7 +1943,7 @@ impl GameScreenState {
 
 /// 找到玩家立直时弃出的牌在 river 里的索引. PlayerState.riichi_river_idx
 /// 由 do_riichi 写入, 此处直接转发.
-fn riichi_index_in_river(p: &crate::engine::state::PlayerState) -> Option<usize> {
+fn riichi_index_in_river(p: &crate::legacy_state::PlayerState) -> Option<usize> {
     p.riichi_river_idx
 }
 

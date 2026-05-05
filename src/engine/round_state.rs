@@ -560,7 +560,7 @@ pub fn init_round(
     m: &crate::engine::match_state::MatchState,
     seed: u64,
 ) -> RoundState {
-    use crate::engine::state::PlayerState;
+    use crate::legacy_state::PlayerState;
 
     // 4 玩家 PlayerState, score 来自 MatchState.scores.
     let mut players: [PlayerState; 4] = [
@@ -1525,7 +1525,7 @@ mod tests {
     // 写完 init_round 后改用那个.
 
     use crate::engine::rules::GameRules;
-    use crate::engine::state::GameState;
+    use crate::legacy_state::GameState;
 
     /// 用 seed 构造一个 AwaitDiscardState (东家摸第 14 张后, 未切).
     fn fixture_await_discard(seed: u64) -> AwaitDiscardState {

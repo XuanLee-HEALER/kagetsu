@@ -4,7 +4,7 @@
 //! F9 = quick load ← 同文件.
 //! 路径: `dirs::config_dir() / tui-majo / savestates / <slot>.json`.
 
-use crate::engine::state::GameState;
+use crate::legacy_state::GameState;
 use std::path::PathBuf;
 
 /// savestates 目录, 不存在时创建.

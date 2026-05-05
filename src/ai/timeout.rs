@@ -6,7 +6,7 @@
 
 use crate::engine::domain::action::Action;
 use crate::engine::phase::Phase;
-use crate::engine::state::GameState;
+use crate::legacy_state::GameState;
 
 /// 玩家单步思考超时时执行的默认动作.
 pub fn default_action_on_timeout(state: &GameState) -> Action {

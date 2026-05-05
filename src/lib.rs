@@ -13,6 +13,11 @@ pub mod config;
 #[cfg(feature = "dev-tools")]
 pub mod dev;
 pub mod engine;
+/// Legacy GameState — 已从 engine 剥离, 留作过渡: 外部代码 (UI / net /
+/// ai / recorder) 仍引用旧 GameState 类型. 阶段 6 各调用方迁移到
+/// RoundState/MatchState 后此模块整体删除.
+#[deprecated(note = "Use crate::engine::RoundState / MatchState instead.")]
+pub mod legacy_state;
 pub mod mental_poker;
 pub mod net;
 pub mod ui;

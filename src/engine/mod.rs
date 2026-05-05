@@ -18,7 +18,6 @@ pub mod player;
 pub mod round_state;
 pub mod rules;
 pub mod score;
-pub mod state;
 pub mod wall;
 
 // 公开 re-export — 外部 (ai / ui / net / dev) 直接写 `tui_majo::engine::Tile` 等,
