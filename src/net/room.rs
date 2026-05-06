@@ -490,13 +490,25 @@ impl RoomActor {
             return;
         }
 
-        // ZeroTrust 模式必须 4 真人 (mental poker 协议 AI 无法参与).
+        // ZeroTrust 模式: mental poker 协议要求 4 独立 sk holder, 真"AI 补"
+        // 在零信任假设下做不到 (AI 的 sk 由房主控制 → 不再零信任).
+        // Fallback 策略: n < 4 真人时, 自动降级为 Standard 模式 + AI 补,
+        // 让用户能正常开局; 房主仍持权威 GameState. UI 应提示降级.
         if self.mode == crate::net::p2p::RoomMode::ZeroTrust {
-            if n != MAX_PLAYERS {
-                self.send_error(player_id, "ZeroTrust 模式需要 4 个真人玩家");
-                return;
+            if n == MAX_PLAYERS {
+                return self.start_zerotrust_game();
             }
-            return self.start_zerotrust_game();
+            // 降级为 Standard + AI 补. 通知玩家.
+            tracing::info!(
+                "ZeroTrust 不足 4 真人 ({n}/{MAX_PLAYERS}), 自动降级为 Standard + AI 补"
+            );
+            self.broadcast_to_all(ServerMsg::Error {
+                message: format!(
+                    "ZeroTrust 不足 4 真人 ({n}/4), 已自动降级为 Standard 模式 + AI 补足座位"
+                ),
+            });
+            self.mode = crate::net::p2p::RoomMode::Standard;
+            // 落到下面 Standard 启动流程 (分配座位 + AI 补 + GameEngine).
         }
 
         // 分配座位 (东南西北顺序)
@@ -1922,9 +1934,10 @@ mod tests {
         );
     }
 
-    /// M5.B.8.0: ZeroTrust + n<4 → StartGame 应被拒绝, 不发 MpStart.
+    /// Phase D: ZeroTrust + n<4 真人 → 自动降级 Standard + AI 补足. 不发 MpStart,
+    /// 但发 GameStateView (Standard 模式启动).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn zerotrust_starts_only_with_4_humans() {
+    async fn zerotrust_falls_back_to_standard_when_under_4_humans() {
         let handle = spawn_room_with_mode(
             "h".into(),
             GameRules::default(),
@@ -1941,19 +1954,22 @@ mod tests {
             .unwrap();
         yield_actor().await;
 
-        let mut got_error = false;
+        let mut got_downgrade_msg = false;
         let mut got_mp_start = false;
+        let mut got_game_state = false;
         while let Ok(msg) = host_rx.try_recv() {
             match msg {
-                ServerMsg::Error { message } if message.contains("ZeroTrust") => {
-                    got_error = true;
+                ServerMsg::Error { message } if message.contains("降级") => {
+                    got_downgrade_msg = true;
                 }
                 ServerMsg::MpStart { .. } => got_mp_start = true,
+                ServerMsg::GameStateView(_) => got_game_state = true,
                 _ => {}
             }
         }
-        assert!(got_error, "应收到 ZeroTrust 4 真人要求的错误");
-        assert!(!got_mp_start, "n<4 不应发 MpStart");
+        assert!(got_downgrade_msg, "应收到降级提示");
+        assert!(!got_mp_start, "n<4 不应发 MpStart (Standard 路径)");
+        assert!(got_game_state, "应已降级为 Standard 启动并发 GameStateView");
     }
 
     /// M5.B.8.0: ZeroTrust + 4 真人 ready → 4 玩家收 MpStart, own_index 0..3 各异.
