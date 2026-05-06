@@ -872,4 +872,58 @@ mod tests {
         assert!(t.is_none());
         assert!(s.discovered.is_empty());
     }
+
+    // ============================================================================
+    // render smoke — 不 panic 即可
+    // ============================================================================
+
+    #[test]
+    fn render_empty_does_not_panic() {
+        let s = make_state();
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| s.render(f, f.area())).unwrap();
+    }
+
+    #[test]
+    fn render_with_discovered_rooms_does_not_panic() {
+        let mut s = make_state();
+        s.nickname = "Alice".into();
+        s.addr = "/ip4/1.2.3.4/udp/4001/quic-v1".into();
+        s.message = "test".into();
+        s.discovered.push(make_room_entry(
+            "/ip4/192.168.1.5/udp/4001/quic-v1",
+            Region::CnEast,
+            RoomMode::Standard,
+        ));
+        s.discovered.push(make_room_entry(
+            "/ip4/8.8.8.8/udp/4001/quic-v1/p2p-circuit",
+            Region::Jp,
+            RoomMode::ZeroTrust,
+        ));
+        s.discovered_total = 2;
+        s.focus = FOCUS_DISCOVERED;
+        let backend = ratatui::backend::TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| s.render(f, f.area())).unwrap();
+    }
+
+    /// 各 focus 各跑一遍 render, 确保不同分支都被路过.
+    #[test]
+    fn render_each_focus_does_not_panic() {
+        for f_idx in 0..ITEM_COUNT {
+            let mut s = make_state();
+            s.focus = f_idx;
+            s.message = "msg".into();
+            s.region_filter = Region::CnEast;
+            s.room_mode = if f_idx % 2 == 0 {
+                RoomMode::Standard
+            } else {
+                RoomMode::ZeroTrust
+            };
+            let backend = ratatui::backend::TestBackend::new(120, 40);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|frame| s.render(frame, frame.area())).unwrap();
+        }
+    }
 }

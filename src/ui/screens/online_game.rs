@@ -2090,4 +2090,118 @@ mod tests {
         assert!(s.message.contains("取消"));
         assert!(out_rx.try_recv().is_err());
     }
+
+    // ============================================================================
+    // render smoke
+    // ============================================================================
+
+    #[test]
+    fn render_no_state_view_does_not_panic() {
+        let (s, _out, _in) = make_state(1);
+        let backend = ratatui::backend::TestBackend::new(144, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| s.render(f, f.area())).unwrap();
+    }
+
+    #[test]
+    fn render_with_state_view_does_not_panic() {
+        let (mut s, _out, _in) = make_state(1);
+        // 13 张手牌 + 1 张 last_drawn.
+        let hand: Vec<Tile> = (0..13).map(|i| tile(i as u8, i as u16)).collect();
+        let drawn = tile(13, 100);
+        let mut hand_with_drawn = hand.clone();
+        hand_with_drawn.push(drawn);
+        let mut view = make_view(Seat::East, hand_with_drawn, Some(drawn));
+        view.events = vec![
+            GameEvent::Draw {
+                who: Seat::East,
+                tile: drawn,
+            },
+            GameEvent::Discard {
+                who: Seat::South,
+                tile: tile(5, 1),
+            },
+        ];
+        view.dora_indicators = vec![tile(0, 200)];
+        view.riichi_sticks = 1;
+        view.honba = 2;
+        s.state_view = Some(view);
+        s.message = "msg".into();
+        s.current_hints = Some(vec![NetAction::Pon, NetAction::Pass]);
+        s.current_deadline_ms = 0;
+        let backend = ratatui::backend::TestBackend::new(144, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| s.render(f, f.area())).unwrap();
+    }
+
+    #[test]
+    fn render_with_chi_picker_does_not_panic() {
+        let (mut s, _out, _in) = make_state(1);
+        s.state_view = Some(make_view(Seat::East, vec![tile(0, 1)], None));
+        let opts = vec![[tile(1, 1), tile(2, 2)], [tile(2, 3), tile(3, 4)]];
+        s.chi_picker = Some(crate::ui::chi_picker::ChiPicker::new(opts, tile(0, 99)));
+        let backend = ratatui::backend::TestBackend::new(144, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| s.render(f, f.area())).unwrap();
+    }
+
+    #[test]
+    fn render_for_each_my_seat_layout_does_not_panic() {
+        for my_seat in [Seat::East, Seat::South, Seat::West, Seat::North] {
+            let (mut s, _out, _in) = make_state(1);
+            s.state_view = Some(make_view(my_seat, vec![tile(0, 1), tile(1, 2)], None));
+            let backend = ratatui::backend::TestBackend::new(144, 40);
+            let mut term = ratatui::Terminal::new(backend).unwrap();
+            term.draw(|f| s.render(f, f.area())).unwrap();
+        }
+    }
+
+    #[test]
+    fn format_event_renders_each_variant() {
+        // 仅检查不 panic + 输出非空.
+        let theme = ThemeKind::default().theme();
+        let events = vec![
+            GameEvent::Discard {
+                who: Seat::East,
+                tile: tile(0, 1),
+            },
+            GameEvent::Draw {
+                who: Seat::South,
+                tile: tile(0, 2),
+            },
+            GameEvent::Pon {
+                who: Seat::West,
+                tile: tile(0, 3),
+            },
+            GameEvent::Chi {
+                who: Seat::North,
+                tile: tile(0, 4),
+            },
+            GameEvent::Minkan {
+                who: Seat::East,
+                tile: tile(0, 5),
+            },
+            GameEvent::Ankan {
+                who: Seat::East,
+                kind: TileIndex(0),
+            },
+            GameEvent::Shouminkan {
+                who: Seat::East,
+                kind: TileIndex(0),
+            },
+            GameEvent::Riichi {
+                who: Seat::East,
+                tile: tile(0, 6),
+            },
+            GameEvent::Tsumo { who: Seat::East },
+            GameEvent::Ron {
+                who: Seat::East,
+                from: Seat::South,
+            },
+        ];
+        for ev in &events {
+            let (text, _) = format_event(ev, Seat::East, &theme);
+            assert!(!text.is_empty());
+        }
+    }
 }

@@ -721,4 +721,60 @@ mod tests {
         s.set_theme(ThemeKind::Light);
         assert_eq!(s.theme_kind, ThemeKind::Light);
     }
+
+    // ============================================================================
+    // render smoke
+    // ============================================================================
+
+    #[test]
+    fn render_lobby_does_not_panic() {
+        let (s, _out, _in) = make_state(1, 1, 2);
+        let backend = ratatui::backend::TestBackend::new(144, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| s.render(f, f.area(), None, None)).unwrap();
+    }
+
+    #[test]
+    fn render_with_nat_and_dial_addr_does_not_panic() {
+        let (mut s, _out, _in) = make_state(1, 1, 4);
+        s.message = "hello".into();
+        let nat_pub = crate::net::p2p::host::NatReachability::Public(
+            "/ip4/8.8.8.8/udp/4001/quic-v1".parse().unwrap(),
+        );
+        let dial: libp2p::Multiaddr = "/ip4/8.8.8.8/udp/4001/quic-v1/p2p-circuit".parse().unwrap();
+        let backend = ratatui::backend::TestBackend::new(144, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| s.render(f, f.area(), Some(&nat_pub), Some(&dial)))
+            .unwrap();
+    }
+
+    #[test]
+    fn render_with_zerotrust_short_humans_does_not_panic() {
+        let (mut s, _out, _in) = make_state(1, 1, 2);
+        s.room_view.mode = crate::net::p2p::RoomMode::ZeroTrust;
+        let nat_priv = crate::net::p2p::host::NatReachability::Private;
+        let backend = ratatui::backend::TestBackend::new(144, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| s.render(f, f.area(), Some(&nat_priv), None))
+            .unwrap();
+    }
+
+    #[test]
+    fn render_with_modal_open_does_not_panic() {
+        let (mut s, _out, _in) = make_state(1, 1, 2);
+        s.editing_config = Some(EditConfigModal::new(s.room_view.config.clone()));
+        let backend = ratatui::backend::TestBackend::new(144, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| s.render(f, f.area(), None, None)).unwrap();
+    }
+
+    #[test]
+    fn render_with_nat_unknown_does_not_panic() {
+        let (s, _out, _in) = make_state(1, 1, 1);
+        let nat_unknown = crate::net::p2p::host::NatReachability::Unknown;
+        let backend = ratatui::backend::TestBackend::new(144, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| s.render(f, f.area(), Some(&nat_unknown), None))
+            .unwrap();
+    }
 }
