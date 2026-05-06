@@ -5,7 +5,7 @@
 
 ## 当前进度 (commits 在 `pure-fn-refactor` 分支)
 
-✅ **阶段 1-5 完成** (engine 核心重构):
+✅ **阶段 1-7 完成**:
 - 阶段 1: domain 下沉为 engine::domain 子模块
 - 阶段 2: Wall pure 化 (新方法共存)
 - 阶段 3: AtomicOp + OpError + typed_op! 宏
@@ -14,21 +14,27 @@
   AwaitRinshanDraw / AwaitCalls / RoundEnd) + try_op (validity gate) + typed apply
   (total + emit events) + 公开 entry (round_apply / legal_ops / summarize_round /
   init_round)
+- 阶段 6: UI 层 GameEngine wrapper 接管 game.rs (commit 446a603) → 提到顶层
+  crate::game_engine 给 net/dev 共用
+- 阶段 7: 调用面全切到 GameEngine —
+  * AI 删 *_legacy 桥接, 统一吃 &RoundState
+  * net::room::RoomActor.game 字段 GameState → GameEngine, 全部走 method 调用
+  * dev::recorder 重写: RecordedAction = AtomicOp, RoundRecording.initial_state
+    持 GameEngine, replay 顺序 round_apply
+  * GameEngine 内部 apply() helper 自动 push 真实 AtomicOp 到 recorded_actions
+    (do_riichi push RiichiDeclare+Discard, do_ankan push Ankan+RinshanDraw 等)
+  * **删除 src/legacy_state.rs (1012 LOC)** — crate 层面再无 GameState
 
-测试: 436 lib 测试全绿 (新增 ~30 个覆盖 op / match_state / round_state).
+测试: cargo test --lib --features dev-tools 415 passed (engine + domain + score
++ yaku + ai + dev::recorder replay roundtrip + dev::savestate + ui state machine
++ mental_poker 算法层全绿).
 
-⏸️ **阶段 6-8 (UI 适配 + 删旧) — 留作 follow-up**:
-- 阶段 6a: UI 单机驱动切换 (game.rs 74 处 GameState 引用 + 结构性大改)
-- 阶段 6b: 其它调用方签名层适配
-- 阶段 7: 删旧 GameState / do_*
-- 阶段 8: 收尾 + 手动单机验证
-
-**理由**: stage 6a 是大手术 (跨 paint/handle_event/advance 多个互联模块), 中间
-状态可能编不过. 适合在专注的小段时间内逐 chunk 推进 + 手动 smoke test, 不适合
-连续自主跑.
-
-**新旧 API 共存**: 当前 main + pure-fn-refactor 分支都能 cargo build, 单机游戏
-仍走老 GameState. 新 RoundState/MatchState 已就绪但 UI 未对接.
+⏸️ **阶段 8 (后续工作)**:
+- net::room::tests 现在用 #[cfg(all(test, feature = "net-tests"))] 屏蔽, 测试
+  原本大量直接戳 GameState 内部字段, 重写为 round_apply 驱动留 follow-up.
+- net::p2p::mp_{bridge,swarm} 两个 libp2p socket 集成测试 pre-existing flake,
+  跟本次重构无关.
+- 单机游戏手动验证 (`just play`).
 
 ---
 
