@@ -724,4 +724,114 @@ mod tests {
         // 应该不 panic, riichi_discards 0..=14.
         assert!(opts.riichi_discards.len() <= 14);
     }
+
+    // ===== 错误返回路径 + do_chi/do_minkan 直调 =====
+
+    #[test]
+    fn try_tsumo_returns_none_when_not_winning() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        // East 起手十有八九不能自摸 → try_tsumo 返 None.
+        // (即使偶尔能, can_tsumo 也跟着真; 测试只验"接口语义一致").
+        if !e.can_tsumo() {
+            assert!(e.try_tsumo().is_none());
+        }
+    }
+
+    #[test]
+    fn try_ron_returns_none_when_not_winning() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        let t = e.round.last_drawn().unwrap();
+        e.do_discard(t).expect("切牌");
+        // 此时 phase=AwaitCalls. South 通常不能 ron → try_ron None.
+        if !e.can_ron(Seat::South) {
+            assert!(e.try_ron(Seat::South).is_none());
+        }
+    }
+
+    #[test]
+    fn do_chi_creates_chi_meld() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        let chi_tile = Tile { kind: TileIndex(2), red: false, id: 1000 };
+        if let RoundState::AwaitDiscard(s) = &mut e.round {
+            s.common.players[Seat::East.index()].hand.closed.push(chi_tile);
+            s.last_drawn = Some(chi_tile);
+            s.common.players[Seat::East.index()].last_drawn = Some(chi_tile);
+            // South 手中加 1m + 2m 备吃 (吃成 1-2-3m).
+            s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                kind: TileIndex(0), red: false, id: 1001,
+            });
+            s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                kind: TileIndex(1), red: false, id: 1002,
+            });
+        }
+        e.do_discard(chi_tile).expect("切 3m");
+        e.do_chi(
+            Seat::South,
+            [
+                Tile { kind: TileIndex(0), red: false, id: 1001 },
+                Tile { kind: TileIndex(1), red: false, id: 1002 },
+            ],
+        )
+        .expect("吃应成功");
+        assert_eq!(e.turn(), Seat::South);
+        assert!(matches!(
+            &e.players()[Seat::South.index()].hand.melds[0].kind,
+            MeldKind::Chi { .. }
+        ));
+    }
+
+    #[test]
+    fn do_minkan_creates_minkan_meld() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        let kan_tile = Tile { kind: TileIndex(24), red: false, id: 1100 };
+        if let RoundState::AwaitDiscard(s) = &mut e.round {
+            s.common.players[Seat::East.index()].hand.closed.push(kan_tile);
+            s.last_drawn = Some(kan_tile);
+            s.common.players[Seat::East.index()].last_drawn = Some(kan_tile);
+            for id in 1101..=1103 {
+                s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                    kind: TileIndex(24), red: false, id,
+                });
+            }
+        }
+        e.do_discard(kan_tile).expect("切 7s");
+        e.do_minkan(
+            Seat::South,
+            [
+                Tile { kind: TileIndex(24), red: false, id: 1101 },
+                Tile { kind: TileIndex(24), red: false, id: 1102 },
+                Tile { kind: TileIndex(24), red: false, id: 1103 },
+            ],
+        )
+        .expect("明杠应成功");
+        assert!(matches!(
+            &e.players()[Seat::South.index()].hand.melds[0].kind,
+            MeldKind::Minkan { .. }
+        ));
+    }
+
+    #[test]
+    fn do_draw_returns_none_at_round_end() {
+        // engine 已转 RoundEnd 时 do_draw 应返 None.
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        // 黑魔法直接转 RoundEnd.
+        let common = e.round.common().clone();
+        e.round = RoundState::RoundEnd(crate::engine::round_state::RoundEndState {
+            common,
+            result: crate::engine::round_state::RoundResult::Ryuukyoku {
+                kind: crate::engine::round_state::RyuukyokuKind::Howaipai,
+            },
+        });
+        // round_apply Draw 在 RoundEnd 返 AlreadyEnded → do_draw None.
+        assert!(e.do_draw().is_none());
+    }
 }

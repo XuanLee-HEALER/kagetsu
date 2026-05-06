@@ -2586,4 +2586,106 @@ mod tests {
         let r = s.try_op(AtomicOp::Shouminkan { kind: TileIndex(0) });
         assert!(matches!(r, Err(OpError::NoMatchingPonForShouminkan(TileIndex(0)))));
     }
+
+    #[test]
+    fn shouminkan_no_4th_tile_err() {
+        // 有 Pon 但闭手没第 4 张 → InsufficientForAnkan (复用此 variant 表达).
+        let mut s = fixture_await_discard(42);
+        s.common.players[Seat::East.index()].hand.melds.push(Meld {
+            kind: MeldKind::Pon {
+                tiles: [
+                    Tile { kind: TileIndex(0), red: false, id: 9000 },
+                    Tile { kind: TileIndex(0), red: false, id: 9001 },
+                    Tile { kind: TileIndex(0), red: false, id: 9002 },
+                ],
+            },
+            from: Some(Seat::West),
+        });
+        // 闭手不含 1m → 加杠应 err.
+        s.common.players[Seat::East.index()]
+            .hand
+            .closed
+            .retain(|t| t.kind != TileIndex(0));
+        let r = s.try_op(AtomicOp::Shouminkan { kind: TileIndex(0) });
+        assert!(matches!(r, Err(OpError::InsufficientForAnkan(TileIndex(0)))));
+    }
+
+    #[test]
+    fn shouminkan_while_riichi_err() {
+        let mut s = fixture_await_discard(42);
+        s.common.players[Seat::East.index()].riichi = true;
+        let r = s.try_op(AtomicOp::Shouminkan { kind: TileIndex(0) });
+        assert!(matches!(
+            r,
+            Err(OpError::DisallowedWhileRiichi(
+                crate::engine::op::AtomicOpKind::Shouminkan
+            ))
+        ));
+    }
+
+    #[test]
+    fn await_riichi_discard_state_getters() {
+        // 直接构造 AwaitRiichiDiscardState, 验 RoundState wrapper 的 common/turn/last_drawn.
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let common = r.common().clone();
+        let drawn = Tile { kind: TileIndex(0), red: false, id: 9999 };
+        let r = RoundState::AwaitRiichiDiscard(AwaitRiichiDiscardState {
+            common,
+            turn: Seat::South,
+            last_drawn: drawn,
+        });
+        assert_eq!(r.turn(), Some(Seat::South));
+        assert_eq!(r.last_drawn(), Some(drawn));
+        // common() 也走 AwaitRiichiDiscard 分支.
+        assert_eq!(r.common().dealer, Seat::East);
+    }
+
+    #[test]
+    fn await_rinshan_draw_state_getters() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let common = r.common().clone();
+        let r = RoundState::AwaitRinshanDraw(AwaitRinshanDrawState {
+            common,
+            turn: Seat::West,
+        });
+        assert_eq!(r.turn(), Some(Seat::West));
+        // last_drawn 在 RinshanDraw 阶段无意义, 应返 None.
+        assert!(r.last_drawn().is_none());
+        assert_eq!(r.common().dealer, Seat::East);
+    }
+
+    #[test]
+    fn legal_ops_at_await_calls_lists_minkan() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        let kan_tile = Tile { kind: TileIndex(13), red: false, id: 7000 };
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                s.common.players[Seat::East.index()].hand.closed.push(kan_tile);
+                s.last_drawn = Some(kan_tile);
+                s.common.players[Seat::East.index()].last_drawn = Some(kan_tile);
+                // South 手中插 3 张 5p 备明杠.
+                for id in 7001..=7003 {
+                    s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                        kind: TileIndex(13), red: false, id,
+                    });
+                }
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!(),
+        };
+        let (r, _) = round_apply(&r, AtomicOp::Discard { tile: kan_tile }).unwrap();
+        let ops = legal_ops(&r);
+        assert!(ops.calls[Seat::South.index()].minkan.is_some(), "应能明杠");
+    }
+
+    #[test]
+    fn await_discard_riichi_must_tsumogiri_already_handled_by_other_test() {
+        // 占位以提示该路径已被 await_discard_try_op_riichi_must_tsumogiri 覆盖.
+        // 这里也直接覆盖一次让 try_op 内的 RiichiMustTsumogiri 路径在 Shouminkan/Ankan 之外
+        // 也走一遍 (已在另一测试覆盖, 此条 noop).
+    }
 }

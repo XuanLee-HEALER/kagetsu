@@ -495,9 +495,15 @@ mod tests {
 
     #[test]
     fn from_typed_op_back_to_atomic() {
+        // 带字段的 variant.
         let typed = TestDiscardOp::Discard { tile: t(5, 10) };
         let atomic: AtomicOp = typed.into();
         assert_eq!(atomic, AtomicOp::Discard { tile: t(5, 10) });
+        // unit variant — 覆盖 typed_op! 宏 From impl 的 unit 分支.
+        let atomic: AtomicOp = TestDiscardOp::Tsumo.into();
+        assert_eq!(atomic, AtomicOp::Tsumo);
+        let atomic: AtomicOp = TestDiscardOp::Pass.into();
+        assert_eq!(atomic, AtomicOp::Pass);
     }
 
     #[test]

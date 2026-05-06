@@ -1818,4 +1818,51 @@ mod tests {
             "555 三色同刻应识别, got {:?}", yakus
         );
     }
+
+    // FIXME engine bug: Sankantsu 检查只看闭手 mentsu, 副露 3 杠场景应识别但
+    // 代码漏看 melds (yaku.rs:425-432). 测试构造 3 副露杠后无法触发 Sankantsu.
+    // 等 engine 修复后补此测试. 类似的 helper 修复可能也涉及 Suukantsu.
+
+    #[test]
+    fn detect_kotekisai_renhou_when_enabled() {
+        // 古役"人和" — 子家第 1 巡内荣和上家弃牌. 需 rules.kotekisai +
+        // rules.kotekisai_renhou 同时开 + ctx.is_renhou.
+        let hand = h(&[(0, 2), (2, 2), (4, 2), (6, 2), (9, 2), (33, 2), (29, 2)]);
+        let r = decompose(&hand, &[], TileIndex(0));
+        let d = r.iter().find(|d| matches!(d, Decomposition::Chiitoitsu { .. })).unwrap();
+
+        let cfg: &'static GameRules = Box::leak(Box::new(GameRules {
+            kotekisai: true,
+            kotekisai_renhou: true,
+            ..GameRules::default()
+        }));
+        let ctx = WinContext {
+            decomposition: d,
+            seat_wind: TileIndex::SOUTH,
+            round_wind: TileIndex::EAST,
+            winning_tile: TileIndex(0),
+            is_tsumo: false,
+            is_riichi: false,
+            is_double_riichi: false,
+            is_ippatsu: false,
+            is_haitei: false,
+            is_houtei: false,
+            is_rinshan: false,
+            is_chankan: false,
+            is_tenhou: false,
+            is_chiihou: false,
+            is_renhou: true,
+            menzen: true,
+            fully_concealed: true,
+            dora_count: 0,
+            aka_count: 0,
+            ura_dora_count: 0,
+            rules: cfg,
+        };
+        let yakus = detect_yaku(&ctx, &[]);
+        assert!(
+            yakus.iter().any(|(y, _)| matches!(y, Yaku::Renhou)),
+            "kotekisai 开启 + is_renhou 应识别 Renhou, got {:?}", yakus
+        );
+    }
 }
