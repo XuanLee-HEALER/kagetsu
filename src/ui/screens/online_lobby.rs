@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::net::p2p::Region;
+use crate::net::p2p::{Region, RoomMode};
 use crate::net::p2p::discovery::{RoomBrowser, RoomEntry};
 use crate::ui::Transition;
 
@@ -41,6 +41,9 @@ pub struct OnlineLobbyState {
     pub region_filter: Region,
     /// 过滤前总房间数 (UI 显示 "3/5" 用).
     pub discovered_total: usize,
+    /// 创建房间时用的模式. 'M' 键切换 (Standard ↔ ZeroTrust).
+    /// 初值取自 prefs.network.default_room_mode.
+    pub room_mode: RoomMode,
 }
 
 /// 给一个发现到的房间打 tag: [LAN] / [中转] / [远程].
@@ -98,6 +101,7 @@ impl OnlineLobbyState {
         runtime: &tokio::runtime::Handle,
         bootstrap_relays: Vec<libp2p::Multiaddr>,
         region_filter: Region,
+        room_mode: RoomMode,
     ) -> Self {
         let browser = RoomBrowser::start(runtime, bootstrap_relays).ok();
         Self {
@@ -110,6 +114,7 @@ impl OnlineLobbyState {
             discovered_selected: 0,
             region_filter,
             discovered_total: 0,
+            room_mode,
         }
     }
 
@@ -117,11 +122,12 @@ impl OnlineLobbyState {
         runtime: &tokio::runtime::Handle,
         bootstrap_relays: Vec<libp2p::Multiaddr>,
         region_filter: Region,
+        room_mode: RoomMode,
         message: String,
     ) -> Self {
         Self {
             message,
-            ..Self::new(runtime, bootstrap_relays, region_filter)
+            ..Self::new(runtime, bootstrap_relays, region_filter, room_mode)
         }
     }
 
@@ -168,6 +174,17 @@ impl OnlineLobbyState {
                 self.region_filter = next_region(self.region_filter);
                 None
             }
+            // 'M' / 'm': 切换创建房间的模式 (Standard ↔ ZeroTrust).
+            // 排除 nickname/addr 输入焦点.
+            KeyCode::Char('m') | KeyCode::Char('M')
+                if !matches!(self.focus, FOCUS_NICKNAME | FOCUS_ADDR) =>
+            {
+                self.room_mode = match self.room_mode {
+                    RoomMode::Standard => RoomMode::ZeroTrust,
+                    RoomMode::ZeroTrust => RoomMode::Standard,
+                };
+                None
+            }
             KeyCode::Tab | KeyCode::Down => {
                 self.focus = (self.focus + 1) % ITEM_COUNT;
                 None
@@ -209,6 +226,7 @@ impl OnlineLobbyState {
                     }
                     Some(Transition::CreateOnlineRoom {
                         nickname: self.nickname.trim().to_string(),
+                        mode: self.room_mode,
                     })
                 }
                 FOCUS_DISCOVERED => {
@@ -296,6 +314,28 @@ impl OnlineLobbyState {
             ),
         ]));
         lines.push(Line::from(""));
+
+        // 模式显示 + 'M' 键提示.
+        {
+            let (mode_label, mode_color) = match self.room_mode {
+                RoomMode::Standard => ("Standard (房主权威)", Color::Cyan),
+                RoomMode::ZeroTrust => {
+                    ("ZeroTrust (P2P mental poker, 需 4 真人)", Color::Magenta)
+                }
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  模式: "),
+                Span::styled(
+                    mode_label,
+                    Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "   ('M' 键切换)",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            lines.push(Line::from(""));
+        }
 
         // 创建房间按钮
         {
