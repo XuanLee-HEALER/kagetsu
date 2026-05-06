@@ -32,7 +32,7 @@ use crate::engine::phase::Phase;
 use crate::engine::round_state::RoundResult;
 use crate::engine::rules::GameRules;
 use crate::engine::score::final_ranking;
-use crate::ui::screens::game_engine::{CallOptions, GameEngine};
+use crate::game_engine::{CallOptions, GameEngine};
 use crate::ui::Transition;
 use crate::ui::paint::{
     TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row_hl,

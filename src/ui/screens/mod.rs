@@ -2,7 +2,6 @@
 
 pub mod config;
 pub mod game;
-pub mod game_engine;
 pub mod gameover;
 pub mod main_menu;
 pub mod online_game;
