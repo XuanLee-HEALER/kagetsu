@@ -270,10 +270,11 @@ impl RoomActor {
     }
     pub(super) fn mark_disconnected(&mut self, player_id: u32) {
         if let Some(slot) = self.slots.iter_mut().find(|s| s.id == player_id) {
-            // 进入 reconnect grace 期: sender 清掉 (无法继续 push 消息),
-            // connected 仍标 true (UI 显示"等待重连"). 客户端持 reconnect_token
-            // 可在 RECONNECT_GRACE_SECS 秒内重连恢复.
+            // 立刻 connected=false 反映客户端离线; disconnected_at=Some 进入 grace
+            // 期, is_seat_ai 此时仍不视为 AI (游戏暂停等真人重连). grace timer
+            // 满后清 disconnected_at, is_seat_ai 才视为 AI 接管.
             slot.sender = None;
+            slot.connected = false;
             slot.disconnected_at = Some(std::time::Instant::now());
         }
         // 启 grace timer: 满 30s 后回送 ReconnectGraceTimeout 让 actor 检查
@@ -286,16 +287,19 @@ impl RoomActor {
         self.broadcast_room_update();
     }
 
-    /// grace timer 触发: 检查 slot 是否仍未重连. 是 → 永久标记 disconnected
-    /// (connected=false), is_seat_ai 视为 AI, advance_game 让 AI 接管.
+    /// grace timer 触发: 检查 slot 是否仍未重连. 是 → 清 disconnected_at,
+    /// is_seat_ai 此后视为 AI, advance_game 让 AI 接管.
     pub(super) fn on_reconnect_grace_timeout(&mut self, player_id: u32) {
         let mut transitioned = false;
         if let Some(slot) = self.slots.iter_mut().find(|s| s.id == player_id)
-            && slot.disconnected_at.is_some() && slot.sender.is_none() {
-                slot.connected = false;
-                slot.disconnected_at = None;
-                transitioned = true;
-            }
+            && slot.disconnected_at.is_some()
+            && slot.sender.is_none()
+        {
+            // connected 已是 false (mark_disconnected 设的). 仅清 disconnected_at
+            // 让 is_seat_ai 转 true.
+            slot.disconnected_at = None;
+            transitioned = true;
+        }
         if transitioned {
             self.broadcast_room_update();
             if self.state == RoomLifecycle::InGame {

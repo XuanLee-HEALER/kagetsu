@@ -215,6 +215,8 @@ impl RoomActor {
                     // do_draw 返 None 时, engine 已自动转 RoundEnd (荒牌流局).
                     if game.do_draw().is_none() {
                         if game.phase() == Phase::RoundEnd {
+                            // 推 phase=RoundEnd 的 GameStateView 让 client 看到流局, 然后结算.
+                            self.broadcast_state_view();
                             self.broadcast_round_result();
                             return;
                         }
@@ -311,6 +313,9 @@ impl RoomActor {
                     return;
                 }
                 Phase::RoundEnd => {
+                    // 推 GameStateView 让 client 看到 phase=RoundEnd (用于 UI 转
+                    // "按 N 进下一局" 状态), 然后推 RoundResultView 显示结算.
+                    self.broadcast_state_view();
                     self.broadcast_round_result();
                     return;
                 }
@@ -339,9 +344,13 @@ impl RoomActor {
         } else {
             chrono_now_unix_ms() + (secs as i64) * 1000
         };
-        // 从 GameEngine 真实算可宣动作: 自摸 / 立直 / 暗杠 / 加杠.
-        // 切牌不在 hints 内 (UI 自己枚举手牌). hints 仅列"宣告动作"让客户端 UI 高亮按键.
+        // 从 GameEngine 真实算可宣动作: 自摸 / 立直 / 暗杠 / 加杠. 切牌总是合法,
+        // hints 始终至少含一条 Discard placeholder (UI 自己枚举具体手牌张).
         let mut hints: Vec<NetAction> = Vec::new();
+        // Discard placeholder (kind 任意, UI 不读, 仅作"切牌动作合法"标志).
+        hints.push(NetAction::Discard(crate::ui::screens::game::TileSpec {
+            kind: crate::engine::domain::tile::TileIndex(0),
+        }));
         if let Some(engine) = self.game.as_ref() {
             let opts = engine.legal_self_options();
             if opts.tsumo {
@@ -365,12 +374,16 @@ impl RoomActor {
         });
     }
 
-    /// 当前 seat 是否 AI 控制 (slot 标记 AI 或对应 slot 已断线).
+    /// 当前 seat 是否 AI 控制. AI 接管条件:
+    /// - slot.is_ai = true (开局补的 AI), 或
+    /// - 永久断线 (connected=false 且 disconnected_at=None, grace 期已结束).
+    /// grace 期内 (connected=false, disconnected_at=Some) **不**视为 AI, 游戏
+    /// 暂停等真人重连.
     pub(super) fn is_seat_ai(&self, seat: Seat) -> bool {
         self.slots
             .iter()
             .find(|s| s.seat == Some(seat))
-            .map(|s| s.is_ai || !s.connected)
+            .map(|s| s.is_ai || (!s.connected && s.disconnected_at.is_none()))
             .unwrap_or(true)
     }
 
