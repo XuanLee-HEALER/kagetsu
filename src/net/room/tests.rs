@@ -770,3 +770,649 @@
         assert_eq!(mp2.2, mp3.2);
         assert_eq!(mp0.2.len(), 32);
     }
+
+    // ========================================================================
+    // game.rs handle_action / advance_game / send_thinking_action_required /
+    // apply_ai_action / finalize_game 直接驱动测试
+    // ========================================================================
+
+    use crate::engine::domain::action::Action;
+
+    #[test]
+    fn handle_action_state_not_in_game_is_noop() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        actor.state = RoomLifecycle::Lobby;
+        let phase_before = actor.game.as_ref().unwrap().phase();
+        // 用 fake 切牌 spec; 因为 state != InGame, 应直接返回不调用 engine.
+        actor.handle_action(
+            1,
+            NetAction::Discard(crate::ui::screens::game::TileSpec {
+                kind: TileIndex(0),
+            }),
+        );
+        assert_eq!(actor.game.as_ref().unwrap().phase(), phase_before);
+    }
+
+    #[test]
+    fn handle_action_unknown_player_is_noop() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        let phase_before = actor.game.as_ref().unwrap().phase();
+        actor.handle_action(
+            999,
+            NetAction::Discard(crate::ui::screens::game::TileSpec {
+                kind: TileIndex(0),
+            }),
+        );
+        assert_eq!(actor.game.as_ref().unwrap().phase(), phase_before);
+    }
+
+    #[test]
+    fn handle_action_in_await_calls_routes_to_call_response() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        force_discard_scenario(
+            &mut actor,
+            Seat::East,
+            Tile {
+                id: 50000,
+                kind: TileIndex(0),
+                red: false,
+            },
+        );
+        // South (id=2) 进 pending; handle_action(2, Pass) 应路由到 handle_call_response.
+        actor.pending_calls = Some({
+            let mut m = HashMap::new();
+            m.insert(2, None);
+            m
+        });
+        actor.handle_action(2, NetAction::Pass);
+        // 唯一 pending 已响应 → resolve → 全 Pass → advance_turn, pending 清空.
+        assert!(actor.pending_calls.is_none());
+    }
+
+    #[test]
+    fn handle_action_pon_in_await_discard_is_ignored() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        // 默认 round 是 AwaitDraw, 先驱到 AwaitDiscard.
+        let game = actor.game.as_mut().unwrap();
+        let _ = game.do_draw();
+        assert_eq!(game.phase(), Phase::AwaitDiscard);
+        let phase_before = game.phase();
+        let turn_before = game.turn();
+        // East AwaitDiscard 阶段调 Pon 应被忽略 (不 panic 不动 state).
+        actor.handle_action(1, NetAction::Pon);
+        let game = actor.game.as_ref().unwrap();
+        assert_eq!(game.phase(), phase_before);
+        assert_eq!(game.turn(), turn_before);
+    }
+
+    #[test]
+    fn handle_action_next_round_only_in_round_end() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        // 当前 phase != RoundEnd, NextRound 应 short-circuit 不动.
+        let round_index_before = actor.round_index;
+        actor.handle_action(1, NetAction::NextRound);
+        assert_eq!(actor.round_index, round_index_before);
+    }
+
+    #[test]
+    fn send_thinking_action_required_emits_action_required_with_discard_placeholder() {
+        let (actor, mut rxs) = make_actor_in_game(&[Seat::East]);
+        actor.send_thinking_action_required(Seat::East);
+        let mut got_hint = None;
+        while let Ok(msg) = rxs[0].try_recv() {
+            if let ServerMsg::ActionRequired { hints, .. } = msg {
+                got_hint = Some(hints);
+                break;
+            }
+        }
+        let hints = got_hint.expect("应推 ActionRequired");
+        // 至少一个 Discard placeholder.
+        assert!(
+            hints
+                .iter()
+                .any(|h| matches!(h, NetAction::Discard(_))),
+            "hints 应至少含一个 Discard placeholder, 实际 {hints:?}",
+        );
+    }
+
+    #[test]
+    fn send_thinking_action_required_no_sender_does_not_panic() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        // 移走 East 的 sender (模拟离线), 不应 panic.
+        actor.slots[0].sender = None;
+        actor.send_thinking_action_required(Seat::East);
+    }
+
+    #[test]
+    fn send_thinking_action_required_zero_thinking_time_emits_zero_deadline() {
+        let (mut actor, mut rxs) = make_actor_in_game(&[Seat::East]);
+        actor.config.thinking_time_secs = Some(0);
+        actor.send_thinking_action_required(Seat::East);
+        let mut got_deadline = None;
+        while let Ok(msg) = rxs[0].try_recv() {
+            if let ServerMsg::ActionRequired {
+                deadline_unix_ms, ..
+            } = msg
+            {
+                got_deadline = Some(deadline_unix_ms);
+                break;
+            }
+        }
+        assert_eq!(got_deadline, Some(0), "thinking_time=0 应 deadline=0");
+    }
+
+    #[test]
+    fn apply_ai_action_pass_falls_back_to_drawn_discard() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        // 推到 AwaitDiscard, last_drawn = Some(...).
+        let drawn = actor.game.as_mut().unwrap().do_draw().expect("draw");
+        let river_len_before = {
+            let g = actor.game.as_ref().unwrap();
+            g.players()[Seat::East.index()].river.len()
+        };
+        // Pass 应 fallback 摸切.
+        actor.apply_ai_action(Action::Pass);
+        let river_len_after = actor.game.as_ref().unwrap().players()[Seat::East.index()]
+            .river
+            .len();
+        assert_eq!(
+            river_len_after,
+            river_len_before + 1,
+            "Pass fallback 应将 last_drawn 切到河里"
+        );
+        // 切到河里的牌应该就是 drawn 那张 (摸切).
+        let last_river_tile = actor.game.as_ref().unwrap().players()[Seat::East.index()]
+            .river
+            .last()
+            .copied()
+            .unwrap();
+        assert_eq!(last_river_tile.id, drawn.id);
+    }
+
+    #[test]
+    fn apply_ai_action_discard_drops_specified_tile() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        let _ = actor.game.as_mut().unwrap().do_draw();
+        // 取手牌第一张作 Discard target.
+        let target = actor.game.as_ref().unwrap().players()[Seat::East.index()]
+            .hand
+            .closed[0];
+        actor.apply_ai_action(Action::Discard(target));
+        let last = actor.game.as_ref().unwrap().players()[Seat::East.index()]
+            .river
+            .last()
+            .copied()
+            .unwrap();
+        assert_eq!(last.id, target.id);
+    }
+
+    #[test]
+    fn apply_ai_action_no_game_does_not_panic() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        actor.game = None;
+        // 不应 panic.
+        actor.apply_ai_action(Action::Pass);
+    }
+
+    #[test]
+    fn finalize_game_marks_game_end_and_broadcasts_gameover() {
+        let (mut actor, mut rxs) = make_actor_in_game(&[Seat::East]);
+        actor.finalize_game();
+        assert_eq!(actor.state, RoomLifecycle::GameEnd);
+        // 4 个 receiver 都应至少收到一条 GameEnd / RoomUpdate.
+        let mut got_game_end = false;
+        for rx in rxs.iter_mut() {
+            while let Ok(msg) = rx.try_recv() {
+                if matches!(msg, ServerMsg::GameEnd(_)) {
+                    got_game_end = true;
+                }
+            }
+        }
+        assert!(got_game_end, "finalize_game 应广播 GameEnd");
+    }
+
+    // ========================================================================
+    // projection.rs broadcast / room_view / send_error 路径
+    // ========================================================================
+
+    use crate::engine::round_state::{RoundResult, RyuukyokuKind};
+
+    #[test]
+    fn room_view_no_host_returns_zero_host_id() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        for slot in &mut actor.slots {
+            slot.is_host = false;
+        }
+        let view = actor.room_view();
+        assert_eq!(view.host_id, 0);
+    }
+
+    #[test]
+    fn room_view_marks_host_correctly() {
+        let (actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        let view = actor.room_view();
+        assert_eq!(view.host_id, 1);
+        assert_eq!(view.players.len(), 4);
+    }
+
+    #[test]
+    fn project_view_returns_none_when_game_absent() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        actor.game = None;
+        assert!(actor.project_view(Seat::East).is_none());
+    }
+
+    #[test]
+    fn broadcast_state_view_skips_slot_without_seat() {
+        let (mut actor, mut rxs) = make_actor_in_game(&[Seat::East]);
+        // 给 East slot 清掉 seat (模拟未上桌的观察者).
+        actor.slots[0].seat = None;
+        actor.broadcast_state_view();
+        // East rx 不应收到 GameStateView.
+        let mut saw = false;
+        while let Ok(msg) = rxs[0].try_recv() {
+            if matches!(msg, ServerMsg::GameStateView(_)) {
+                saw = true;
+                break;
+            }
+        }
+        assert!(!saw, "无 seat 的 slot 不应收 GameStateView");
+    }
+
+    #[test]
+    fn broadcast_state_view_skips_slot_without_sender() {
+        let (mut actor, mut rxs) = make_actor_in_game(&[Seat::East]);
+        actor.slots[0].sender = None;
+        actor.broadcast_state_view();
+        let mut saw = false;
+        while let Ok(msg) = rxs[0].try_recv() {
+            if matches!(msg, ServerMsg::GameStateView(_)) {
+                saw = true;
+            }
+        }
+        assert!(!saw);
+    }
+
+    #[test]
+    fn broadcast_round_result_no_game_is_noop() {
+        let (mut actor, mut rxs) = make_actor_in_game(&[Seat::East]);
+        actor.game = None;
+        actor.broadcast_round_result();
+        let mut saw = false;
+        while let Ok(msg) = rxs[0].try_recv() {
+            if matches!(msg, ServerMsg::RoundResult(_)) {
+                saw = true;
+            }
+        }
+        assert!(!saw);
+    }
+
+    #[test]
+    fn broadcast_round_result_ryuukyoku_uses_liu_ju_message() {
+        let (mut actor, mut rxs) = make_actor_in_game(&[Seat::East]);
+        actor.game.as_mut().unwrap().last_result = Some(RoundResult::Ryuukyoku {
+            kind: RyuukyokuKind::Howaipai,
+        });
+        actor.broadcast_round_result();
+        let mut got_msg = None;
+        while let Ok(msg) = rxs[0].try_recv() {
+            if let ServerMsg::RoundResult(r) = msg {
+                got_msg = Some(r.message);
+                break;
+            }
+        }
+        assert_eq!(got_msg.as_deref(), Some("流局"));
+    }
+
+    #[test]
+    fn broadcast_round_result_no_result_uses_unknown_message() {
+        let (mut actor, mut rxs) = make_actor_in_game(&[Seat::East]);
+        actor.game.as_mut().unwrap().last_result = None;
+        actor.broadcast_round_result();
+        let mut got_msg = None;
+        while let Ok(msg) = rxs[0].try_recv() {
+            if let ServerMsg::RoundResult(r) = msg {
+                got_msg = Some(r.message);
+                break;
+            }
+        }
+        assert_eq!(got_msg.as_deref(), Some("未知"));
+    }
+
+    #[test]
+    fn broadcast_room_update_sends_to_all_with_sender() {
+        let (actor, mut rxs) = make_actor_in_game(&[Seat::East]);
+        actor.broadcast_room_update();
+        let mut count = 0;
+        for rx in rxs.iter_mut() {
+            while let Ok(msg) = rx.try_recv() {
+                if matches!(msg, ServerMsg::RoomUpdate(_)) {
+                    count += 1;
+                    break;
+                }
+            }
+        }
+        assert_eq!(count, 4, "RoomUpdate 应广播到全部 4 个 sender");
+    }
+
+    #[test]
+    fn send_error_targets_specific_player() {
+        let (actor, mut rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        actor.send_error(2, "test err");
+        // South (index 1) 收到; East 不收.
+        let mut south_got = false;
+        while let Ok(msg) = rxs[1].try_recv() {
+            if let ServerMsg::Error { message } = msg
+                && message == "test err"
+            {
+                south_got = true;
+                break;
+            }
+        }
+        assert!(south_got);
+        // East 不应收到.
+        let mut east_got = false;
+        while let Ok(msg) = rxs[0].try_recv() {
+            if matches!(msg, ServerMsg::Error { .. }) {
+                east_got = true;
+            }
+        }
+        assert!(!east_got);
+    }
+
+    #[test]
+    fn send_error_unknown_player_does_not_panic() {
+        let (actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        actor.send_error(999, "noop");
+    }
+
+    // ========================================================================
+    // lobby.rs handle_xxx 命令路由 + 状态约束
+    // ========================================================================
+
+    /// 构造一个处于 Lobby 状态的 RoomActor (sync). humans = 已加入的真人数 (含 host).
+    /// 第一人是 host. ready=true 仅 host (其他默认 false).
+    fn make_actor_in_lobby(humans: usize) -> (RoomActor, Vec<UnboundedReceiver<ServerMsg>>) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let mut actor = RoomActor::new_with_rx(
+            "host".into(),
+            GameRules::default(),
+            cmd_rx,
+            cmd_tx,
+            Some(0xC0DE_C0DE),
+        );
+        let mut receivers = Vec::with_capacity(humans);
+        for i in 0..humans {
+            let (tx, rx) = mpsc::unbounded_channel();
+            actor.slots.push(SlotEntry {
+                id: (i + 1) as u32,
+                nickname: format!("p{}", i + 1),
+                ready: i == 0,
+                seat: None,
+                is_ai: false,
+                is_host: i == 0,
+                connected: true,
+                sender: Some(tx),
+                reconnect_token: Uuid::new_v4(),
+                disconnected_at: None,
+            });
+            receivers.push(rx);
+        }
+        actor.next_player_id = (humans + 1) as u32;
+        (actor, receivers)
+    }
+
+    #[test]
+    fn handle_join_returns_room_full_when_4_slots_taken() {
+        let (mut actor, _rxs) = make_actor_in_lobby(4);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let res = actor.handle_join("late".into(), None, tx);
+        assert!(matches!(res, Err(JoinError::RoomFull)));
+    }
+
+    #[test]
+    fn handle_join_returns_already_in_game_when_state_non_lobby() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        // 状态 InGame, 新玩家不应能加入.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let res = actor.handle_join("late".into(), None, tx);
+        assert!(matches!(res, Err(JoinError::AlreadyInGame)));
+    }
+
+    #[test]
+    fn handle_ready_in_game_is_noop() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        // South (id=2) 在 InGame 阶段调 ready, 不应改任何 slot.ready.
+        let ready_before: Vec<bool> = actor.slots.iter().map(|s| s.ready).collect();
+        actor.handle_ready(2, false);
+        let ready_after: Vec<bool> = actor.slots.iter().map(|s| s.ready).collect();
+        assert_eq!(ready_before, ready_after);
+    }
+
+    #[test]
+    fn handle_ready_host_cannot_unready() {
+        let (mut actor, _rxs) = make_actor_in_lobby(2);
+        // host (id=1) 永远 ready.
+        actor.handle_ready(1, false);
+        assert!(actor.slots[0].ready, "host 不应能 unready");
+    }
+
+    #[test]
+    fn handle_ready_non_host_can_set_ready() {
+        let (mut actor, _rxs) = make_actor_in_lobby(2);
+        actor.handle_ready(2, true);
+        assert!(actor.slots[1].ready);
+        actor.handle_ready(2, false);
+        assert!(!actor.slots[1].ready);
+    }
+
+    #[test]
+    fn handle_update_config_in_game_is_noop() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        let cfg = GameRules {
+            length: crate::engine::rules::LengthRule::Tonpuusen,
+            ..Default::default()
+        };
+        let before = actor.config.clone();
+        actor.handle_update_config(1, cfg);
+        // InGame 阶段 config 应不变.
+        assert_eq!(before.length, actor.config.length);
+    }
+
+    #[test]
+    fn handle_update_config_non_host_is_noop_in_lobby() {
+        let (mut actor, _rxs) = make_actor_in_lobby(2);
+        let cfg = GameRules {
+            length: crate::engine::rules::LengthRule::Tonpuusen,
+            ..Default::default()
+        };
+        let before = actor.config.length;
+        // id=2 不是 host
+        actor.handle_update_config(2, cfg);
+        assert_eq!(actor.config.length, before);
+    }
+
+    #[test]
+    fn handle_update_config_host_in_lobby_updates() {
+        let (mut actor, _rxs) = make_actor_in_lobby(1);
+        let cfg = GameRules {
+            length: crate::engine::rules::LengthRule::Tonpuusen,
+            ..Default::default()
+        };
+        actor.handle_update_config(1, cfg.clone());
+        assert_eq!(actor.config.length, cfg.length);
+    }
+
+    #[test]
+    fn handle_start_game_non_host_is_noop() {
+        let (mut actor, _rxs) = make_actor_in_lobby(2);
+        // id=2 不是 host
+        actor.handle_start_game(2);
+        assert_eq!(actor.state, RoomLifecycle::Lobby);
+    }
+
+    #[test]
+    fn handle_start_game_in_game_is_noop() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        actor.handle_start_game(1);
+        // 已经 InGame, 应无变化 (不 panic)
+        assert_eq!(actor.state, RoomLifecycle::InGame);
+    }
+
+    #[test]
+    fn handle_start_game_not_all_ready_sends_error() {
+        let (mut actor, mut rxs) = make_actor_in_lobby(2);
+        // p2 默认非 ready
+        actor.handle_start_game(1);
+        let mut got_error = false;
+        while let Ok(msg) = rxs[0].try_recv() {
+            if let ServerMsg::Error { message } = msg
+                && message.contains("未准备")
+            {
+                got_error = true;
+                break;
+            }
+        }
+        assert!(got_error);
+        assert_eq!(actor.state, RoomLifecycle::Lobby);
+    }
+
+    #[test]
+    fn handle_back_to_room_only_in_game_end() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        // InGame 阶段 BackToRoom 应 noop.
+        actor.handle_back_to_room(1);
+        assert_eq!(actor.state, RoomLifecycle::InGame);
+    }
+
+    #[test]
+    fn handle_back_to_room_in_game_end_resets_to_lobby() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        actor.state = RoomLifecycle::GameEnd;
+        actor.handle_back_to_room(1);
+        assert_eq!(actor.state, RoomLifecycle::Lobby);
+        assert!(actor.game.is_none());
+        // AI slot 应已清; 真人保留.
+        assert!(actor.slots.iter().all(|s| !s.is_ai));
+        // East 真人 seat 应清.
+        assert!(actor.slots[0].seat.is_none());
+    }
+
+    #[test]
+    fn handle_continue_game_in_lobby_is_noop() {
+        let (mut actor, _rxs) = make_actor_in_lobby(1);
+        actor.handle_continue_game(1);
+        assert_eq!(actor.state, RoomLifecycle::Lobby);
+    }
+
+    #[test]
+    fn handle_continue_game_non_host_in_game_end_is_noop() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        actor.state = RoomLifecycle::GameEnd;
+        actor.handle_continue_game(2); // id=2 非 host
+        assert_eq!(actor.state, RoomLifecycle::GameEnd);
+    }
+
+    #[test]
+    fn handle_continue_game_host_in_game_end_starts_new_round() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        actor.state = RoomLifecycle::GameEnd;
+        actor.handle_continue_game(1);
+        assert_eq!(actor.state, RoomLifecycle::InGame);
+        assert_eq!(actor.round_index, 1);
+        assert!(actor.game.is_some());
+    }
+
+    #[test]
+    fn handle_leave_unknown_player_is_noop() {
+        let (mut actor, _rxs) = make_actor_in_lobby(2);
+        let before = actor.slots.len();
+        actor.handle_leave(999);
+        assert_eq!(actor.slots.len(), before);
+    }
+
+    #[test]
+    fn handle_leave_lobby_non_host_removes_slot() {
+        let (mut actor, _rxs) = make_actor_in_lobby(2);
+        actor.handle_leave(2);
+        assert_eq!(actor.slots.len(), 1);
+        assert_eq!(actor.slots[0].id, 1);
+    }
+
+    #[test]
+    fn handle_leave_in_game_non_host_marks_ai_keeps_slot() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        actor.handle_leave(2);
+        // South slot 应仍存在但 is_ai = true.
+        let south = actor.slots.iter().find(|s| s.id == 2).expect("仍存在");
+        assert!(south.is_ai);
+        assert!(!south.connected);
+        assert!(south.sender.is_none());
+        assert!(south.nickname.contains("AI"));
+    }
+
+    #[test]
+    fn on_reconnect_grace_timeout_clears_disconnected_at_when_still_offline() {
+        let (mut actor, _rxs) = make_actor_in_lobby(2);
+        actor.slots[1].connected = false;
+        actor.slots[1].sender = None;
+        actor.slots[1].disconnected_at = Some(std::time::Instant::now());
+        actor.on_reconnect_grace_timeout(2);
+        assert!(actor.slots[1].disconnected_at.is_none());
+    }
+
+    #[test]
+    fn on_reconnect_grace_timeout_does_nothing_when_already_reconnected() {
+        let (mut actor, _rxs) = make_actor_in_lobby(2);
+        actor.slots[1].connected = true; // 已重连
+        // disconnected_at 未设
+        actor.on_reconnect_grace_timeout(2);
+        // 仍正常.
+        assert!(actor.slots[1].connected);
+    }
+
+    #[test]
+    fn handle_client_msg_routes_pong_does_not_panic() {
+        let (mut actor, _rxs) = make_actor_in_lobby(1);
+        actor.handle_client_msg(1, ClientMsg::Pong { id: 7 });
+        // Pong 是 noop, 不应改 state.
+        assert_eq!(actor.state, RoomLifecycle::Lobby);
+    }
+
+    #[test]
+    fn handle_client_msg_routes_join_is_ignored() {
+        let (mut actor, _rxs) = make_actor_in_lobby(1);
+        actor.handle_client_msg(
+            1,
+            ClientMsg::Join {
+                nickname: "x".into(),
+                reconnect_token: None,
+            },
+        );
+        // 已 join 过的玩家发 Join 应被忽略 (handle_client_msg 路由).
+        assert_eq!(actor.slots.len(), 1);
+    }
+
+    #[test]
+    fn reset_to_lobby_removes_ai_and_clears_seats() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        // 当前 4 slot, 1 真人 + 3 AI.
+        actor.reset_to_lobby();
+        // AI 全清, 真人保留, 真人 seat = None.
+        assert_eq!(actor.slots.len(), 1);
+        assert!(actor.slots[0].seat.is_none());
+        assert!(actor.slots[0].ready, "host 默认 ready");
+        assert_eq!(actor.state, RoomLifecycle::Lobby);
+        assert!(actor.game.is_none());
+    }
+
+    /// mark_disconnected 内部 spawn timer, 必须 tokio runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mark_disconnected_marks_slot_offline() {
+        let (mut actor, _rxs) = make_actor_in_lobby(2);
+        actor.mark_disconnected(2);
+        let s = &actor.slots[1];
+        assert!(!s.connected);
+        assert!(s.sender.is_none());
+        assert!(s.disconnected_at.is_some());
+    }
