@@ -220,41 +220,48 @@ fn launch_iterm2(game: &Path) -> Result<bool> {
     // iTerm2 版本里 create window 返回的不是 window object, set position
     // 会触发 -10000 errAEEventNotHandled. 用 try 包起来 + diag string 报告
     // 实际是哪个分支生效, debug 模式下从 stdout 读到.
-    let script = format!(
-        r#"tell application "iTerm"
+    // iTerm2 的 window 对象 *不响应* position (-10000), 只响应 bounds (NSRect).
+    // 策略: 先读当前 bounds 算出宽高, 再 set bounds 保持宽高把 origin 拖到 (0, 0).
+    // 用 str::replace 而非 format! 因为 AppleScript 含大量 {} 跟 format! 占位符冲突.
+    let script = ITERM_SCRIPT_TEMPLATE
+        .replace("__COLS__", &DEFAULT_COLS.to_string())
+        .replace("__ROWS__", &DEFAULT_ROWS.to_string())
+        .replace("__TITLE__", APP_TITLE)
+        .replace("__PATH__", &escaped);
+    run_osascript(&script, "iTerm2")
+}
+
+// iTerm2 (3.6.x) sdef 关键事实:
+// - window class 支持 bounds (rectangle, QDRect = {left, top, right, bottom},
+//   屏幕左上原点). position 已废弃, frame/origin 也已废弃.
+// - application 级只暴露 `current window`, 不是 `front window` — 用 front window
+//   会触发 -10000 errAEEventNotHandled.
+// - create window with default profile 返回 window 类型, 但变量要在 tell
+//   application 块内立即用; 保险起见我们用 current window 引用最稳.
+#[cfg(target_os = "macos")]
+const ITERM_SCRIPT_TEMPLATE: &str = r#"tell application "iTerm"
     activate
     set newWindow to (create window with default profile)
     set diag to "newWindow class=" & ((class of newWindow) as string)
     tell current session of newWindow
-        set columns to {cols}
-        set rows to {rows}
-        set name to "{title}"
-        write text "{path}"
+        set columns to __COLS__
+        set rows to __ROWS__
+        set name to "__TITLE__"
+        write text "__PATH__"
     end tell
     try
-        set position of newWindow to {{0, 0}}
-        set diag to diag & "; via newWindow ok, pos=" & ((position of newWindow) as string)
+        set b to bounds of current window
+        set winW to (item 3 of b) - (item 1 of b)
+        set winH to (item 4 of b) - (item 2 of b)
+        set diag to diag & "; before bounds={" & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & "} (w=" & winW & ",h=" & winH & ")"
+        set bounds of current window to {0, 0, winW, winH}
+        set b2 to bounds of current window
+        set diag to diag & "; after bounds={" & (item 1 of b2) & "," & (item 2 of b2) & "," & (item 3 of b2) & "," & (item 4 of b2) & "}"
     on error errMsg number errNum
-        set diag to diag & "; newWindow set pos failed " & errNum & " " & errMsg
-        try
-            set position of front window to {{0, 0}}
-            set diag to diag & "; via front window ok, pos=" & ((position of front window) as string)
-        on error errMsg2 number errNum2
-            set diag to diag & "; front window also failed " & errNum2 & " " & errMsg2
-        end try
-    end try
-    try
-        set diag to diag & "; bounds=" & ((bounds of front window) as string)
+        set diag to diag & "; bounds set failed " & errNum & " " & errMsg
     end try
     return diag
-end tell"#,
-        cols = DEFAULT_COLS,
-        rows = DEFAULT_ROWS,
-        title = APP_TITLE,
-        path = escaped,
-    );
-    run_osascript(&script, "iTerm2")
-}
+end tell"#;
 
 #[cfg(target_os = "macos")]
 fn launch_terminal_app(game: &Path) -> Result<bool> {
@@ -266,28 +273,32 @@ fn launch_terminal_app(game: &Path) -> Result<bool> {
     // 默认 profile "When the shell exits: Close if the shell exited cleanly".
     let cmd = format!("{}; exit", path_str);
     let escaped = applescript_escape(&cmd);
-    let script = format!(
-        r#"tell application "Terminal"
-    activate
-    do script "{path}"
-    set custom title of front window to "{title}"
-    set diag to "front window class=" & ((class of front window) as string)
-    try
-        set position of front window to {{0, 0}}
-        set diag to diag & "; set pos ok, now=" & ((position of front window) as string)
-    on error errMsg number errNum
-        set diag to diag & "; set pos failed " & errNum & " " & errMsg
-    end try
-    try
-        set diag to diag & "; bounds=" & ((bounds of front window) as string)
-    end try
-    return diag
-end tell"#,
-        path = escaped,
-        title = APP_TITLE,
-    );
+    // Terminal.app 跟 iTerm 一致用 bounds. 用 str::replace 避免 format! 跟 {} 冲突.
+    let script = TERMINAL_APP_SCRIPT_TEMPLATE
+        .replace("__TITLE__", APP_TITLE)
+        .replace("__PATH__", &escaped);
     run_osascript(&script, "Terminal.app")
 }
+
+#[cfg(target_os = "macos")]
+const TERMINAL_APP_SCRIPT_TEMPLATE: &str = r#"tell application "Terminal"
+    activate
+    do script "__PATH__"
+    set custom title of front window to "__TITLE__"
+    set diag to "front window class=" & ((class of front window) as string)
+    try
+        set b to bounds of front window
+        set winW to (item 3 of b) - (item 1 of b)
+        set winH to (item 4 of b) - (item 2 of b)
+        set diag to diag & "; before bounds={" & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & "} (w=" & winW & ",h=" & winH & ")"
+        set bounds of front window to {0, 0, winW, winH}
+        set b2 to bounds of front window
+        set diag to diag & "; after bounds={" & (item 1 of b2) & "," & (item 2 of b2) & "," & (item 3 of b2) & "," & (item 4 of b2) & "}"
+    on error errMsg number errNum
+        set diag to diag & "; bounds set failed " & errNum & " " & errMsg
+    end try
+    return diag
+end tell"#;
 
 /// 跑 osascript, 捕获 stderr. 失败时打到 launcher 终端让 user 能看到原因 +
 /// 返 Ok(false) 让 caller fallback 到下一个 launcher.
