@@ -1631,7 +1631,7 @@ impl MpPlayerActor {
         });
     }
 
-    fn emit_protocol_error(&self, offender: Option<usize>, reason: String) {
+    fn emit_protocol_error(&mut self, offender: Option<usize>, reason: String) {
         let _ = self.event_tx.send(MpEvent::ProtocolError {
             offender,
             reason: reason.clone(),
@@ -1640,6 +1640,15 @@ impl MpPlayerActor {
             "MpPlayerActor[{}] ProtocolError offender={offender:?}: {reason}",
             self.cfg.own_index
         );
+        // 协议错误后转 GameOver, 让 UI 知道局已 abort 可以干净退出. 不再继续推
+        // 协议消息 (state 已不一致, 继续可能引入更多错误).
+        if self.phase != MpPhase::GameOver {
+            self.phase = MpPhase::GameOver;
+            let _ = self.event_tx.send(MpEvent::PhaseChanged { phase: self.phase });
+            let _ = self.event_tx.send(MpEvent::GameOver {
+                reason: format!("协议错误 abort: {reason}"),
+            });
+        }
     }
 
     // M5.B.5+ 添加: handle_draw_request / handle_reveal_share / handle_discard /
