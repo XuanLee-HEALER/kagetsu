@@ -1163,4 +1163,292 @@ mod tests {
         let yakus = detect_yaku(&ctx, &[]);
         assert!(yakus.iter().any(|(y, _)| matches!(y, Yaku::Kokushi { .. })));
     }
+
+    // ===== 各番数等级 + 役满代表测试 =====
+    //
+    // 按"等价类"覆盖: 每个 yaku 检测路径选一个最简代表牌型. 不穷举牌种.
+
+    fn h(spec: &[(u8, u8)]) -> [u8; 34] {
+        let mut a = [0u8; 34];
+        for &(k, c) in spec {
+            a[k as usize] = c;
+        }
+        a
+    }
+
+    /// 修改 ctx 给指定 winning_tile 的标准 14 张型 (含 winning), menzen + 可选 tsumo.
+    fn std_ctx<'a>(
+        d: &'a Decomposition,
+        menzen: bool,
+        is_tsumo: bool,
+        is_riichi: bool,
+        is_ippatsu: bool,
+    ) -> WinContext<'a> {
+        let cfg: &'static GameRules = Box::leak(Box::new(GameRules::default()));
+        WinContext {
+            decomposition: d,
+            seat_wind: TileIndex::EAST,
+            round_wind: TileIndex::EAST,
+            winning_tile: match d {
+                Decomposition::Standard { winning_tile, .. } => *winning_tile,
+                Decomposition::Chiitoitsu { winning_tile, .. } => *winning_tile,
+                Decomposition::Kokushi { winning_tile, .. } => *winning_tile,
+            },
+            is_tsumo,
+            is_riichi,
+            is_double_riichi: false,
+            is_ippatsu,
+            is_haitei: false,
+            is_houtei: false,
+            is_rinshan: false,
+            is_chankan: false,
+            is_tenhou: false,
+            is_chiihou: false,
+            is_renhou: false,
+            menzen,
+            fully_concealed: menzen,
+            dora_count: 0,
+            aka_count: 0,
+            ura_dora_count: 0,
+            rules: cfg,
+        }
+    }
+
+    // ---- 1 番 ----
+
+    #[test]
+    fn detect_riichi_tsumo_pinfu_combo() {
+        // menzen + riichi + tsumo + ryanmen pinfu 牌, 应同时出 Riichi/Tsumo/Pinfu.
+        let hand = h(&[
+            (1, 1),
+            (2, 1),
+            (3, 1), // 234m
+            (4, 1),
+            (5, 1),
+            (6, 1), // 567m (ryanmen wait via winning=4m)
+            (10, 1),
+            (11, 1),
+            (12, 1), // 234p
+            (19, 1),
+            (20, 1),
+            (21, 1), // 234s
+            (8, 2),  // 99m 雀头 (非役牌)
+        ]);
+        let r = decompose(&hand, &[], TileIndex(3));
+        let d = r
+            .iter()
+            .find(|d| matches!(d, Decomposition::Standard { wait: WaitKind::Ryanmen, .. }))
+            .expect("应有 ryanmen 拆解");
+        let ctx = std_ctx(d, true, true, true, false);
+        let yakus = detect_yaku(&ctx, &[]);
+        assert!(yakus.iter().any(|(y, _)| matches!(y, Yaku::Riichi)));
+        assert!(yakus.iter().any(|(y, _)| matches!(y, Yaku::Tsumo)));
+        assert!(yakus.iter().any(|(y, _)| matches!(y, Yaku::Pinfu)));
+    }
+
+    #[test]
+    fn detect_yakuhai_haku() {
+        // 雀头不能算 yakuhai, 必须是刻子. 14 张: 234m+234p+234s+白白白+99m.
+        let hand = h(&[
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (10, 1),
+            (11, 1),
+            (12, 1),
+            (19, 1),
+            (20, 1),
+            (21, 1),
+            (31, 3), // 白×3 (yakuhai 三元)
+            (8, 2),  // 99m 雀头
+        ]);
+        let r = decompose(&hand, &[], TileIndex(31));
+        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let ctx = std_ctx(d, true, false, false, false);
+        let yakus = detect_yaku(&ctx, &[]);
+        assert!(
+            yakus.iter().any(|(y, _)| matches!(y, Yaku::Yakuhai(_))),
+            "白刻应识别 yakuhai, got {:?}",
+            yakus
+        );
+    }
+
+    // ---- 2 番 ----
+
+    #[test]
+    fn detect_ittsuu() {
+        // 一气通贯 = 同色 1-9 三个顺子.
+        // 14 张: 123m + 456m + 789m + 234p + 99p 雀头.
+        let hand = h(&[
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (7, 1),
+            (8, 1), // 1-9m
+            (10, 1),
+            (11, 1),
+            (12, 1), // 234p
+            (17, 2), // 99p 雀头
+        ]);
+        let r = decompose(&hand, &[], TileIndex(0));
+        let d = r
+            .iter()
+            .find(|d| matches!(d, Decomposition::Standard { .. }))
+            .expect("应有标准拆解");
+        let ctx = std_ctx(d, true, false, false, false);
+        let yakus = detect_yaku(&ctx, &[]);
+        assert!(
+            yakus.iter().any(|(y, _)| matches!(y, Yaku::Ittsuu)),
+            "1-9m 一气应识别 Ittsuu, got {:?}",
+            yakus
+        );
+    }
+
+    #[test]
+    fn detect_sanshoku_doujun() {
+        // 三色同顺 234m+234p+234s.
+        let hand = h(&[
+            (1, 1),
+            (2, 1),
+            (3, 1), // 234m
+            (10, 1),
+            (11, 1),
+            (12, 1), // 234p
+            (19, 1),
+            (20, 1),
+            (21, 1), // 234s
+            (4, 1),
+            (5, 1),
+            (6, 1), // 567m 第 4 顺
+            (8, 2), // 99m 雀头
+        ]);
+        let r = decompose(&hand, &[], TileIndex(1));
+        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let ctx = std_ctx(d, true, false, false, false);
+        let yakus = detect_yaku(&ctx, &[]);
+        assert!(
+            yakus.iter().any(|(y, _)| matches!(y, Yaku::Sanshoku)),
+            "234 三色应识别, got {:?}",
+            yakus
+        );
+    }
+
+    #[test]
+    fn detect_toitoi() {
+        // 对对和 = 4 刻 + 雀头.
+        // 14 张: 111m + 333p + 555s + 777m + 99m.
+        // 但 7m 跟 99m 不冲突, 1m/3p/5s/7m 各 3, 9m 2. 总 12+2=14 ✓
+        let hand = h(&[
+            (0, 3),  // 111m
+            (11, 3), // 333p
+            (22, 3), // 555s -- wait, 5s = TileIndex(22), correct
+            (6, 3),  // 777m
+            (8, 2),  // 99m 雀头
+        ]);
+        let r = decompose(&hand, &[], TileIndex(0));
+        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let ctx = std_ctx(d, true, false, false, false);
+        let yakus = detect_yaku(&ctx, &[]);
+        assert!(
+            yakus.iter().any(|(y, _)| matches!(y, Yaku::Toitoi)),
+            "4 刻应识别 Toitoi, got {:?}",
+            yakus
+        );
+    }
+
+    // ---- 3 番 ----
+
+    #[test]
+    fn detect_honitsu() {
+        // 混一色 = 单色 + 字牌. 14 张: 111m + 234m + 567m + 中中中 + 99m.
+        let hand = h(&[
+            (0, 3),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (8, 2),
+            (33, 3),
+        ]);
+        let r = decompose(&hand, &[], TileIndex(0));
+        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let ctx = std_ctx(d, true, false, false, false);
+        let yakus = detect_yaku(&ctx, &[]);
+        assert!(
+            yakus.iter().any(|(y, _)| matches!(y, Yaku::Honitsu)),
+            "m + 字 应识别 Honitsu, got {:?}",
+            yakus
+        );
+    }
+
+    // ---- 6 番 ----
+
+    #[test]
+    fn detect_chinitsu() {
+        // 清一色 = 单色无字. 14 张全 m: 222m+333m+444m+555m+99m (4 刻 + 雀头).
+        let hand = h(&[(1, 3), (2, 3), (3, 3), (4, 3), (8, 2)]);
+        let r = decompose(&hand, &[], TileIndex(1));
+        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let ctx = std_ctx(d, true, false, false, false);
+        let yakus = detect_yaku(&ctx, &[]);
+        assert!(
+            yakus.iter().any(|(y, _)| matches!(y, Yaku::Chinitsu)),
+            "全 m 应识别 Chinitsu, got {:?}",
+            yakus
+        );
+    }
+
+    // ---- 役满 ----
+
+    #[test]
+    fn detect_suuankou_yakuman() {
+        // 四暗刻 = 4 暗刻 + 雀头, 必须 menzen + 4 koutsu 全 concealed.
+        // 14 张: 111m + 222p + 333s + 444m + 99m.
+        let hand = h(&[
+            (0, 3),
+            (10, 3),
+            (20, 3),
+            (3, 3),
+            (8, 2),
+        ]);
+        let r = decompose(&hand, &[], TileIndex(0));
+        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let ctx = std_ctx(d, true, true, false, false); // tsumo 让所有刻 concealed
+        let yakus = detect_yaku(&ctx, &[]);
+        assert!(
+            yakus.iter().any(|(y, _)| matches!(y, Yaku::Suuankou { .. })),
+            "4 暗刻应识别 Suuankou, got {:?}",
+            yakus
+        );
+    }
+
+    #[test]
+    fn detect_daisangen_yakuman() {
+        // 大三元 = 白刻 + 发刻 + 中刻 + 任意面子 + 任意雀头.
+        // 14 张: 白白白 + 发发发 + 中中中 + 234m + 99m.
+        let hand = h(&[
+            (1, 1),
+            (2, 1),
+            (3, 1), // 234m
+            (8, 2),  // 99m
+            (31, 3), // 白
+            (32, 3), // 发
+            (33, 3), // 中
+        ]);
+        let r = decompose(&hand, &[], TileIndex(31));
+        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let ctx = std_ctx(d, true, false, false, false);
+        let yakus = detect_yaku(&ctx, &[]);
+        assert!(
+            yakus.iter().any(|(y, _)| matches!(y, Yaku::Daisangen)),
+            "三元各刻应识别 Daisangen, got {:?}",
+            yakus
+        );
+    }
 }
