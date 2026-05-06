@@ -940,11 +940,21 @@ impl OnlineGameState {
                 .bg(theme.bg)
                 .add_modifier(Modifier::BOLD),
         );
-        // 听牌检测. 听牌型 closed + melds*3 = 13 (0 副露 13, 1 副露 10,
-        // 2 副露 7, 3 副露 4, 4 副露 1). 杠虽 4 张但占 1 面子, 公式仍是 *3.
-        let waits = if view.my_hand.len() + me.melds.len() * 3 == 13 {
+        // 听牌检测.
+        // 13 张型 (刚切完): my_hand + melds*3 = 13. 直接算 tenpai.
+        // 14 张型 (摸完未切): my_hand + melds*3 = 14. 排除 my_last_drawn 那张后算.
+        let total = view.my_hand.len() + me.melds.len() * 3;
+        let waits = if total == 13 {
             let counts = crate::engine::domain::tile::count_by_kind(&view.my_hand);
             crate::engine::domain::decompose::tenpai_tiles(&counts, &me.melds)
+        } else if total == 14 {
+            if let Some(drawn) = view.my_last_drawn {
+                let mut counts = crate::engine::domain::tile::count_by_kind(&view.my_hand);
+                counts[drawn.kind.0 as usize] = counts[drawn.kind.0 as usize].saturating_sub(1);
+                crate::engine::domain::decompose::tenpai_tiles(&counts, &me.melds)
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
         };

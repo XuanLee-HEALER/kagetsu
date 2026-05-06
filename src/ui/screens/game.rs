@@ -1434,13 +1434,28 @@ impl GameScreenState {
                 .bg(theme.bg)
                 .add_modifier(Modifier::BOLD),
         );
-        // 听牌检测. 听牌型 closed + melds*3 = 13 (0 副露 13, 1 副露 10, 2 副露 7,
-        // 3 副露 4, 4 副露 1). 杠虽 4 张但占 1 面子, 公式仍是 *3.
-        let waits = if p.hand.closed.len() + p.hand.melds.len() * 3 == 13 {
+        // 听牌检测.
+        // 13 张型 (刚切完): closed + melds*3 = 13. 直接算 tenpai.
+        // 14 张型 (摸完未切): closed + melds*3 = 14. 排除 last_drawn 那张后是 13 张型,
+        //                                            按那个算 (相当于"摸切立即听")
+        // 副露 0/1/2/3/4 → closed 13/10/7/4/1, 加 last_drawn 摸完是 14/11/8/5/2.
+        // 杠虽 4 张但占 1 面子, 公式仍是 *3.
+        let total = p.hand.closed.len() + p.hand.melds.len() * 3;
+        let waits = if total == 13 {
             crate::engine::domain::decompose::tenpai_tiles(
                 &crate::engine::domain::tile::count_by_kind(&p.hand.closed),
                 &p.hand.melds,
             )
+        } else if total == 14 {
+            // 摸完未切: 把 last_drawn 排除后剩 13 张算 tenpai.
+            if let Some(drawn) = p.last_drawn {
+                let mut counts = crate::engine::domain::tile::count_by_kind(&p.hand.closed);
+                counts[drawn.kind.0 as usize] = counts[drawn.kind.0 as usize].saturating_sub(1);
+                crate::engine::domain::decompose::tenpai_tiles(&counts, &p.hand.melds)
+            } else {
+                // 极端: 14 张但无 last_drawn (鸣牌后状态不应到此, 但兜底).
+                Vec::new()
+            }
         } else {
             Vec::new()
         };
