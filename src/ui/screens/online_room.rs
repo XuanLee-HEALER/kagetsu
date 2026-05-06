@@ -368,3 +368,357 @@ impl OnlineRoomState {
 fn bool_label(v: bool) -> String {
     if v { "开".into() } else { "关".into() }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::rules::GameRules;
+    use crate::net::protocol::PlayerSlot;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tokio::sync::mpsc;
+    use uuid::Uuid;
+
+    fn make_view(
+        my_id: u32,
+        host_id: u32,
+        n_players: usize,
+        state: RoomLifecycle,
+        mode: crate::net::p2p::RoomMode,
+    ) -> RoomView {
+        let players: Vec<PlayerSlot> = (1..=n_players as u32)
+            .map(|i| PlayerSlot {
+                id: i,
+                nickname: format!("p{i}"),
+                ready: i == host_id,
+                seat: None,
+                is_ai: false,
+                is_host: i == host_id,
+                connected: true,
+            })
+            .collect();
+        let _ = my_id;
+        RoomView {
+            room_id: "rid".into(),
+            host_id,
+            config: GameRules::default(),
+            players,
+            state,
+            mode,
+        }
+    }
+
+    fn make_state(
+        my_id: u32,
+        host_id: u32,
+        n_players: usize,
+    ) -> (
+        OnlineRoomState,
+        mpsc::UnboundedReceiver<ClientMsg>,
+        mpsc::UnboundedSender<ServerMsg>,
+    ) {
+        let (out_tx, out_rx) = mpsc::unbounded_channel::<ClientMsg>();
+        let (in_tx, in_rx) = mpsc::unbounded_channel::<ServerMsg>();
+        let session = NetSession::from_channels(my_id, Uuid::new_v4(), out_tx, in_rx);
+        let view = make_view(
+            my_id,
+            host_id,
+            n_players,
+            RoomLifecycle::Lobby,
+            crate::net::p2p::RoomMode::Standard,
+        );
+        let state = OnlineRoomState::new(session, view);
+        (state, out_rx, in_tx)
+    }
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn keycode(c: KeyCode) -> KeyEvent {
+        KeyEvent::new(c, KeyModifiers::NONE)
+    }
+
+    // ============================================================================
+    // bool_label / is_host
+    // ============================================================================
+
+    #[test]
+    fn bool_label_open_close() {
+        assert_eq!(bool_label(true), "开");
+        assert_eq!(bool_label(false), "关");
+    }
+
+    #[test]
+    fn is_host_true_when_player_id_matches_host() {
+        let (s, _, _) = make_state(1, 1, 2);
+        assert!(s.is_host());
+    }
+
+    #[test]
+    fn is_host_false_when_not_host() {
+        let (s, _, _) = make_state(2, 1, 2);
+        assert!(!s.is_host());
+    }
+
+    // ============================================================================
+    // handle_event 各按键
+    // ============================================================================
+
+    #[test]
+    fn r_key_sends_ready_toggle() {
+        let (mut s, mut out_rx, _) = make_state(2, 1, 2);
+        s.handle_event(key('R'));
+        let msg = out_rx.try_recv().expect("应发 ClientMsg::Ready");
+        assert!(matches!(msg, ClientMsg::Ready { ready: true }));
+    }
+
+    #[test]
+    fn r_key_toggles_off_when_already_ready() {
+        let (mut s, mut out_rx, _) = make_state(1, 1, 2);
+        // host id=1 默认 ready=true.
+        s.handle_event(key('r'));
+        let msg = out_rx.try_recv().expect("应发 Ready");
+        assert!(matches!(msg, ClientMsg::Ready { ready: false }));
+    }
+
+    #[test]
+    fn c_key_opens_config_modal_for_host() {
+        let (mut s, _, _) = make_state(1, 1, 2);
+        s.handle_event(key('C'));
+        assert!(s.editing_config.is_some());
+    }
+
+    #[test]
+    fn c_key_emits_message_for_non_host() {
+        let (mut s, _, _) = make_state(2, 1, 2);
+        s.handle_event(key('c'));
+        assert!(s.editing_config.is_none());
+        assert!(s.message.contains("房主"));
+    }
+
+    #[test]
+    fn enter_sends_start_game_when_host() {
+        let (mut s, mut out_rx, _) = make_state(1, 1, 2);
+        s.handle_event(keycode(KeyCode::Enter));
+        let msg = out_rx.try_recv().expect("应发 StartGame");
+        assert!(matches!(msg, ClientMsg::StartGame));
+    }
+
+    #[test]
+    fn enter_no_op_when_not_host() {
+        let (mut s, mut out_rx, _) = make_state(2, 1, 2);
+        s.handle_event(keycode(KeyCode::Enter));
+        assert!(out_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn space_acts_like_enter_for_host() {
+        let (mut s, mut out_rx, _) = make_state(1, 1, 2);
+        s.handle_event(key(' '));
+        assert!(matches!(out_rx.try_recv(), Ok(ClientMsg::StartGame)));
+    }
+
+    #[test]
+    fn l_key_returns_leave_request_confirm() {
+        let (mut s, _, _) = make_state(1, 1, 2);
+        let t = s.handle_event(key('L'));
+        assert!(matches!(t, Some(Transition::RequestConfirm { .. })));
+    }
+
+    #[test]
+    fn esc_returns_back_to_main_request_confirm() {
+        let (mut s, _, _) = make_state(1, 1, 2);
+        let t = s.handle_event(keycode(KeyCode::Esc));
+        assert!(matches!(t, Some(Transition::RequestConfirm { .. })));
+    }
+
+    #[test]
+    fn unhandled_key_is_noop() {
+        let (mut s, _, _) = make_state(1, 1, 2);
+        let t = s.handle_event(key('Z'));
+        assert!(t.is_none());
+    }
+
+    // ============================================================================
+    // editing_config modal 路径 — Save / Cancel
+    // ============================================================================
+
+    #[test]
+    fn modal_cancel_clears_editing_config() {
+        let (mut s, _, _) = make_state(1, 1, 2);
+        s.editing_config = Some(EditConfigModal::new(s.room_view.config.clone()));
+        s.handle_event(keycode(KeyCode::Esc));
+        assert!(s.editing_config.is_none());
+    }
+
+    #[test]
+    fn modal_save_sends_update_rules_and_closes_modal() {
+        let (mut s, mut out_rx, _) = make_state(1, 1, 2);
+        s.editing_config = Some(EditConfigModal::new(s.room_view.config.clone()));
+        // EditConfigModal 内部 Enter Save (无修改也 Save 当前 cfg).
+        s.handle_event(keycode(KeyCode::Enter));
+        assert!(s.editing_config.is_none());
+        // 应发 UpdateRules
+        let mut got = false;
+        while let Ok(msg) = out_rx.try_recv() {
+            if matches!(msg, ClientMsg::UpdateRules(_)) {
+                got = true;
+            }
+        }
+        assert!(got);
+        assert!(s.message.contains("配置"));
+    }
+
+    // ============================================================================
+    // handle_msg 各 ServerMsg
+    // ============================================================================
+
+    #[test]
+    fn welcome_replaces_room_view() {
+        let (mut s, _, in_tx) = make_state(1, 1, 2);
+        let new_view = make_view(
+            1,
+            1,
+            3,
+            RoomLifecycle::Lobby,
+            crate::net::p2p::RoomMode::Standard,
+        );
+        in_tx
+            .send(ServerMsg::Welcome {
+                player_id: 1,
+                reconnect_token: Uuid::new_v4(),
+                room: Box::new(new_view),
+            })
+            .unwrap();
+        let _ = s.advance();
+        assert_eq!(s.room_view.players.len(), 3);
+    }
+
+    #[test]
+    fn room_update_in_game_standard_triggers_enter_online_game() {
+        let (mut s, _, in_tx) = make_state(1, 1, 2);
+        let mut v = make_view(
+            1,
+            1,
+            2,
+            RoomLifecycle::InGame,
+            crate::net::p2p::RoomMode::Standard,
+        );
+        v.state = RoomLifecycle::InGame;
+        in_tx.send(ServerMsg::RoomUpdate(Box::new(v))).unwrap();
+        let t = s.advance();
+        assert!(matches!(t, Some(Transition::EnterOnlineGame)));
+    }
+
+    #[test]
+    fn room_update_in_game_zerotrust_does_not_enter_standard_game() {
+        let (mut s, _, in_tx) = make_state(1, 1, 2);
+        let v = make_view(
+            1,
+            1,
+            4,
+            RoomLifecycle::InGame,
+            crate::net::p2p::RoomMode::ZeroTrust,
+        );
+        in_tx.send(ServerMsg::RoomUpdate(Box::new(v))).unwrap();
+        let t = s.advance();
+        assert!(t.is_none(), "ZeroTrust 路径不该走 EnterOnlineGame");
+    }
+
+    #[test]
+    fn game_state_view_routes_to_enter_online_game() {
+        use crate::engine::domain::meld::Seat;
+        use crate::net::protocol::PlayerView;
+        let (mut s, _, in_tx) = make_state(1, 1, 2);
+        let make_pv = |seat| PlayerView {
+            seat,
+            nickname: String::new(),
+            score: 0,
+            hand_count: 13,
+            melds: Vec::new(),
+            river: Vec::new(),
+            riichi: false,
+            riichi_river_idx: None,
+        };
+        let view = crate::net::protocol::GameStateView {
+            round_wind: crate::engine::round_state::RoundWind::East,
+            kyoku: 1,
+            honba: 0,
+            riichi_sticks: 0,
+            dealer: Seat::East,
+            turn: Seat::East,
+            phase: crate::engine::phase::Phase::Draw,
+            my_seat: Seat::East,
+            my_hand: Vec::new(),
+            my_last_drawn: None,
+            players: [
+                make_pv(Seat::East),
+                make_pv(Seat::South),
+                make_pv(Seat::West),
+                make_pv(Seat::North),
+            ],
+            wall_remaining: 70,
+            dora_indicators: Vec::new(),
+            events: Vec::new(),
+        };
+        in_tx
+            .send(ServerMsg::GameStateView(Box::new(view)))
+            .unwrap();
+        let t = s.advance();
+        assert!(matches!(t, Some(Transition::EnterOnlineGame)));
+    }
+
+    #[test]
+    fn mp_start_routes_to_zero_trust_game_with_args() {
+        let (mut s, _, in_tx) = make_state(1, 1, 4);
+        in_tx
+            .send(ServerMsg::MpStart {
+                all_peer_ids: vec![vec![1; 32], vec![2; 32], vec![3; 32], vec![4; 32]],
+                own_index: 0,
+                session_label: vec![7; 32],
+                deck_size: 136,
+                cnc_k_rounds: 80,
+            })
+            .unwrap();
+        let t = s.advance();
+        match t {
+            Some(Transition::EnterZeroTrustGame { args }) => {
+                assert_eq!(args.own_index, 0);
+                assert_eq!(args.deck_size, 136);
+                assert_eq!(args.cnc_k_rounds, 80);
+                assert_eq!(args.session_label.len(), 32);
+            }
+            _ => panic!("应返回 EnterZeroTrustGame"),
+        }
+    }
+
+    #[test]
+    fn error_msg_sets_state_message() {
+        let (mut s, _, in_tx) = make_state(1, 1, 2);
+        in_tx
+            .send(ServerMsg::Error {
+                message: "boom".into(),
+            })
+            .unwrap();
+        let _ = s.advance();
+        assert_eq!(s.message, "boom");
+    }
+
+    #[test]
+    fn advance_when_disconnected_sets_default_message() {
+        let (mut s, out_rx, _) = make_state(1, 1, 2);
+        // 关闭 in_tx 让 session 仍然 connected, 但关闭 out_tx 意味着 disconnected.
+        // out_rx 是 receiver of out_tx, 关闭 receiver 让 session.out_tx.is_closed() 为 true.
+        drop(out_rx);
+        let t = s.advance();
+        assert!(t.is_none());
+        assert_eq!(s.message, "连接断开");
+    }
+
+    #[test]
+    fn set_theme_updates_theme_kind() {
+        let (mut s, _, _) = make_state(1, 1, 2);
+        s.set_theme(ThemeKind::Light);
+        assert_eq!(s.theme_kind, ThemeKind::Light);
+    }
+}
