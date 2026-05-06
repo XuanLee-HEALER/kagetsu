@@ -572,4 +572,361 @@ mod tests {
         assert_eq!(r[2].seat, Seat::West);
         assert_eq!(r[3].seat, Seat::North);
     }
+
+    // ===== calculate_fu / evaluate / distribute / base_points 补充测试 =====
+    //
+    // 目标: 按"等价类代表"覆盖各分支, 不穷举牌种 / fu 值组合.
+
+    use crate::engine::domain::decompose::decompose;
+    use crate::engine::domain::tile::{Tile, TileIndex};
+    use crate::engine::domain::yaku::WinContext;
+
+    /// 构造一个"门前清, 东家东风, 自摸 / 荣和可调"的 WinContext.
+    /// rules 用 Box::leak 简化 lifetime.
+    fn ctx_for<'a>(d: &'a Decomposition, menzen: bool, is_tsumo: bool) -> WinContext<'a> {
+        let cfg: &'static GameRules = Box::leak(Box::new(GameRules::default()));
+        WinContext {
+            decomposition: d,
+            seat_wind: TileIndex::EAST,
+            round_wind: TileIndex::EAST,
+            winning_tile: match d {
+                Decomposition::Standard { winning_tile, .. } => *winning_tile,
+                Decomposition::Chiitoitsu { winning_tile, .. } => *winning_tile,
+                Decomposition::Kokushi { winning_tile, .. } => *winning_tile,
+            },
+            is_tsumo,
+            is_riichi: false,
+            is_double_riichi: false,
+            is_ippatsu: false,
+            is_haitei: false,
+            is_houtei: false,
+            is_rinshan: false,
+            is_chankan: false,
+            is_tenhou: false,
+            is_chiihou: false,
+            is_renhou: false,
+            menzen,
+            fully_concealed: menzen,
+            dora_count: 0,
+            aka_count: 0,
+            ura_dora_count: 0,
+            rules: cfg,
+        }
+    }
+
+    fn h(spec: &[(u8, u8)]) -> [u8; 34] {
+        let mut a = [0u8; 34];
+        for &(k, c) in spec {
+            a[k as usize] = c;
+        }
+        a
+    }
+
+    // ---- calculate_fu ----
+
+    #[test]
+    fn fu_chiitoitsu_returns_25() {
+        // 1m1m 3m3m 5m5m 7m7m 1p1p 中中 西西.
+        let hand = h(&[(0, 2), (2, 2), (4, 2), (6, 2), (9, 2), (33, 2), (29, 2)]);
+        let r = decompose(&hand, &[], TileIndex(0));
+        let d = r
+            .iter()
+            .find(|d| matches!(d, Decomposition::Chiitoitsu { .. }))
+            .unwrap();
+        let ctx = ctx_for(d, true, false);
+        assert_eq!(calculate_fu(d, &ctx, &[]), 25);
+    }
+
+    #[test]
+    fn fu_pinfu_tsumo_returns_20() {
+        // 平和自摸固定 20 fu. 经典平和: 234m 234p 234s 567s 88p (winning=2m ryanmen).
+        // 这里取一个简化 ryanmen 平和: 123m 234m 234p 234s 99p, winning=2m ryanmen 待 (12m 等 3m).
+        // 重设: 234m 234m 234p 234s 99p — 但 234m 重复违规. 用 234m + 567m + 234p + 234s + 99p.
+        // 14 张 = 4 顺子 + 1 雀头. winning 跟 ryanmen: 让 winning 落在 234m 的 4m,wait=ryanmen.
+        let hand = h(&[
+            (1, 1),
+            (2, 1),
+            (3, 1), // 234m (winning=4m)
+            (4, 1),
+            (5, 1),
+            (6, 1), // 567m
+            (10, 1),
+            (11, 1),
+            (12, 1), // 234p
+            (19, 1),
+            (20, 1),
+            (21, 1), // 234s
+            (8, 2),  // 99m 雀头 (非役牌)
+        ]);
+        let r = decompose(&hand, &[], TileIndex(3)); // winning=4m
+        let d = r
+            .iter()
+            .find(|d| match d {
+                Decomposition::Standard { wait, .. } => *wait == WaitKind::Ryanmen,
+                _ => false,
+            })
+            .expect("应有 ryanmen 平和拆解");
+        let ctx = ctx_for(d, true, true); // menzen + tsumo
+        assert_eq!(calculate_fu(d, &ctx, &[]), 20, "平和自摸 = 20");
+    }
+
+    #[test]
+    fn fu_pinfu_ron_returns_30() {
+        let hand = h(&[
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (10, 1),
+            (11, 1),
+            (12, 1),
+            (19, 1),
+            (20, 1),
+            (21, 1),
+            (8, 2),
+        ]);
+        let r = decompose(&hand, &[], TileIndex(3));
+        let d = r
+            .iter()
+            .find(|d| match d {
+                Decomposition::Standard { wait, .. } => *wait == WaitKind::Ryanmen,
+                _ => false,
+            })
+            .expect("应有 ryanmen 平和拆解");
+        let ctx = ctx_for(d, true, false); // menzen + ron
+        assert_eq!(calculate_fu(d, &ctx, &[]), 30, "平和荣和 = 30");
+    }
+
+    #[test]
+    fn fu_minimum_30_for_open_ron() {
+        // 副露荣和无任何 fu 加成 → fu=20 圆到 30 兜底.
+        // 14 张型, 副露 1 (3 张) + 闭手 11 张 (3 顺子 + 1 雀头).
+        // 闭手 234p + 567p + 234s + 99m 中张; winning 任意非役牌.
+        let hand = h(&[
+            (10, 1),
+            (11, 1),
+            (12, 1),
+            (13, 1),
+            (14, 1),
+            (15, 1),
+            (19, 1),
+            (20, 1),
+            (21, 1),
+            (8, 2),
+        ]);
+        let melds = vec![Meld {
+            kind: MeldKind::Chi {
+                tiles: [
+                    Tile { kind: TileIndex(0), red: false, id: 0 },
+                    Tile { kind: TileIndex(1), red: false, id: 1 },
+                    Tile { kind: TileIndex(2), red: false, id: 2 },
+                ],
+            },
+            from: Some(Seat::East),
+        }];
+        let r = decompose(&hand, &melds, TileIndex(8));
+        let d = r.iter().next().expect("应有标准拆解");
+        let ctx = ctx_for(d, false, false); // 副露 → 非 menzen, ron
+        // 副露无副 fu (Chi=0), 9m 雀头无加, ron 无门清+10, 子家无连风, 应是基础 20 → 兜底 30.
+        assert_eq!(calculate_fu(d, &ctx, &melds), 30, "副露 ron 无加成应兜底 30");
+    }
+
+    #[test]
+    fn fu_yakuhai_pair_round_wind() {
+        // 雀头 = round_wind (东风) → +2 fu. 子家 South seat_wind, 东场 round.
+        // 14 张: 234m 234m? 不能复用. 用 123m + 456m + 789m + 234p + 东东 雀头.
+        let hand = h(&[
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (7, 1),
+            (8, 1),
+            (10, 1),
+            (11, 1),
+            (12, 1),
+            (27, 2), // 东东 雀头
+        ]);
+        let r = decompose(&hand, &[], TileIndex(0));
+        let d = r.iter().next().expect("应有拆解");
+        let cfg: &'static GameRules = Box::leak(Box::new(GameRules::default()));
+        let ctx = WinContext {
+            decomposition: d,
+            seat_wind: TileIndex(28), // South
+            round_wind: TileIndex::EAST,
+            winning_tile: TileIndex(0),
+            is_tsumo: false,
+            is_riichi: false,
+            is_double_riichi: false,
+            is_ippatsu: false,
+            is_haitei: false,
+            is_houtei: false,
+            is_rinshan: false,
+            is_chankan: false,
+            is_tenhou: false,
+            is_chiihou: false,
+            is_renhou: false,
+            menzen: true,
+            fully_concealed: true,
+            dora_count: 0,
+            aka_count: 0,
+            ura_dora_count: 0,
+            rules: cfg,
+        };
+        // 基础 20 + 门清 ron +10 + 雀头 round_wind +2 = 32 → 圆 40
+        assert_eq!(calculate_fu(d, &ctx, &[]), 40);
+    }
+
+    // ---- evaluate ----
+
+    #[test]
+    fn evaluate_returns_none_when_no_yaku() {
+        // 14 张, 但子家不立直、不门清自摸, winning_tile 非役牌且无三色一气等 → 没役.
+        // 副露 1 个 (吃 123m 破 menzen) + 闭手 11 张乱拼凑.
+        let hand = h(&[
+            (3, 1),
+            (4, 1),
+            (5, 1), // 456m
+            (10, 1),
+            (11, 1),
+            (12, 1), // 234p
+            (15, 1),
+            (16, 1),
+            (17, 1), // 789p
+            (20, 2), // 33s 雀头
+        ]);
+        let melds = vec![Meld {
+            kind: MeldKind::Chi {
+                tiles: [
+                    Tile { kind: TileIndex(0), red: false, id: 0 },
+                    Tile { kind: TileIndex(1), red: false, id: 1 },
+                    Tile { kind: TileIndex(2), red: false, id: 2 },
+                ],
+            },
+            from: Some(Seat::East),
+        }];
+        let r = decompose(&hand, &melds, TileIndex(20));
+        let d = r.iter().next().expect("应有拆解");
+        let ctx = ctx_for(d, false, false);
+        assert!(evaluate(&ctx, &melds).is_none(), "无役应返 None");
+    }
+
+    #[test]
+    fn evaluate_kokushi_yakuman_single() {
+        // 国士单役满 (非 13 面待): 1m 雀头, winning=9m → thirteen_wait=false.
+        let mut hand = [0u8; 34];
+        for &k in &[0u8, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33] {
+            hand[k as usize] = 1;
+        }
+        hand[0] = 2; // 1m 雀头 (与 winning=9m 不同)
+        let r = decompose(&hand, &[], TileIndex(8));
+        let d = r
+            .iter()
+            .find(|d| matches!(d, Decomposition::Kokushi { thirteen_wait: false, .. }))
+            .expect("应有非 13 面待的国士拆解");
+        let ctx = ctx_for(d, true, false);
+        let result = evaluate(&ctx, &[]).expect("国士应能算分");
+        assert!(matches!(result.level, ScoreLevel::Yakuman(1)));
+        assert_eq!(result.base_points, 8000, "单役满 base = 8000");
+    }
+
+    #[test]
+    fn evaluate_kokushi_yakuman_thirteen_wait_double() {
+        // 国士 13 面待 (winning == 雀头) → 双倍役满 (rules.double_yakuman=true).
+        let mut hand = [0u8; 34];
+        for &k in &[0u8, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33] {
+            hand[k as usize] = 1;
+        }
+        hand[0] = 2; // 1m 雀头, winning=1m → thirteen_wait
+        let r = decompose(&hand, &[], TileIndex(0));
+        let d = r
+            .iter()
+            .find(|d| matches!(d, Decomposition::Kokushi { thirteen_wait: true, .. }))
+            .expect("应有 13 面待的国士拆解");
+        let ctx = ctx_for(d, true, false);
+        let result = evaluate(&ctx, &[]).expect("国士 13 面待应能算分");
+        assert!(matches!(result.level, ScoreLevel::Yakuman(2)));
+        assert_eq!(result.base_points, 16000, "双倍役满 base = 16000");
+    }
+
+    // ---- distribute ----
+
+    #[test]
+    fn distribute_ron_non_dealer_4mult() {
+        // 子家荣和 mangan = 4B = 8000.
+        let result = ScoreResult {
+            han: 5,
+            fu: 30,
+            yaku: vec![],
+            base_points: 2000,
+            level: ScoreLevel::Mangan,
+        };
+        let d = distribute(&result, Seat::South, Seat::East, false, Some(Seat::West), 0, 0);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].from, Seat::West);
+        assert_eq!(d[0].to, Seat::South);
+        assert_eq!(d[0].amount, 8000, "子家荣和 = 4B = 8000");
+    }
+
+    #[test]
+    fn distribute_tsumo_dealer_2b_each() {
+        // 亲家自摸 mangan = 2B 各家 = 4000 × 3 = 12000.
+        let result = ScoreResult {
+            han: 5,
+            fu: 30,
+            yaku: vec![],
+            base_points: 2000,
+            level: ScoreLevel::Mangan,
+        };
+        let d = distribute(&result, Seat::East, Seat::East, true, None, 0, 0);
+        assert_eq!(d.len(), 3, "亲家自摸 3 家各付");
+        for p in &d {
+            assert_eq!(p.amount, 4000, "每家 2B = 4000");
+        }
+        let total: i32 = d.iter().map(|p| p.amount).sum();
+        assert_eq!(total, 12000);
+    }
+
+    #[test]
+    fn distribute_with_honba_and_riichi_sticks() {
+        // 子家荣和 + 2 本场 + 1 立直棒.
+        let result = ScoreResult {
+            han: 1,
+            fu: 30,
+            yaku: vec![],
+            base_points: 480,
+            level: ScoreLevel::Normal,
+        };
+        let d = distribute(&result, Seat::South, Seat::East, false, Some(Seat::West), 2, 1);
+        // 主支付: 4*480=1920 圆 2000, +honba 2*300=600 → 2600
+        assert_eq!(d[0].amount, 2600, "1番30符 ron + 2本场");
+        // 立直棒 1 根: +1000.
+        let stick = d.iter().find(|p| p.from == Seat::South && p.to == Seat::South);
+        assert!(stick.is_some(), "立直棒应作为单独 PaymentDistribution");
+        assert_eq!(stick.unwrap().amount, 1000);
+    }
+
+    // ---- base_points ----
+
+    #[test]
+    fn base_points_below_mangan_uses_formula() {
+        // 1番 30符 = 30 * 2^3 = 240.
+        assert_eq!(base_points(1, 30), 240);
+        // 2番 40符 = 40 * 2^4 = 640.
+        assert_eq!(base_points(2, 40), 640);
+        // 4番 30符 (不到满贯) = 30 * 2^6 = 1920.
+        assert_eq!(base_points(4, 30), 1920);
+    }
+
+    #[test]
+    fn base_points_kazoe_returns_8000() {
+        // 13+ 番返 8000 (数役满).
+        assert_eq!(base_points(13, 30), 8000);
+        assert_eq!(base_points(20, 50), 8000);
+    }
 }
