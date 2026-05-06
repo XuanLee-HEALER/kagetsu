@@ -42,31 +42,3 @@ pub fn ai_react_to_discard(state: &RoundState, who: Seat) -> Action {
     Action::Pass
 }
 
-// ──────────────────────────────────────────────────────────
-// Legacy bridge — net 模块过渡期吃 GameState. stage 7 net 迁完后删.
-// ──────────────────────────────────────────────────────────
-
-#[allow(deprecated)]
-#[doc(hidden)]
-pub fn ai_choose_discard_legacy(state: &crate::legacy_state::GameState) -> Action {
-    if state.can_tsumo() {
-        return Action::Tsumo;
-    }
-    let me = state.turn;
-    if let Some(t) = state.players[me.index()].last_drawn {
-        return Action::Discard(t);
-    }
-    if let Some(&t) = state.players[me.index()].hand.closed.last() {
-        return Action::Discard(t);
-    }
-    Action::Pass
-}
-
-#[allow(deprecated)]
-#[doc(hidden)]
-pub fn ai_react_to_discard_legacy(state: &crate::legacy_state::GameState, who: Seat) -> Action {
-    if state.can_ron(who) {
-        return Action::Ron(who);
-    }
-    Action::Pass
-}

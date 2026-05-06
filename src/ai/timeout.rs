@@ -57,25 +57,3 @@ mod tests {
     }
 }
 
-// ──────────────────────────────────────────────────────────
-// Legacy bridge — net 模块过渡期.
-// ──────────────────────────────────────────────────────────
-
-#[allow(deprecated)]
-#[doc(hidden)]
-pub fn default_action_on_timeout_legacy(state: &crate::legacy_state::GameState) -> Action {
-    use crate::engine::phase::Phase;
-    match state.phase {
-        Phase::AwaitDiscard => {
-            let me = state.turn;
-            if let Some(t) = state.players[me.index()].last_drawn {
-                return Action::Discard(t);
-            }
-            if let Some(&t) = state.players[me.index()].hand.closed.last() {
-                return Action::Discard(t);
-            }
-            Action::Pass
-        }
-        _ => Action::Pass,
-    }
-}

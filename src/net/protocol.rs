@@ -178,7 +178,7 @@ pub struct GameStateView {
     pub round_wind: RoundWind,
     pub kyoku: u8,
     pub honba: u8,
-    pub riichi_sticks: u8,
+    pub riichi_sticks: u32,
     pub dealer: Seat,
     pub turn: Seat,
     pub phase: Phase,
