@@ -375,8 +375,9 @@ impl RoomActor {
     }
 
     /// 当前 seat 是否 AI 控制. AI 接管条件:
-    /// - slot.is_ai = true (开局补的 AI), 或
+    /// - `slot.is_ai = true` (开局补的 AI), 或
     /// - 永久断线 (connected=false 且 disconnected_at=None, grace 期已结束).
+    ///
     /// grace 期内 (connected=false, disconnected_at=Some) **不**视为 AI, 游戏
     /// 暂停等真人重连.
     pub(super) fn is_seat_ai(&self, seat: Seat) -> bool {
