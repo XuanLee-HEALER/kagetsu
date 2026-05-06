@@ -132,6 +132,8 @@ pub enum RoomCmd {
     /// 鸣牌窗口超时 (内部 timer 触发).
     /// `expected_round`/`expected_kyoku` 防止过期 timer 影响后续局.
     CallTimeout { generation: u64 },
+    /// 重连 grace 期 (30s) 满, 检查 slot 是否仍未重连. 是 → 永久转 AI.
+    ReconnectGraceTimeout { player_id: u32 },
     /// M5.D.2: 设置房主自己的 libp2p PeerId. spawn_p2p_listener 拿到
     /// local_peer_id 后调一次, RoomActor 把它关联到 host slot.
     SetLocalPeerId { peer_id_bytes: Vec<u8> },
@@ -157,6 +159,9 @@ struct SlotEntry {
     connected: bool,
     sender: Option<UnboundedSender<ServerMsg>>,
     reconnect_token: Uuid,
+    /// 断线时的时刻. None = 在线; Some(t) = 进入 reconnect grace 期 (30s
+    /// 内重连可恢复 sender + connected). grace 满后被 timer 触发, 转 AI 接管.
+    disconnected_at: Option<std::time::Instant>,
 }
 
 impl SlotEntry {
@@ -172,6 +177,9 @@ impl SlotEntry {
         }
     }
 }
+
+/// 断线后等多久转 AI 接管. 期间客户端可用 reconnect_token 重连恢复.
+const RECONNECT_GRACE_SECS: u64 = 30;
 
 // ============================================================================
 // RoomActor
@@ -304,7 +312,9 @@ impl RoomActor {
             }
             RoomCmd::Disconnect { player_id } => {
                 self.mark_disconnected(player_id);
-                self.broadcast_room_update();
+            }
+            RoomCmd::ReconnectGraceTimeout { player_id } => {
+                self.on_reconnect_grace_timeout(player_id);
             }
             RoomCmd::CallTimeout { generation } => {
                 // 过期 timer (玩家已响应或已进入下一回合), 忽略
@@ -353,6 +363,7 @@ impl RoomActor {
                 slot.is_ai = false; // AI 临时接管的 seat 现在交还给真人
                 slot.sender = Some(sender.clone());
                 slot.nickname = nickname;
+                slot.disconnected_at = None; // 退出 grace 期
                 (slot.id, slot.seat, slot.sender.clone())
             };
             let room = self.room_view();
@@ -400,6 +411,7 @@ impl RoomActor {
             connected: true,
             sender: Some(sender.clone()),
             reconnect_token: token,
+                disconnected_at: None,
         });
         // M5.D.2: host slot 若已有 pending_host_peer_id (spawn_p2p_listener 先发的)
         // 立即关联. 否则等 SetLocalPeerId 后处理.
@@ -506,6 +518,7 @@ impl RoomActor {
                 connected: true,
                 sender: None,
                 reconnect_token: Uuid::new_v4(),
+                disconnected_at: None,
             });
         }
 
@@ -638,8 +651,38 @@ impl RoomActor {
 
     fn mark_disconnected(&mut self, player_id: u32) {
         if let Some(slot) = self.slots.iter_mut().find(|s| s.id == player_id) {
-            slot.connected = false;
+            // 进入 reconnect grace 期: sender 清掉 (无法继续 push 消息),
+            // connected 仍标 true (UI 显示"等待重连"). 客户端持 reconnect_token
+            // 可在 RECONNECT_GRACE_SECS 秒内重连恢复.
             slot.sender = None;
+            slot.disconnected_at = Some(std::time::Instant::now());
+        }
+        // 启 grace timer: 满 30s 后回送 ReconnectGraceTimeout 让 actor 检查
+        // 是否需要永久转 AI.
+        let self_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_GRACE_SECS)).await;
+            let _ = self_tx.send(RoomCmd::ReconnectGraceTimeout { player_id });
+        });
+        self.broadcast_room_update();
+    }
+
+    /// grace timer 触发: 检查 slot 是否仍未重连. 是 → 永久标记 disconnected
+    /// (connected=false), is_seat_ai 视为 AI, advance_game 让 AI 接管.
+    fn on_reconnect_grace_timeout(&mut self, player_id: u32) {
+        let mut transitioned = false;
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.id == player_id) {
+            if slot.disconnected_at.is_some() && slot.sender.is_none() {
+                slot.connected = false;
+                slot.disconnected_at = None;
+                transitioned = true;
+            }
+        }
+        if transitioned {
+            self.broadcast_room_update();
+            if self.state == RoomLifecycle::InGame {
+                self.advance_game();
+            }
         }
     }
 
@@ -1521,6 +1564,7 @@ mod tests {
                 connected: true,
                 sender: Some(tx),
                 reconnect_token: Uuid::new_v4(),
+                disconnected_at: None,
             });
             receivers.push(rx);
         }
