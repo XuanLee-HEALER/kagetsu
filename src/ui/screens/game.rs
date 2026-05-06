@@ -79,9 +79,7 @@ pub struct GameScreenState {
     /// 字段还在但永远不被读, F8 也不会改它.
     pub record_replays: bool,
     /// 当前局的初始 engine snapshot. 局开始时若 record_replays 为
-    /// true 则填充, RoundEnd 时连同 recorded_actions 一起 flush.
-    /// FIXME stage 6b: 录像 schema 暂未迁到 RoundState/AtomicOp, 字段保留但
-    /// 不会被填充 (maybe_start_recording / flush_recording_if_any 已 stub).
+    /// true 则填充, RoundEnd 时连同 engine.recorded_actions 一起 flush.
     #[cfg(feature = "dev-tools")]
     pub recording_initial: Option<GameEngine>,
 }
@@ -686,23 +684,36 @@ impl GameScreenState {
         }
     }
 
-    /// 录像 snapshot. **stage 6 stub**: 录像 schema 还在 GameState 形态,
-    /// 跟 GameEngine 不兼容. 等 RoundRecording 重设计 (拿 RoundState +
-    /// MatchState + Vec<AtomicOp>) 后恢复.
+    /// 局开始时 (start_round 后) 若开启录像则 snapshot 初始 engine + 启 actions buf.
     #[cfg(feature = "dev-tools")]
     fn maybe_start_recording(&mut self) {
         if !self.record_replays {
             return;
         }
-        // FIXME stage 6 follow-up: 重设计 RoundRecording schema 后恢复录像.
+        // 录像 hook 由 GameEngine.apply 自动 push, 这里只做 snapshot + 启 buffer.
+        self.recording_initial = Some(self.engine.clone());
+        self.engine.recorded_actions = Some(Vec::new());
     }
 
-    /// 同上, **stage 6 stub**.
+    /// RoundEnd 时把当前局 (initial snapshot + actions) 写到 recordings/
+    /// 目录, 以 unix 时间戳作 filename.
     #[cfg(feature = "dev-tools")]
     fn flush_recording_if_any(&mut self) {
-        // FIXME stage 6 follow-up: 重设计 RoundRecording schema 后恢复录像.
-        let _ = self.recording_initial.take();
-        self.engine.recorded_actions = None;
+        let Some(initial) = self.recording_initial.take() else {
+            self.engine.recorded_actions = None;
+            return;
+        };
+        let actions = self.engine.recorded_actions.take().unwrap_or_default();
+        let rec = crate::dev::recorder::RoundRecording {
+            initial_state: initial,
+            actions,
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let filename = format!("round_{}", ts);
+        let _ = crate::dev::recorder::save(&rec, &filename);
     }
 
     /// F8 (App 层调用) 切换录像开关. 当前局已开始的录像不变 (flag 仅
@@ -727,7 +738,7 @@ impl GameScreenState {
         self.engine.turn() == PLAYER_SEAT
     }
 
-    fn player(&self) -> &crate::legacy_state::PlayerState {
+    fn player(&self) -> &crate::engine::player::PlayerState {
         &self.engine.players()[PLAYER_SEAT.index()]
     }
 
@@ -1904,7 +1915,7 @@ impl GameScreenState {
 
 /// 找到玩家立直时弃出的牌在 river 里的索引. PlayerState.riichi_river_idx
 /// 由 do_riichi 写入, 此处直接转发.
-fn riichi_index_in_river(p: &crate::legacy_state::PlayerState) -> Option<usize> {
+fn riichi_index_in_river(p: &crate::engine::player::PlayerState) -> Option<usize> {
     p.riichi_river_idx
 }
 
