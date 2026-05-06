@@ -1497,15 +1497,12 @@ impl AwaitCallsState {
                 common.wall = common.wall.revealed_next_dora();
                 sort_hand(&mut common.players[who.index()].hand.closed);
                 events.push(GameEvent::Minkan { who, tile: called });
-                // 明杠后必摸岭上, 进 AwaitRinshanDraw (而不是直接给牌).
-                // 注: 老代码在 do_minkan 内一并 rinshan_draw, 这里拆开.
-                // 暂时简化: 直接当 AwaitDiscard, 留给上层 round_apply 检测 last_meld_was_kan.
-                // 但本 type-state 没"last_meld_was_kan"标志... 留 FIXME, 5d 处理.
+                // 明杠后必摸岭上, 进 AwaitRinshanDraw. driver 喂 RinshanDraw op
+                // 后再转 AwaitDiscard (与 Ankan/Shouminkan 一致).
                 (
-                    NextAwaitCallsState::AwaitDiscard(AwaitDiscardState {
+                    NextAwaitCallsState::AwaitRinshanDraw(AwaitRinshanDrawState {
                         common,
                         turn: who,
-                        last_drawn: None,  // Pon/Chi/Minkan 不摸新牌
                     }),
                     events,
                 )
@@ -1653,12 +1650,14 @@ pub enum NextAwaitRinshanDrawState {
 
 /// [`AwaitCallsState::apply`] 的可能去向 (3 选 1).
 ///
-/// - `AwaitDiscard` — Pon/Chi/Minkan 鸣完, turn 转给鸣方等切牌 (`last_drawn = None`)
+/// - `AwaitDiscard` — Pon/Chi 鸣完, turn 转给鸣方等切牌 (`last_drawn = None`)
+/// - `AwaitRinshanDraw` — Minkan 鸣完, 杠后必摸岭上才切
 /// - `AwaitDraw` — Pass 4 家都不响应, 推到切牌方下家摸
 /// - `RoundEnd` — Ron 荣和
 #[derive(Debug, Clone)]
 pub enum NextAwaitCallsState {
     AwaitDiscard(AwaitDiscardState),
+    AwaitRinshanDraw(AwaitRinshanDrawState),
     AwaitDraw(AwaitDrawState),
     RoundEnd(RoundEndState),
 }
@@ -1708,6 +1707,7 @@ impl From<NextAwaitCallsState> for RoundState {
     fn from(n: NextAwaitCallsState) -> Self {
         match n {
             NextAwaitCallsState::AwaitDiscard(s) => RoundState::AwaitDiscard(s),
+            NextAwaitCallsState::AwaitRinshanDraw(s) => RoundState::AwaitRinshanDraw(s),
             NextAwaitCallsState::AwaitDraw(s) => RoundState::AwaitDraw(s),
             NextAwaitCallsState::RoundEnd(s) => RoundState::RoundEnd(s),
         }
@@ -2296,11 +2296,12 @@ mod tests {
             },
         )
         .unwrap();
-        // FIXME engine bug: 明杠规则是必摸岭上 (AwaitRinshanDraw), 但当前实现
-        // 直接转 AwaitDiscard (round_state.rs::AwaitCallsOp::Minkan apply 内有
-        // FIXME 注释). 本测试 assertion 跟随当前实现, 修复后应改回 AwaitRinshanDraw.
-        assert!(matches!(&r, RoundState::AwaitDiscard(_)));
+        // 明杠后必摸岭上 → AwaitRinshanDraw.
+        assert!(matches!(&r, RoundState::AwaitRinshanDraw(_)));
         assert!(evs.iter().any(|e| matches!(e, GameEvent::Minkan { .. })));
+        // 接下来 RinshanDraw → AwaitDiscard.
+        let (r, _) = round_apply(&r, AtomicOp::RinshanDraw).unwrap();
+        assert!(matches!(&r, RoundState::AwaitDiscard(_)));
     }
 
     #[test]

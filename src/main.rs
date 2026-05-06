@@ -173,6 +173,7 @@ fn launch_kitty(game: &Path) -> Result<bool> {
 }
 
 /// Alacritty: `alacritty -o window.dimensions.{columns,lines}=N --title <t> -e <cmd>`.
+/// 加 `window.position.{x,y}=0` 让窗口出现在屏幕左上.
 fn launch_alacritty(game: &Path) -> Result<bool> {
     if !binary_in_path(alacritty_bin_name()) {
         return Ok(false);
@@ -184,6 +185,10 @@ fn launch_alacritty(game: &Path) -> Result<bool> {
             &format!("window.dimensions.columns={DEFAULT_COLS}"),
             "-o",
             &format!("window.dimensions.lines={DEFAULT_ROWS}"),
+            "-o",
+            "window.position.x=0",
+            "-o",
+            "window.position.y=0",
             "--title",
             APP_TITLE,
             "-e",
@@ -215,6 +220,7 @@ fn launch_iterm2(game: &Path) -> Result<bool> {
         set name to "{title}"
         write text "{path}"
     end tell
+    set position of newWindow to {{0, 0}}
 end tell"#,
         cols = DEFAULT_COLS,
         rows = DEFAULT_ROWS,
@@ -240,6 +246,7 @@ fn launch_terminal_app(game: &Path) -> Result<bool> {
     activate
     do script "{path}"
     set custom title of front window to "{title}"
+    set position of front window to {{0, 0}}
 end tell"#,
         path = escaped,
         title = APP_TITLE,
@@ -259,6 +266,8 @@ fn launch_windows_terminal(game: &Path) -> Result<bool> {
     let path_str = game.to_str().context("game path utf8")?;
     Command::new("wt.exe")
         .args([
+            "--pos",
+            "0,0",
             "--size",
             &format!("{DEFAULT_COLS},{DEFAULT_ROWS}"),
             "--title",

@@ -421,13 +421,12 @@ pub fn detect_yaku(ctx: &WinContext, melds: &[Meld]) -> Vec<(Yaku, u32)> {
         if has_sanshoku_doukou(&all_mentsu) {
             out.push((Yaku::SanshokuDoukou, 2));
         }
-        // 三杠子
-        if mentsu
+        // 三杠子: 闭手 + 副露合并后 Kantsu count == 3 (4 杠是 Suukantsu 役满, 不重叠).
+        let kan_total = all_mentsu
             .iter()
             .filter(|m| matches!(m, Mentsu::Kantsu(_, _)))
-            .count()
-            >= 3
-        {
+            .count();
+        if kan_total == 3 {
             out.push((Yaku::Sankantsu, 2));
         }
         // 混全/纯全
@@ -1819,9 +1818,33 @@ mod tests {
         );
     }
 
-    // FIXME engine bug: Sankantsu 检查只看闭手 mentsu, 副露 3 杠场景应识别但
-    // 代码漏看 melds (yaku.rs:425-432). 测试构造 3 副露杠后无法触发 Sankantsu.
-    // 等 engine 修复后补此测试. 类似的 helper 修复可能也涉及 Suukantsu.
+    #[test]
+    fn detect_sankantsu_three_kans() {
+        // 三杠子 = 3 个杠 + 1 面子 + 雀头. 副露 3 杠 + 闭手 1 mentsu + 1 雀头.
+        use crate::engine::domain::meld::{Meld, MeldKind, Seat};
+        use crate::engine::domain::tile::Tile;
+        let closed = h(&[(1, 1), (2, 1), (3, 1), (8, 2)]);
+        let mk_kan = |kind: u8, base_id: u16| Meld {
+            kind: MeldKind::Minkan {
+                tiles: [
+                    Tile { kind: TileIndex(kind), red: false, id: base_id },
+                    Tile { kind: TileIndex(kind), red: false, id: base_id + 1 },
+                    Tile { kind: TileIndex(kind), red: false, id: base_id + 2 },
+                    Tile { kind: TileIndex(kind), red: false, id: base_id + 3 },
+                ],
+            },
+            from: Some(Seat::West),
+        };
+        let melds = vec![mk_kan(13, 0), mk_kan(22, 10), mk_kan(0, 20)];
+        let r = decompose(&closed, &melds, TileIndex(1));
+        let d = r.iter().next().expect("应有拆解");
+        let ctx = std_ctx(d, false, false, false, false);
+        let yakus = detect_yaku(&ctx, &melds);
+        assert!(
+            yakus.iter().any(|(y, _)| matches!(y, Yaku::Sankantsu)),
+            "3 副露杠应识别 Sankantsu, got {:?}", yakus
+        );
+    }
 
     #[test]
     fn detect_kotekisai_renhou_when_enabled() {
