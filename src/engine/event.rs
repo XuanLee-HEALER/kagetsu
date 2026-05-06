@@ -40,9 +40,6 @@ pub enum GameEvent {
     Ron { who: Seat, from: Seat },
 }
 
-/// 单局事件 ring buffer 容量上限. UI 显示最近 N 条事件用.
-pub(crate) const MAX_EVENTS: usize = 32;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,11 +51,6 @@ mod tests {
             red: false,
             id,
         }
-    }
-
-    #[test]
-    fn max_events_is_positive() {
-        const _: () = assert!(MAX_EVENTS > 0);
     }
 
     #[test]

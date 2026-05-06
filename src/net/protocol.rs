@@ -20,7 +20,7 @@ use crate::engine::event::GameEvent;
 use crate::engine::phase::Phase;
 use crate::engine::rules::GameRules;
 use crate::engine::score::Ranking;
-use crate::legacy_state::RoundWind;
+use crate::engine::round_state::RoundWind;
 use crate::ui::screens::game::TileSpec;
 
 // ============================================================================

@@ -15,9 +15,6 @@ pub mod config;
 pub mod dev;
 pub mod engine;
 pub mod game_engine;
-/// Legacy GameState — 阶段 6/7 迁移过渡期保留, 等所有调用方切到 RoundState/MatchState/GameEngine 后整体删除.
-#[deprecated(note = "Use crate::game_engine::GameEngine / engine::RoundState 等替代.")]
-pub mod legacy_state;
 pub mod mental_poker;
 pub mod net;
 pub mod ui;
