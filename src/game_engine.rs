@@ -1,18 +1,19 @@
-//! GameEngine — UI 层与 pure-functional engine 的桥梁.
+//! GameEngine — UI / net / dev 层与 pure-functional engine 的桥梁.
 //!
-//! 替代旧 GameState 在 UI 层的角色: 持 RoundState + MatchState, 暴露
-//! 接近 GameState 的 method 集合. 内部全部走 round_apply / match_apply /
-//! legal_ops, 不引用 legacy_state.
+//! 持 RoundState + MatchState, 暴露简洁字段 + 高层 do_* 方法. 所有 mutator
+//! 内部走 [`round_apply`] / [`match_apply`] / [`legal_ops`], 不引用 legacy_state.
 //!
-//! 这是 stage 6b 的核心: UI 不再感知 legacy GameState, 全部数据访问 / 算子
-//! 应用走 engine 公开 API.
+//! UI / net::room / dev::recorder 共用同一个 wrapper.
 //!
 //! Wrapper 而非纯 RoundState 暴露的理由:
-//! - GameState 时代 game.rs 的 74+ 处 self.game.X 引用大多是机械字段访问,
-//!   wrapper 让 sed 替换最小化, 减少重写风险.
-//! - 部分 legacy API 与 engine API 语义不 1:1 (如 try_tsumo + declare_tsumo
-//!   的两步式 vs round_apply Tsumo 的原子式), wrapper 内部翻译.
-//! - last_result / 录像 状态由 wrapper 缓存, 与 engine 转移函数解耦.
+//! - 简化 driver: phase() / players() / turn() 这种字段访问不必每次手写
+//!   `match self.round { ... }`.
+//! - 部分 legacy API 与 engine API 语义不 1:1 (如 do_riichi 一步, engine
+//!   是 RiichiDeclare + Discard 两步), wrapper 内部翻译.
+//! - last_result / 录像 / events buffer 等持续状态由 wrapper 缓存, 与
+//!   engine 转移函数解耦.
+//! - 录像 (recorded_actions) 在 wrapper 自动 push 真正送给 round_apply 的
+//!   AtomicOp 序列, replay 直接顺序 round_apply 即可.
 
 use crate::engine::domain::meld::Seat;
 use crate::engine::domain::tile::{Tile, TileIndex};
@@ -28,13 +29,10 @@ use crate::engine::rules::GameRules;
 use crate::engine::score::ScoreResult;
 use std::collections::VecDeque;
 
-const MAX_EVENTS: usize = 32;
+pub(crate) const MAX_EVENTS: usize = 32;
 
-#[cfg(feature = "dev-tools")]
-use crate::dev::recorder::RecordedAction;
-
-/// 包 RoundState + MatchState 给 UI 用. 行为接近 legacy GameState 但内部走 engine.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+/// 包 RoundState + MatchState 给 driver 用. 行为接近 legacy GameState 但内部走 engine.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GameEngine {
     pub round: RoundState,
     pub mat: MatchState,
@@ -44,11 +42,11 @@ pub struct GameEngine {
     pub round_seed: u64,
     /// 最近事件 (UI 用), 滚动 buffer.
     pub events: VecDeque<GameEvent>,
-    /// dev-tools replay 录像缓冲. 沿用 legacy RecordedAction schema (与 GameState 时代一致),
-    /// 等录像系统迁移到 AtomicOp 之后再清理.
+    /// 录像缓冲. None = 不录; Some(vec) = 录, 每次 round_apply 调用时把
+    /// 真正送进去的 AtomicOp push 进来. dev::recorder 起 / 结束局时 take/swap.
     #[cfg(feature = "dev-tools")]
     #[serde(skip)]
-    pub recorded_actions: Option<Vec<RecordedAction>>,
+    pub recorded_actions: Option<Vec<AtomicOp>>,
 }
 
 impl GameEngine {
@@ -82,6 +80,27 @@ impl GameEngine {
             }
             self.events.push_back(e);
         }
+    }
+
+    /// 录像 push: 录制中则 append 一条 AtomicOp. dev-tools feature off 时 noop.
+    #[inline]
+    fn record(&mut self, _op: AtomicOp) {
+        #[cfg(feature = "dev-tools")]
+        if let Some(buf) = self.recorded_actions.as_mut() {
+            buf.push(_op);
+        }
+    }
+
+    /// round_apply + 累积 events + 录像 push 一站式包装. 内部 mutator 都走这个.
+    fn apply(&mut self, op: AtomicOp) -> Result<(), OpError> {
+        let (next, evs) = round_apply(&self.round, op.clone())?;
+        self.round = next;
+        self.push_events(evs);
+        self.record(op);
+        if let Some(r) = self.round.result() {
+            self.last_result = Some(r.clone());
+        }
+        Ok(())
     }
 
     // ──────────────────────────────────────────────────────────
@@ -171,117 +190,74 @@ impl GameEngine {
         self.last_result = None;
     }
 
-    /// 摸牌. legacy 返 Option<Tile> = 摸到的牌; None 表示山摸尽 → engine 已自动转 RoundEnd.
+    /// 摸牌. 返摸到的牌; None = 山摸尽 (engine 已自动转 RoundEnd).
     pub fn do_draw(&mut self) -> Option<Tile> {
-        let res = round_apply(&self.round, AtomicOp::Draw);
-        match res {
-            Ok((next, evs)) => {
-                self.round = next;
-                self.push_events(evs);
-                // 如果转 RoundEnd, 缓存 result.
-                if let Some(r) = self.round.result() {
-                    self.last_result = Some(r.clone());
-                    return None;
-                }
-                // 摸到了牌: turn 家 last_drawn 即是.
-                let turn = self.round.turn()?;
-                self.round.common().players[turn.index()].last_drawn
-            }
-            Err(_) => None,
+        if self.apply(AtomicOp::Draw).is_err() {
+            return None;
         }
+        if self.last_result.is_some() {
+            return None;
+        }
+        let turn = self.round.turn()?;
+        self.round.common().players[turn.index()].last_drawn
     }
 
-    /// 鸣牌后岭上摸 (engine 自动). 兼容 legacy 在 do_pon/chi/minkan/ankan/shouminkan 后
-    /// 的 phase 推进.
+    /// 鸣牌后岭上摸 (engine 自动). do_pon/chi/minkan/ankan/shouminkan 后调.
     fn auto_rinshan_if_needed(&mut self) -> Result<(), OpError> {
         if matches!(self.round, RoundState::AwaitRinshanDraw(_)) {
-            let (next, evs) = round_apply(&self.round, AtomicOp::RinshanDraw)?;
-            self.round = next;
-            self.push_events(evs);
-            if let Some(r) = self.round.result() {
-                self.last_result = Some(r.clone());
-            }
+            self.apply(AtomicOp::RinshanDraw)?;
         }
         Ok(())
     }
 
     /// 切牌.
     pub fn do_discard(&mut self, tile: Tile) -> Result<(), OpError> {
-        let (next, evs) = round_apply(&self.round, AtomicOp::Discard { tile })?;
-        self.round = next;
-        self.push_events(evs);
-        Ok(())
+        self.apply(AtomicOp::Discard { tile })
     }
 
-    /// 立直宣告 + 切牌 (legacy 一步, engine 两步).
+    /// 立直宣告 + 切牌 (driver 一步, engine 两步).
     pub fn do_riichi(&mut self, tile: Tile) -> Result<(), OpError> {
-        let (next, evs) = round_apply(&self.round, AtomicOp::RiichiDeclare)?;
-        self.round = next;
-        self.push_events(evs);
-        // 紧接着切牌.
-        let (next2, evs2) = round_apply(&self.round, AtomicOp::Discard { tile })?;
-        self.round = next2;
-        self.push_events(evs2);
+        self.apply(AtomicOp::RiichiDeclare)?;
+        self.apply(AtomicOp::Discard { tile })?;
         Ok(())
     }
 
     /// 暗杠 + 自动岭上摸.
     pub fn do_ankan(&mut self, kind: TileIndex) -> Result<(), OpError> {
-        let (next, evs) = round_apply(&self.round, AtomicOp::Ankan { kind })?;
-        self.round = next;
-        self.push_events(evs);
+        self.apply(AtomicOp::Ankan { kind })?;
         self.auto_rinshan_if_needed()?;
         Ok(())
     }
 
     /// 加杠 + 自动岭上摸.
     pub fn do_shouminkan(&mut self, kind: TileIndex) -> Result<(), OpError> {
-        let (next, evs) = round_apply(&self.round, AtomicOp::Shouminkan { kind })?;
-        self.round = next;
-        self.push_events(evs);
+        self.apply(AtomicOp::Shouminkan { kind })?;
         self.auto_rinshan_if_needed()?;
         Ok(())
     }
 
     /// 碰.
     pub fn do_pon(&mut self, who: Seat, two: [Tile; 2]) -> Result<(), OpError> {
-        let (next, evs) = round_apply(
-            &self.round,
-            AtomicOp::Pon {
-                who,
-                hand_tile_ids: [two[0].id, two[1].id],
-            },
-        )?;
-        self.round = next;
-        self.push_events(evs);
-        Ok(())
+        self.apply(AtomicOp::Pon {
+            who,
+            hand_tile_ids: [two[0].id, two[1].id],
+        })
     }
 
     /// 吃.
     pub fn do_chi(&mut self, who: Seat, two: [Tile; 2]) -> Result<(), OpError> {
-        let (next, evs) = round_apply(
-            &self.round,
-            AtomicOp::Chi {
-                who,
-                hand_tile_ids: [two[0].id, two[1].id],
-            },
-        )?;
-        self.round = next;
-        self.push_events(evs);
-        Ok(())
+        self.apply(AtomicOp::Chi {
+            who,
+            hand_tile_ids: [two[0].id, two[1].id],
+        })
     }
 
     /// 明杠 + 自动岭上摸.
     pub fn do_minkan(&mut self, who: Seat, three: [Tile; 3]) -> Result<(), OpError> {
-        let (next, evs) = round_apply(
-            &self.round,
-            AtomicOp::Minkan {
-                who,
-                hand_tile_ids: [three[0].id, three[1].id, three[2].id],
-            },
-        )?;
-        self.round = next;
-        self.push_events(evs);
+        self.apply(AtomicOp::Minkan {
+            who,
+            hand_tile_ids: [three[0].id, three[1].id, three[2].id],
+        })?;
         self.auto_rinshan_if_needed()?;
         Ok(())
     }
@@ -305,13 +281,8 @@ impl GameEngine {
 
     /// 自摸宣告. score 参数兼容 legacy API; 实际从 round_apply 的 RoundEnd 取.
     pub fn declare_tsumo(&mut self, _score: ScoreResult) {
-        let (next, evs) = round_apply(&self.round, AtomicOp::Tsumo)
+        self.apply(AtomicOp::Tsumo)
             .expect("declare_tsumo: round_apply Tsumo should succeed (caller must try_tsumo first)");
-        self.round = next;
-        self.push_events(evs);
-        if let Some(r) = self.round.result() {
-            self.last_result = Some(r.clone());
-        }
     }
 
     pub fn can_ron(&self, who: Seat) -> bool {
@@ -328,23 +299,16 @@ impl GameEngine {
     }
 
     pub fn declare_ron(&mut self, who: Seat, _score: ScoreResult) {
-        let (next, evs) = round_apply(&self.round, AtomicOp::Ron { who })
+        self.apply(AtomicOp::Ron { who })
             .expect("declare_ron: round_apply Ron should succeed (caller must try_ron first)");
-        self.round = next;
-        self.push_events(evs);
-        if let Some(r) = self.round.result() {
-            self.last_result = Some(r.clone());
-        }
     }
 
     /// 推进 turn. legacy 在 AwaitCalls 阶段无人响应时调; 在 engine 里这就是 Pass.
     /// 其它 phase 调 advance_turn 是 noop (engine 内 do_discard 等已自动转 phase).
     pub fn advance_turn(&mut self) {
         if matches!(self.round, RoundState::AwaitCalls(_)) {
-            let (next, evs) = round_apply(&self.round, AtomicOp::Pass)
+            self.apply(AtomicOp::Pass)
                 .expect("advance_turn: AwaitCalls Pass 永远合法");
-            self.round = next;
-            self.push_events(evs);
         }
     }
 
