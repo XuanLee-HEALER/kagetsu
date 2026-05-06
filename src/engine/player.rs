@@ -82,3 +82,68 @@ impl PlayerState {
         self.hand.closed.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::domain::tile::TileIndex;
+
+    fn t(kind: u8, id: u16) -> Tile {
+        Tile {
+            kind: TileIndex(kind),
+            red: false,
+            id,
+        }
+    }
+
+    #[test]
+    fn new_initializes_default_state() {
+        let p = PlayerState::new(Seat::East, 25000);
+        assert_eq!(p.seat, Seat::East);
+        assert_eq!(p.score, 25000);
+        assert_eq!(p.hand.closed.len(), 0);
+        assert_eq!(p.hand.melds.len(), 0);
+        assert!(p.river.is_empty());
+        assert!(!p.riichi);
+        assert!(!p.double_riichi);
+        assert!(!p.ippatsu_active);
+        assert!(p.last_drawn.is_none());
+        assert!(p.riichi_river_idx.is_none());
+    }
+
+    #[test]
+    fn closed_count_reflects_hand() {
+        let mut p = PlayerState::new(Seat::South, 25000);
+        assert_eq!(p.closed_count(), 0);
+        p.hand.closed.push(t(0, 0));
+        p.hand.closed.push(t(1, 1));
+        assert_eq!(p.closed_count(), 2);
+    }
+
+    #[test]
+    fn reset_round_keeps_seat_and_score_clears_round_state() {
+        let mut p = PlayerState::new(Seat::West, 30000);
+        // 撒满局内状态.
+        p.hand.closed.push(t(5, 5));
+        p.river.push(t(2, 2));
+        p.riichi = true;
+        p.double_riichi = true;
+        p.ippatsu_active = true;
+        p.last_drawn = Some(t(0, 9));
+        p.riichi_river_idx = Some(3);
+
+        p.reset_round();
+
+        // 局间保留:
+        assert_eq!(p.seat, Seat::West);
+        assert_eq!(p.score, 30000);
+        // 局内 reset:
+        assert_eq!(p.hand.closed.len(), 0);
+        assert!(p.river.is_empty());
+        assert!(!p.riichi);
+        assert!(!p.double_riichi);
+        assert!(!p.ippatsu_active);
+        assert!(p.last_drawn.is_none());
+        assert!(p.riichi_river_idx.is_none());
+    }
+}
