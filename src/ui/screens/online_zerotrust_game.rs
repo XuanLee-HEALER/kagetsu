@@ -1282,6 +1282,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -1398,6 +1399,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -1562,6 +1564,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -1711,6 +1714,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -1893,6 +1897,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -2116,6 +2121,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -2287,6 +2293,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -2465,6 +2472,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -2659,6 +2667,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {

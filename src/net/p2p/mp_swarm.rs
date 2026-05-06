@@ -24,7 +24,11 @@ use crate::net::p2p::mp_bridge::{MpBridgeError, MpTransport};
 /// SwarmTransport → swarm task 的命令.
 #[derive(Debug)]
 pub enum SwarmCommand {
-    /// 广播 (gossipsub publish).
+    /// 显式订阅 gossipsub topic (不发数据). 让 mesh 在第一次 publish 之前就成型,
+    /// 避免 broadcast 路径上的 `subscribe + publish` race (publish 被 mesh 未稳
+    /// 拒绝).
+    Subscribe { topic: String },
+    /// 广播 (gossipsub publish). 自动 subscribe topic 若未订阅.
     Broadcast {
         /// 完整 mp gossipsub topic (调 [`crate::net::p2p::behaviour::mp_topic_for_room`]
         /// 算).
@@ -100,13 +104,51 @@ pub fn new_swarm_transport(
 /// - Unicast → rr_mp.send_request
 ///
 /// `subscribed_topics` 是 caller 维护的 HashSet, 防止重复 subscribe.
+/// gossipsub publish 失败时入 retry queue, 后续 heartbeat 调 retry_pending_broadcasts
+/// 重试. (mesh 形成前 publish 会返 NoPeersSubscribedToTopic / InsufficientPeers,
+/// actor 一锤子买卖, 不会重发 → KeyShare 丢失. 网络层保证可靠投递.)
+#[derive(Default)]
+pub struct PendingBroadcasts {
+    queue: Vec<(String, MentalPokerMsg)>,
+}
+
+impl PendingBroadcasts {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+}
+
 pub fn dispatch_swarm_command(
     swarm: &mut libp2p::Swarm<crate::net::p2p::behaviour::P2pBehaviour>,
     cmd: SwarmCommand,
     subscribed_topics: &mut std::collections::HashSet<String>,
 ) {
+    dispatch_swarm_command_with_pending(swarm, cmd, subscribed_topics, &mut PendingBroadcasts::new())
+}
+
+/// 跟 dispatch_swarm_command 一样, 但失败的 Broadcast 入 pending 队列.
+pub fn dispatch_swarm_command_with_pending(
+    swarm: &mut libp2p::Swarm<crate::net::p2p::behaviour::P2pBehaviour>,
+    cmd: SwarmCommand,
+    subscribed_topics: &mut std::collections::HashSet<String>,
+    pending: &mut PendingBroadcasts,
+) {
     use libp2p::gossipsub;
     match cmd {
+        SwarmCommand::Subscribe { topic } => {
+            if subscribed_topics.insert(topic.clone()) {
+                let ident = gossipsub::IdentTopic::new(&topic);
+                if let Err(e) = swarm.behaviour_mut().gossipsub.subscribe(&ident) {
+                    tracing::warn!("mp_topic={topic} 订阅失败: {e}");
+                }
+            }
+        }
         SwarmCommand::Broadcast { topic, msg } => {
             if subscribed_topics.insert(topic.clone()) {
                 let ident = gossipsub::IdentTopic::new(&topic);
@@ -114,20 +156,55 @@ pub fn dispatch_swarm_command(
                     tracing::warn!("mp_topic={topic} 订阅失败: {e}");
                 }
             }
-            let payload = match serde_json::to_vec(&msg) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!("mp Broadcast json encode 失败: {e}");
-                    return;
-                }
-            };
-            let ident = gossipsub::IdentTopic::new(&topic);
-            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ident, payload) {
-                tracing::debug!("mp publish to {topic} pending: {e}");
+            if !try_publish(swarm, &topic, &msg) {
+                // mesh 未稳, 入队等 retry.
+                pending.queue.push((topic, msg));
             }
         }
         SwarmCommand::Unicast { target, msg } => {
             swarm.behaviour_mut().rr_mp.send_request(&target, msg);
+        }
+    }
+}
+
+/// 重试 pending 队列里所有 broadcast. 由 swarm task 在 heartbeat tick 调.
+/// 成功的从队列移除, 失败的留下下次再试.
+pub fn retry_pending_broadcasts(
+    swarm: &mut libp2p::Swarm<crate::net::p2p::behaviour::P2pBehaviour>,
+    pending: &mut PendingBroadcasts,
+) {
+    if pending.queue.is_empty() {
+        return;
+    }
+    let mut still_pending = Vec::new();
+    for (topic, msg) in std::mem::take(&mut pending.queue) {
+        if !try_publish(swarm, &topic, &msg) {
+            still_pending.push((topic, msg));
+        }
+    }
+    pending.queue = still_pending;
+}
+
+/// 尝试 publish 一次. 返 true = 成功.
+fn try_publish(
+    swarm: &mut libp2p::Swarm<crate::net::p2p::behaviour::P2pBehaviour>,
+    topic: &str,
+    msg: &MentalPokerMsg,
+) -> bool {
+    use libp2p::gossipsub;
+    let payload = match serde_json::to_vec(msg) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("mp Broadcast json encode 失败: {e}");
+            return true; // 编码失败放弃, 别留队列里反复试
+        }
+    };
+    let ident = gossipsub::IdentTopic::new(topic);
+    match swarm.behaviour_mut().gossipsub.publish(ident, payload) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::debug!("mp publish to {topic} pending: {e}");
+            false
         }
     }
 }
@@ -265,12 +342,12 @@ mod tests {
             swarms.push(sw);
         }
 
-        // === Phase 2: 互相 dial (4*3=12 dial), 让 mesh peer set 形成 ===
+        // === Phase 2: 单向 dial (只 i < j, 6 个 connection 而非 12) ===
+        // 双向 dial 会触发 simultaneous open, libp2p TCP + noise 在同时 dial 时
+        // handshake 偶尔会失败 (input error). 单向 dial 让 swarm[j] accept,
+        // libp2p 自动 share connection 给 swarm[i] 反向使用.
         for i in 0..N {
-            for j in 0..N {
-                if i == j {
-                    continue;
-                }
+            for j in (i + 1)..N {
                 if let Err(e) = swarms[i].dial(listen_addrs[j].clone()) {
                     tracing::warn!("swarm[{i}] dial swarm[{j}] 失败: {e}");
                 }
@@ -296,12 +373,18 @@ mod tests {
             let mut sw = sw;
             tokio::spawn(async move {
                 let mut subscribed: HashSet<String> = HashSet::new();
+                let mut pending = super::PendingBroadcasts::new();
+                let mut retry_tick = tokio::time::interval(Duration::from_millis(500));
+                retry_tick.tick().await; // 跳过第一个 immediate tick
                 loop {
                     tokio::select! {
                         biased;
                         _ = &mut sd_rx => break,
                         Some(cmd) = cmd_rx.recv() => {
-                            super::dispatch_swarm_command(&mut sw, cmd, &mut subscribed);
+                            super::dispatch_swarm_command_with_pending(&mut sw, cmd, &mut subscribed, &mut pending);
+                        }
+                        _ = retry_tick.tick() => {
+                            super::retry_pending_broadcasts(&mut sw, &mut pending);
                         }
                         event = sw.select_next_some() => {
                             match event {
@@ -337,37 +420,17 @@ mod tests {
             });
         }
 
-        // === Phase 4: 等 mesh 形成 (gossipsub heartbeat 1s, mesh 选 peer 需 ~3-6s) ===
-        // 让所有 swarm 先 subscribe 到 topic (lazy 通过 broadcast 发起,
-        // 但 subscribe 必须先于 mesh 收到 message, 这里我们手动让 cmd_tx 发一次假 broadcast 触发 subscribe).
-        // 实际下面 spawn actor 后 keygen 第一条 OutboundMsg 会自动 subscribe + publish,
-        // 但其他人还没 subscribe 收不到 → 协议卡死.
-        //
-        // Workaround: 每方先发一条空 broadcast 让大家都 subscribe, 但需要合法 MentalPokerMsg —
-        // 用一个 noop placeholder. 实际更简单的: 让 SwarmTransport 在 spawn 后立刻
-        // 把 topic 注册一遍 (调一次 dispatch_swarm_command 假 Broadcast).
-        //
-        // 简单做法: 各方先 cmd_tx.send 一条 KeyShare placeholder 消息 (即将发的真 KeyShare
-        // 会再发一次, 多发一条不影响 — actor 内部 dedup by peer_id).
-        // 但这里我们不做这步, 改为延长 mesh 形成 sleep 让 actor 自己 retry 不会发生 (
-        // gossipsub 在 mesh 未连时 publish 返回 InsufficientPeers, actor 就停在 KeyShare 不进).
-        //
-        // 真正解法: 加一个 "warmup" 步骤, 让每方 subscribe topic 后等 mesh 形成,
-        // 然后才 spawn actor. 这里实施:
+        // === Phase 4: 显式 subscribe + 等 mesh 形成 ===
+        // 各 swarm 先 explicit subscribe topic (不发数据), 然后 sleep 等 gossipsub
+        // heartbeat (1s) × 几次让 mesh 在 4 节点间形成. 不能依赖 actor 第一次
+        // broadcast 的 lazy subscribe — 那时收方还没 subscribe → 消息丢.
         for cmd_tx in &cmd_txs {
-            // 用一个真实 MentalPokerMsg variant 作 warmup 触发 subscribe + publish.
-            // 这条消息会被 actor 收到但因 phase 不对被忽略 (KeyShare 是 KeyExchange phase 接受的, OK).
-            let _ = cmd_tx.send(SwarmCommand::Broadcast {
+            let _ = cmd_tx.send(SwarmCommand::Subscribe {
                 topic: topic.clone(),
-                msg: MentalPokerMsg::KeyShare {
-                    peer_id: vec![0xFFu8; 32], // 不存在的 peer, 接收方会忽略
-                    pk: vec![],
-                    proof: vec![],
-                },
             });
         }
-        // 等 mesh 形成 — gossipsub heartbeat 1s, 选 mesh peer 需要几个 heartbeat.
-        // 给 15s 让 4 节点 mesh 稳定 (实际生产 rooms 也建议 lobby 阶段先 warmup).
+        // gossipsub heartbeat 1s + mesh 选 peer 几个 heartbeat. 4 节点拓扑用 mesh_n=3
+        // 配置 (见 behaviour.rs), 8s 应足够. 给 15s 留余量.
         tokio::time::sleep(Duration::from_secs(15)).await;
 
         // === Phase 5: spawn 4 个 MpPlayerActor + bridge + forward task ===
@@ -573,6 +636,9 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {
+                            // in-memory dispatcher 不需要 subscribe (无 mesh).
+                        }
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             // libp2p gossipsub 默认不回环 (sender 不收自己的消息)
                             for (idx, inbound) in inbounds_clone.iter().enumerate() {
