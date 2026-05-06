@@ -1416,3 +1416,149 @@
         assert!(s.sender.is_none());
         assert!(s.disconnected_at.is_some());
     }
+
+    // ========================================================================
+    // game.rs advance_game 各 phase 分支
+    // ========================================================================
+
+    use crate::engine::round_state::RoundEndState;
+
+    /// 把 engine 的 round 替换成 RoundEnd 状态, 模拟流局.
+    fn force_round_end_ryuukyoku(actor: &mut RoomActor) {
+        let engine = actor.game.as_mut().unwrap();
+        let common = round_common_mut(&mut engine.round).clone();
+        engine.round = RoundState::RoundEnd(RoundEndState {
+            common,
+            result: RoundResult::Ryuukyoku {
+                kind: RyuukyokuKind::Howaipai,
+            },
+        });
+        engine.last_result = Some(RoundResult::Ryuukyoku {
+            kind: RyuukyokuKind::Howaipai,
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn advance_game_in_round_end_broadcasts_state_and_round_result() {
+        let (mut actor, mut rxs) = make_actor_in_game(&[Seat::East]);
+        force_round_end_ryuukyoku(&mut actor);
+        actor.advance_game();
+        let mut got_view = false;
+        let mut got_result = false;
+        while let Ok(msg) = rxs[0].try_recv() {
+            match msg {
+                ServerMsg::GameStateView(_) => got_view = true,
+                ServerMsg::RoundResult(_) => got_result = true,
+                _ => {}
+            }
+        }
+        assert!(got_view, "RoundEnd 应推 GameStateView");
+        assert!(got_result, "RoundEnd 应推 RoundResult");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn advance_game_no_game_returns_immediately() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        actor.game = None;
+        // 不 panic 即可.
+        actor.advance_game();
+    }
+
+    /// AwaitCalls 阶段, 全员都已 setup pending → advance_game 直接 return (不修改 state).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn advance_game_in_await_calls_with_pending_returns_immediately() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        force_discard_scenario(
+            &mut actor,
+            Seat::East,
+            Tile {
+                id: 50000,
+                kind: TileIndex(0),
+                red: false,
+            },
+        );
+        // 已 setup pending_calls, advance_game 应 early return.
+        let mut m = HashMap::new();
+        m.insert(2, None);
+        actor.pending_calls = Some(m);
+        let pending_before = actor.pending_calls.clone();
+        actor.advance_game();
+        // pending 不应被 advance_game 改写.
+        assert!(actor.pending_calls.is_some());
+        let pending_after = actor.pending_calls.clone();
+        // keys 数量一致.
+        assert_eq!(
+            pending_before.unwrap().len(),
+            pending_after.unwrap().len()
+        );
+    }
+
+    /// CallTimeout 过期 generation 应被忽略.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_timeout_with_stale_generation_ignored() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        actor.call_window_gen = 5;
+        actor.pending_calls = Some({
+            let mut m = HashMap::new();
+            m.insert(2, None);
+            m
+        });
+        actor.handle_cmd(RoomCmd::CallTimeout { generation: 3 });
+        // pending 仍存在 (没触发 resolve).
+        assert!(actor.pending_calls.is_some());
+    }
+
+    /// CallTimeout 当 pending=None 也 noop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_timeout_with_no_pending_ignored() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+        actor.call_window_gen = 5;
+        actor.pending_calls = None;
+        actor.handle_cmd(RoomCmd::CallTimeout { generation: 5 });
+        // 不 panic 即可.
+        assert!(actor.pending_calls.is_none());
+    }
+
+    /// CallTimeout matched generation + pending → resolve 一次.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn call_timeout_matching_generation_resolves() {
+        let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
+        force_discard_scenario(
+            &mut actor,
+            Seat::East,
+            Tile {
+                id: 50000,
+                kind: TileIndex(0),
+                red: false,
+            },
+        );
+        actor.call_window_gen = 7;
+        actor.pending_calls = Some({
+            let mut m = HashMap::new();
+            m.insert(2, None);
+            m
+        });
+        actor.handle_cmd(RoomCmd::CallTimeout { generation: 7 });
+        assert!(actor.pending_calls.is_none(), "matched timeout 应触发 resolve");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_local_peer_id_associates_existing_host_slot() {
+        let (mut actor, _rxs) = make_actor_in_lobby(1);
+        let bytes = vec![7u8; 32];
+        actor.handle_cmd(RoomCmd::SetLocalPeerId {
+            peer_id_bytes: bytes.clone(),
+        });
+        assert_eq!(actor.player_peers.get(&1), Some(&bytes));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn associate_peer_inserts_into_player_peers() {
+        let (mut actor, _rxs) = make_actor_in_lobby(2);
+        let bytes = vec![3u8; 32];
+        actor.handle_cmd(RoomCmd::AssociatePeer {
+            player_id: 2,
+            peer_id_bytes: bytes.clone(),
+        });
+        assert_eq!(actor.player_peers.get(&2), Some(&bytes));
+    }
