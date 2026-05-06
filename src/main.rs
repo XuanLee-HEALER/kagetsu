@@ -216,6 +216,10 @@ fn launch_iterm2(game: &Path) -> Result<bool> {
     // profile "When the session ends: Close" 关闭窗口.
     let cmd = format!("{}; exit", path_str);
     let escaped = applescript_escape(&cmd);
+    // try chain: 优先 newWindow 引用, 失败 fallback 到 front window. 某些
+    // iTerm2 版本里 create window 返回的不是 window object, set position
+    // 会触发 -10000 errAEEventNotHandled. 用 try 包起来确保启动不被位置
+    // 设置阻塞.
     let script = format!(
         r#"tell application "iTerm"
     activate
@@ -226,18 +230,20 @@ fn launch_iterm2(game: &Path) -> Result<bool> {
         set name to "{title}"
         write text "{path}"
     end tell
-    set position of newWindow to {{0, 0}}
+    try
+        set position of newWindow to {{0, 0}}
+    on error
+        try
+            set position of front window to {{0, 0}}
+        end try
+    end try
 end tell"#,
         cols = DEFAULT_COLS,
         rows = DEFAULT_ROWS,
         title = APP_TITLE,
         path = escaped,
     );
-    Command::new("osascript")
-        .args(["-e", &script])
-        .spawn()
-        .context("spawn osascript (iTerm2)")?;
-    Ok(true)
+    run_osascript(&script, "iTerm2")
 }
 
 #[cfg(target_os = "macos")]
@@ -255,15 +261,44 @@ fn launch_terminal_app(game: &Path) -> Result<bool> {
     activate
     do script "{path}"
     set custom title of front window to "{title}"
-    set position of front window to {{0, 0}}
+    try
+        set position of front window to {{0, 0}}
+    end try
 end tell"#,
         path = escaped,
         title = APP_TITLE,
     );
-    Command::new("osascript")
-        .args(["-e", &script])
-        .spawn()
-        .context("spawn osascript (Terminal.app)")?;
+    run_osascript(&script, "Terminal.app")
+}
+
+/// 跑 osascript, 捕获 stderr. 失败时打到 launcher 终端让 user 能看到原因 +
+/// 返 Ok(false) 让 caller fallback 到下一个 launcher.
+/// TUI_MAJO_DEBUG=1 时打印 script 内容供 debug.
+#[cfg(target_os = "macos")]
+fn run_osascript(script: &str, label: &str) -> Result<bool> {
+    let debug = std::env::var("TUI_MAJO_DEBUG").is_ok();
+    if debug {
+        eprintln!("[launcher/{}] osascript script:\n{}", label, script);
+    }
+    let output = Command::new("osascript")
+        .args(["-e", script])
+        .output()
+        .with_context(|| format!("spawn osascript ({})", label))?;
+    if !output.status.success() {
+        eprintln!(
+            "[launcher/{}] osascript failed (status {}):\n{}",
+            label,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return Ok(false);
+    }
+    if debug {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !stdout.trim().is_empty() {
+            eprintln!("[launcher/{}] stdout: {}", label, stdout.trim());
+        }
+    }
     Ok(true)
 }
 
