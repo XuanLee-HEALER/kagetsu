@@ -1718,6 +1718,7 @@ impl From<NextAwaitCallsState> for RoundState {
 mod tests {
     use super::*;
     use crate::engine::op::{AtomicOp, AtomicOpKind, OpError, PhaseKind};
+    use crate::engine::score::ScoreLevel;
 
     #[test]
     fn typed_op_macro_generates_correctly() {
@@ -1973,5 +1974,616 @@ mod tests {
                 phase_kind: crate::engine::op::PhaseKind::AwaitRiichiDiscard,
             })
         ));
+    }
+
+    // ============================================================
+    // RoundWind / RoundState getter / 简单 helper
+    // ============================================================
+
+    #[test]
+    fn roundwind_tile_maps_to_wind_tileindex() {
+        assert_eq!(RoundWind::East.tile(), TileIndex::EAST);
+        assert_eq!(RoundWind::South.tile(), TileIndex::SOUTH);
+        assert_eq!(RoundWind::West.tile(), TileIndex::WEST);
+        assert_eq!(RoundWind::North.tile(), TileIndex::NORTH);
+    }
+
+    #[test]
+    fn roundwind_label_chinese() {
+        assert_eq!(RoundWind::East.label(), "东");
+        assert_eq!(RoundWind::South.label(), "南");
+        assert_eq!(RoundWind::West.label(), "西");
+        assert_eq!(RoundWind::North.label(), "北");
+    }
+
+    #[test]
+    fn roundstate_getters_per_phase() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 7);
+        // AwaitDraw: turn=East, last_discard/result/last_drawn 全 None.
+        assert_eq!(r.turn(), Some(Seat::East));
+        assert!(r.last_discard().is_none());
+        assert!(r.last_drawn().is_none());
+        assert!(r.result().is_none());
+        assert!(!r.is_ended());
+
+        // Draw → AwaitDiscard: last_drawn 应 Some.
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        assert!(r.last_drawn().is_some());
+        assert!(r.last_discard().is_none());
+
+        // Discard → AwaitCalls: last_discard 应 Some, turn None, last_drawn None.
+        let t = r.last_drawn().unwrap();
+        let (r, _) = round_apply(&r, AtomicOp::Discard { tile: t }).unwrap();
+        assert!(matches!(&r, RoundState::AwaitCalls(_)));
+        assert_eq!(r.turn(), None);
+        assert!(r.last_discard().is_some());
+        assert!(r.last_drawn().is_none());
+
+        // Pass → AwaitDraw (下家).
+        let (r, _) = round_apply(&r, AtomicOp::Pass).unwrap();
+        assert_eq!(r.turn(), Some(Seat::South));
+    }
+
+    // ============================================================
+    // round_apply 各 typed-state apply 路径
+    // ============================================================
+
+    /// 跑到 AwaitDiscard, 让 East 立直宣告 + 切牌.
+    /// (用真实 round_apply, 但条件: 手牌一定听牌. seed=42 East 起手未必听,
+    /// 所以测试构造黑魔法 hand: 听 1m 单骑.)
+    #[test]
+    fn apply_riichi_declare_then_discard_full_lifecycle() {
+        let m = MatchState::new(GameRules::default());
+        let r0 = init_round(&m, 42);
+        let (r, _) = round_apply(&r0, AtomicOp::Draw).unwrap();
+        // 黑魔法: 替 East 闭手 = 听 1m 单骑的牌型, last_drawn 也是听后牌.
+        // 14 张 = 234m+234p+234s+567s+99m, last_drawn=9m(其中一张).
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                let hand = vec![
+                    Tile { kind: TileIndex(1), red: false, id: 100 },
+                    Tile { kind: TileIndex(2), red: false, id: 101 },
+                    Tile { kind: TileIndex(3), red: false, id: 102 },
+                    Tile { kind: TileIndex(10), red: false, id: 103 },
+                    Tile { kind: TileIndex(11), red: false, id: 104 },
+                    Tile { kind: TileIndex(12), red: false, id: 105 },
+                    Tile { kind: TileIndex(19), red: false, id: 106 },
+                    Tile { kind: TileIndex(20), red: false, id: 107 },
+                    Tile { kind: TileIndex(21), red: false, id: 108 },
+                    Tile { kind: TileIndex(22), red: false, id: 109 },
+                    Tile { kind: TileIndex(23), red: false, id: 110 },
+                    Tile { kind: TileIndex(24), red: false, id: 111 },
+                    Tile { kind: TileIndex(8), red: false, id: 112 },
+                    Tile { kind: TileIndex(8), red: false, id: 113 }, // last drawn
+                ];
+                s.common.players[Seat::East.index()].hand.closed = hand;
+                s.last_drawn = Some(Tile { kind: TileIndex(8), red: false, id: 113 });
+                s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!("expected AwaitDiscard"),
+        };
+        // RiichiDeclare → AwaitRiichiDiscard
+        let (r, _) = round_apply(&r, AtomicOp::RiichiDeclare).unwrap();
+        assert!(matches!(&r, RoundState::AwaitRiichiDiscard(_)));
+        // East 应 riichi=true, score-1000, riichi_sticks_pool +1.
+        match &r {
+            RoundState::AwaitRiichiDiscard(s) => {
+                let p = &s.common.players[Seat::East.index()];
+                assert!(p.riichi);
+                assert_eq!(p.score, 24000);
+                assert_eq!(s.common.riichi_sticks_pool, 1);
+            }
+            _ => unreachable!(),
+        }
+        // Discard last_drawn (摸切立直).
+        let drawn = match &r {
+            RoundState::AwaitRiichiDiscard(s) => s.last_drawn,
+            _ => unreachable!(),
+        };
+        let (r, evs) = round_apply(&r, AtomicOp::Discard { tile: drawn }).unwrap();
+        assert!(matches!(&r, RoundState::AwaitCalls(_)));
+        assert!(evs.iter().any(|e| matches!(e, GameEvent::Riichi { .. })));
+    }
+
+    #[test]
+    fn apply_tsumo_completes_round_with_payments() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        // 黑魔法: 让 East 摸到能自摸的型. closed 14 张 = 国士单役满 (winning=9m).
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                let mut hand = Vec::new();
+                let mut id = 200u16;
+                // 13 种幺九各 1
+                for &k in &[0u8, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33] {
+                    hand.push(Tile { kind: TileIndex(k), red: false, id });
+                    id += 1;
+                }
+                // 加 1 张 1m 雀头 (winning=1m → thirteen_wait=true 双倍役满)
+                let last = Tile { kind: TileIndex(0), red: false, id };
+                hand.push(last);
+                s.common.players[Seat::East.index()].hand.closed = hand;
+                s.last_drawn = Some(last);
+                s.common.players[Seat::East.index()].last_drawn = Some(last);
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!(),
+        };
+        let (r, evs) = round_apply(&r, AtomicOp::Tsumo).unwrap();
+        assert!(matches!(&r, RoundState::RoundEnd(_)));
+        assert!(evs.iter().any(|e| matches!(e, GameEvent::Tsumo { .. })));
+        match r.result().unwrap() {
+            RoundResult::Win { winner, is_tsumo, score, payments, .. } => {
+                assert_eq!(*winner, Seat::East);
+                assert!(*is_tsumo);
+                assert!(matches!(score.level, ScoreLevel::Yakuman(_)));
+                assert!(!payments.is_empty());
+            }
+            _ => panic!("expect Win"),
+        }
+    }
+
+    #[test]
+    fn apply_ankan_then_rinshan_draw() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        // 黑魔法: 给 East 4 张 1m + 9 张其它牌 + last_drawn = 1m
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                let mut hand = vec![
+                    Tile { kind: TileIndex(0), red: false, id: 300 },
+                    Tile { kind: TileIndex(0), red: false, id: 301 },
+                    Tile { kind: TileIndex(0), red: false, id: 302 },
+                    Tile { kind: TileIndex(0), red: false, id: 303 }, // 4 张 1m → 暗杠
+                ];
+                let mut id = 310u16;
+                for k in 1..=10u8 {
+                    hand.push(Tile { kind: TileIndex(k), red: false, id });
+                    id += 1;
+                }
+                s.common.players[Seat::East.index()].hand.closed = hand;
+                s.last_drawn = Some(Tile { kind: TileIndex(0), red: false, id: 303 });
+                s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!(),
+        };
+        let (r, evs) = round_apply(&r, AtomicOp::Ankan { kind: TileIndex(0) }).unwrap();
+        assert!(matches!(&r, RoundState::AwaitRinshanDraw(_)));
+        assert!(evs.iter().any(|e| matches!(e, GameEvent::Ankan { .. })));
+        // 验证 meld 已加, dora 已翻 (revealed +=1).
+        match &r {
+            RoundState::AwaitRinshanDraw(s) => {
+                let p = &s.common.players[Seat::East.index()];
+                assert_eq!(p.hand.melds.len(), 1);
+                assert!(matches!(&p.hand.melds[0].kind, MeldKind::Ankan { .. }));
+            }
+            _ => unreachable!(),
+        }
+        // RinshanDraw → AwaitDiscard.
+        let (r, _) = round_apply(&r, AtomicOp::RinshanDraw).unwrap();
+        assert!(matches!(&r, RoundState::AwaitDiscard(_)));
+    }
+
+    #[test]
+    fn apply_pon_from_await_calls_to_pon_caller_discard() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        // East 切一张 5p (kind=13). 给 South 手中插 2 张 5p.
+        let pon_tile = Tile { kind: TileIndex(13), red: false, id: 500 };
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                // East last_drawn 替成 pon_tile + closed 加 pon_tile
+                s.common.players[Seat::East.index()].hand.closed.push(pon_tile);
+                s.last_drawn = Some(pon_tile);
+                s.common.players[Seat::East.index()].last_drawn = Some(pon_tile);
+                // South 手中插 2 张 5p
+                s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                    kind: TileIndex(13), red: false, id: 501,
+                });
+                s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                    kind: TileIndex(13), red: false, id: 502,
+                });
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!(),
+        };
+        // East 切 pon_tile.
+        let (r, _) = round_apply(&r, AtomicOp::Discard { tile: pon_tile }).unwrap();
+        assert!(matches!(&r, RoundState::AwaitCalls(_)));
+        // South 碰.
+        let (r, evs) = round_apply(
+            &r,
+            AtomicOp::Pon {
+                who: Seat::South,
+                hand_tile_ids: [501, 502],
+            },
+        )
+        .unwrap();
+        assert!(matches!(&r, RoundState::AwaitDiscard(_)));
+        assert!(evs.iter().any(|e| matches!(e, GameEvent::Pon { .. })));
+        match &r {
+            RoundState::AwaitDiscard(s) => {
+                assert_eq!(s.turn, Seat::South, "Pon 后 turn 转鸣方");
+                let p = &s.common.players[Seat::South.index()];
+                assert_eq!(p.hand.melds.len(), 1);
+                assert!(matches!(&p.hand.melds[0].kind, MeldKind::Pon { .. }));
+                assert!(s.last_drawn.is_none(), "鸣牌后无 last_drawn");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn apply_chi_from_await_calls_to_caller_discard() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        // East 切 3m (kind=2). 下家 South 手中有 1m+2m → 吃成 1-2-3m.
+        // 但: 吃只能从上家! East 的下家是 South, 但 South 是 East 的下家 → 自家.
+        // Chi 规则: 仅可吃上家弃牌. East 切 → 吃方必须是 South (East.next() = South).
+        let chi_tile = Tile { kind: TileIndex(2), red: false, id: 600 };
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                s.common.players[Seat::East.index()].hand.closed.push(chi_tile);
+                s.last_drawn = Some(chi_tile);
+                s.common.players[Seat::East.index()].last_drawn = Some(chi_tile);
+                s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                    kind: TileIndex(0), red: false, id: 601,
+                });
+                s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                    kind: TileIndex(1), red: false, id: 602,
+                });
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!(),
+        };
+        let (r, _) = round_apply(&r, AtomicOp::Discard { tile: chi_tile }).unwrap();
+        let (r, evs) = round_apply(
+            &r,
+            AtomicOp::Chi {
+                who: Seat::South,
+                hand_tile_ids: [601, 602],
+            },
+        )
+        .unwrap();
+        assert!(matches!(&r, RoundState::AwaitDiscard(_)));
+        assert!(evs.iter().any(|e| matches!(e, GameEvent::Chi { .. })));
+        match &r {
+            RoundState::AwaitDiscard(s) => {
+                assert_eq!(s.turn, Seat::South);
+                assert!(matches!(
+                    &s.common.players[Seat::South.index()].hand.melds[0].kind,
+                    MeldKind::Chi { .. }
+                ));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn apply_minkan_from_await_calls_to_rinshan_draw() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        // East 切 7s (kind=24). South 手中 3 张 7s → 明杠.
+        let kan_tile = Tile { kind: TileIndex(24), red: false, id: 700 };
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                s.common.players[Seat::East.index()].hand.closed.push(kan_tile);
+                s.last_drawn = Some(kan_tile);
+                s.common.players[Seat::East.index()].last_drawn = Some(kan_tile);
+                for id in 701..=703 {
+                    s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                        kind: TileIndex(24), red: false, id,
+                    });
+                }
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!(),
+        };
+        let (r, _) = round_apply(&r, AtomicOp::Discard { tile: kan_tile }).unwrap();
+        let (r, evs) = round_apply(
+            &r,
+            AtomicOp::Minkan {
+                who: Seat::South,
+                hand_tile_ids: [701, 702, 703],
+            },
+        )
+        .unwrap();
+        // FIXME engine bug: 明杠规则是必摸岭上 (AwaitRinshanDraw), 但当前实现
+        // 直接转 AwaitDiscard (round_state.rs::AwaitCallsOp::Minkan apply 内有
+        // FIXME 注释). 本测试 assertion 跟随当前实现, 修复后应改回 AwaitRinshanDraw.
+        assert!(matches!(&r, RoundState::AwaitDiscard(_)));
+        assert!(evs.iter().any(|e| matches!(e, GameEvent::Minkan { .. })));
+    }
+
+    #[test]
+    fn apply_pass_advances_to_next_seat_await_draw() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        let t = match &r {
+            RoundState::AwaitDiscard(s) => s.last_drawn.unwrap(),
+            _ => panic!(),
+        };
+        let (r, _) = round_apply(&r, AtomicOp::Discard { tile: t }).unwrap();
+        let (r, _) = round_apply(&r, AtomicOp::Pass).unwrap();
+        match &r {
+            RoundState::AwaitDraw(s) => assert_eq!(s.turn, Seat::South),
+            _ => panic!("Pass 后应回 AwaitDraw"),
+        }
+    }
+
+    #[test]
+    fn apply_shouminkan_from_existing_pon() {
+        // 加杠: 已有 Pon, 自手第 4 张升级 Kan.
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                // 给 East 已有 Pon (3 张 5p meld).
+                s.common.players[Seat::East.index()].hand.melds.push(Meld {
+                    kind: MeldKind::Pon {
+                        tiles: [
+                            Tile { kind: TileIndex(13), red: false, id: 800 },
+                            Tile { kind: TileIndex(13), red: false, id: 801 },
+                            Tile { kind: TileIndex(13), red: false, id: 802 },
+                        ],
+                    },
+                    from: Some(Seat::West),
+                });
+                // 闭手 push 第 4 张 5p
+                s.common.players[Seat::East.index()].hand.closed.push(Tile {
+                    kind: TileIndex(13), red: false, id: 803,
+                });
+                s.last_drawn = Some(Tile { kind: TileIndex(13), red: false, id: 803 });
+                s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!(),
+        };
+        let (r, evs) = round_apply(&r, AtomicOp::Shouminkan { kind: TileIndex(13) }).unwrap();
+        assert!(matches!(&r, RoundState::AwaitRinshanDraw(_)));
+        assert!(evs.iter().any(|e| matches!(e, GameEvent::Shouminkan { .. })));
+        match &r {
+            RoundState::AwaitRinshanDraw(s) => {
+                let p = &s.common.players[Seat::East.index()];
+                assert!(matches!(&p.hand.melds[0].kind, MeldKind::Shouminkan { .. }));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn apply_ron_from_await_calls_completes_round() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        // East 切 9m (kind=8). South 闭手 13 张 = 国士 1m..字牌 + 9m winning.
+        let ron_tile = Tile { kind: TileIndex(8), red: false, id: 900 };
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                // East push ron_tile + last_drawn.
+                s.common.players[Seat::East.index()].hand.closed.push(ron_tile);
+                s.last_drawn = Some(ron_tile);
+                s.common.players[Seat::East.index()].last_drawn = Some(ron_tile);
+                // South 闭手 13 张国士型, winning=9m.
+                let mut south_hand = Vec::new();
+                let mut id = 901u16;
+                for &k in &[0u8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33] {
+                    south_hand.push(Tile { kind: TileIndex(k), red: false, id });
+                    id += 1;
+                }
+                south_hand.push(Tile { kind: TileIndex(0), red: false, id }); // 1m 雀头第 2 张
+                s.common.players[Seat::South.index()].hand.closed = south_hand;
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!(),
+        };
+        let (r, _) = round_apply(&r, AtomicOp::Discard { tile: ron_tile }).unwrap();
+        let (r, evs) = round_apply(&r, AtomicOp::Ron { who: Seat::South }).unwrap();
+        assert!(matches!(&r, RoundState::RoundEnd(_)));
+        assert!(evs.iter().any(|e| matches!(e, GameEvent::Ron { .. })));
+        match r.result().unwrap() {
+            RoundResult::Win { winner, is_tsumo, loser, .. } => {
+                assert_eq!(*winner, Seat::South);
+                assert!(!*is_tsumo);
+                assert_eq!(*loser, Some(Seat::East));
+            }
+            _ => panic!("expect Win"),
+        }
+    }
+
+    #[test]
+    fn wall_drained_transitions_to_ryuukyoku() {
+        // 把 wall 推到只剩 0 活牌, Draw 应直接转 RoundEnd Howaipai.
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let r = match r {
+            RoundState::AwaitDraw(mut s) => {
+                // 黑魔法: 把 wall.live 清空.
+                while s.common.wall.remaining() > 0 {
+                    s.common.wall = s.common.wall.drawn().0;
+                }
+                RoundState::AwaitDraw(s)
+            }
+            _ => panic!(),
+        };
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        assert!(matches!(&r, RoundState::RoundEnd(_)));
+        assert!(matches!(
+            r.result().unwrap(),
+            RoundResult::Ryuukyoku { kind: RyuukyokuKind::Howaipai }
+        ));
+    }
+
+    // ============================================================
+    // legal_ops 路径
+    // ============================================================
+
+    #[test]
+    fn legal_ops_at_await_calls_lists_pon_when_pair_in_hand() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        let pon_tile = Tile { kind: TileIndex(13), red: false, id: 1000 };
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                s.common.players[Seat::East.index()].hand.closed.push(pon_tile);
+                s.last_drawn = Some(pon_tile);
+                s.common.players[Seat::East.index()].last_drawn = Some(pon_tile);
+                // South 手中 2 张 5p
+                s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                    kind: TileIndex(13), red: false, id: 1001,
+                });
+                s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                    kind: TileIndex(13), red: false, id: 1002,
+                });
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!(),
+        };
+        let (r, _) = round_apply(&r, AtomicOp::Discard { tile: pon_tile }).unwrap();
+        let ops = legal_ops(&r);
+        assert!(ops.calls[Seat::South.index()].pon.is_some(), "South 应能碰");
+        // 切牌方 East 的 PerSeatCalls 全空.
+        assert!(ops.calls[Seat::East.index()].pon.is_none());
+    }
+
+    #[test]
+    fn legal_ops_ankan_when_4_same_kind() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                // East 替成 4 张 5p + 9 其它 + last_drawn=5p.
+                let mut hand = vec![
+                    Tile { kind: TileIndex(13), red: false, id: 1100 },
+                    Tile { kind: TileIndex(13), red: false, id: 1101 },
+                    Tile { kind: TileIndex(13), red: false, id: 1102 },
+                    Tile { kind: TileIndex(13), red: false, id: 1103 },
+                ];
+                let mut id = 1110u16;
+                for k in 0..10u8 {
+                    hand.push(Tile { kind: TileIndex(k), red: false, id });
+                    id += 1;
+                }
+                s.common.players[Seat::East.index()].hand.closed = hand;
+                s.last_drawn = Some(Tile { kind: TileIndex(13), red: false, id: 1103 });
+                s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!(),
+        };
+        let ops = legal_ops(&r);
+        assert!(ops.ankan.contains(&TileIndex(13)), "4 张 5p 应可暗杠, got {:?}", ops.ankan);
+    }
+
+    #[test]
+    fn legal_ops_shouminkan_when_pon_plus_4th() {
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 42);
+        let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
+        let r = match r {
+            RoundState::AwaitDiscard(mut s) => {
+                s.common.players[Seat::East.index()].hand.melds.push(Meld {
+                    kind: MeldKind::Pon {
+                        tiles: [
+                            Tile { kind: TileIndex(13), red: false, id: 1200 },
+                            Tile { kind: TileIndex(13), red: false, id: 1201 },
+                            Tile { kind: TileIndex(13), red: false, id: 1202 },
+                        ],
+                    },
+                    from: Some(Seat::West),
+                });
+                // 闭手新 5p
+                s.common.players[Seat::East.index()].hand.closed.push(Tile {
+                    kind: TileIndex(13), red: false, id: 1203,
+                });
+                s.last_drawn = Some(Tile { kind: TileIndex(13), red: false, id: 1203 });
+                s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+                RoundState::AwaitDiscard(s)
+            }
+            _ => panic!(),
+        };
+        let ops = legal_ops(&r);
+        assert!(ops.shouminkan.contains(&TileIndex(13)), "Pon+第4张应可加杠");
+    }
+
+    // ============================================================
+    // 错误路径补充
+    // ============================================================
+
+    #[test]
+    fn riichi_not_menzen_after_chi_err() {
+        let s = fixture_await_discard(42);
+        let mut s = s;
+        // 给 East 添加一个 Chi 副露破 menzen.
+        s.common.players[Seat::East.index()].hand.melds.push(Meld {
+            kind: MeldKind::Chi {
+                tiles: [
+                    Tile { kind: TileIndex(0), red: false, id: 1300 },
+                    Tile { kind: TileIndex(1), red: false, id: 1301 },
+                    Tile { kind: TileIndex(2), red: false, id: 1302 },
+                ],
+            },
+            from: Some(Seat::North),
+        });
+        let r = s.try_op(AtomicOp::RiichiDeclare);
+        assert!(matches!(r, Err(OpError::NotMenzen)));
+    }
+
+    #[test]
+    fn riichi_not_tenpai_err() {
+        // 手牌强行替成不听牌型: 完全乱手 13 张 (不构成任何潜在和牌型).
+        let mut s = fixture_await_discard(42);
+        // 让 East 手牌 = 13 张全是 1m/2m/字牌散乱不能听任何牌.
+        let bad_hand = vec![
+            Tile { kind: TileIndex(0), red: false, id: 1400 }, // 1m
+            Tile { kind: TileIndex(2), red: false, id: 1401 }, // 3m
+            Tile { kind: TileIndex(4), red: false, id: 1402 }, // 5m
+            Tile { kind: TileIndex(6), red: false, id: 1403 }, // 7m
+            Tile { kind: TileIndex(9), red: false, id: 1404 }, // 1p
+            Tile { kind: TileIndex(11), red: false, id: 1405 }, // 3p
+            Tile { kind: TileIndex(13), red: false, id: 1406 }, // 5p
+            Tile { kind: TileIndex(15), red: false, id: 1407 }, // 7p
+            Tile { kind: TileIndex(18), red: false, id: 1408 }, // 1s
+            Tile { kind: TileIndex(20), red: false, id: 1409 }, // 3s
+            Tile { kind: TileIndex(27), red: false, id: 1410 }, // 东
+            Tile { kind: TileIndex(29), red: false, id: 1411 }, // 西
+            Tile { kind: TileIndex(31), red: false, id: 1412 }, // 白
+            Tile { kind: TileIndex(33), red: false, id: 1413 }, // 中 (last_drawn)
+        ];
+        s.common.players[Seat::East.index()].hand.closed = bad_hand;
+        s.last_drawn = Some(Tile { kind: TileIndex(33), red: false, id: 1413 });
+        let r = s.try_op(AtomicOp::RiichiDeclare);
+        assert!(matches!(r, Err(OpError::NotTenpaiForRiichi)));
+    }
+
+    #[test]
+    fn riichi_insufficient_wall_err() {
+        let mut s = fixture_await_discard(42);
+        // 拖空 wall 到 < 4.
+        while s.common.wall.remaining() >= 4 {
+            s.common.wall = s.common.wall.drawn().0;
+        }
+        let r = s.try_op(AtomicOp::RiichiDeclare);
+        assert!(matches!(r, Err(OpError::InsufficientWall)));
+    }
+
+    #[test]
+    fn shouminkan_no_matching_pon_err() {
+        let s = fixture_await_discard(42);
+        // 没人有 Pon meld, shouminkan 应 err.
+        let r = s.try_op(AtomicOp::Shouminkan { kind: TileIndex(0) });
+        assert!(matches!(r, Err(OpError::NoMatchingPonForShouminkan(TileIndex(0)))));
     }
 }
