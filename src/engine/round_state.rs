@@ -158,7 +158,7 @@ pub enum RyuukyokuKind {
 }
 
 /// 手牌排序 helper.
-fn sort_hand(tiles: &mut Vec<Tile>) {
+fn sort_hand(tiles: &mut [Tile]) {
     tiles.sort_by_key(|t| (t.kind.0, !t.red));
 }
 

@@ -288,7 +288,7 @@ impl GameScreenState {
                 // 流局/和牌都等用户按 N 主动推进 (next_round).
             }
             Phase::GameEnd => {
-                let rankings = final_ranking(&self.engine.players(), &self.engine.rules());
+                let rankings = final_ranking(self.engine.players(), self.engine.rules());
                 return Some(Transition::EnterGameOver { rankings });
             }
         }

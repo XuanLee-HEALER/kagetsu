@@ -290,13 +290,12 @@ impl RoomActor {
     /// (connected=false), is_seat_ai 视为 AI, advance_game 让 AI 接管.
     pub(super) fn on_reconnect_grace_timeout(&mut self, player_id: u32) {
         let mut transitioned = false;
-        if let Some(slot) = self.slots.iter_mut().find(|s| s.id == player_id) {
-            if slot.disconnected_at.is_some() && slot.sender.is_none() {
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.id == player_id)
+            && slot.disconnected_at.is_some() && slot.sender.is_none() {
                 slot.connected = false;
                 slot.disconnected_at = None;
                 transitioned = true;
             }
-        }
         if transitioned {
             self.broadcast_room_update();
             if self.state == RoomLifecycle::InGame {

@@ -727,7 +727,7 @@ mod tests {
             from: Some(Seat::East),
         }];
         let r = decompose(&hand, &melds, TileIndex(8));
-        let d = r.iter().next().expect("应有标准拆解");
+        let d = r.first().expect("应有标准拆解");
         let ctx = ctx_for(d, false, false); // 副露 → 非 menzen, ron
         // 副露无副 fu (Chi=0), 9m 雀头无加, ron 无门清+10, 子家无连风, 应是基础 20 → 兜底 30.
         assert_eq!(calculate_fu(d, &ctx, &melds), 30, "副露 ron 无加成应兜底 30");
@@ -753,7 +753,7 @@ mod tests {
             (27, 2), // 东东 雀头
         ]);
         let r = decompose(&hand, &[], TileIndex(0));
-        let d = r.iter().next().expect("应有拆解");
+        let d = r.first().expect("应有拆解");
         let cfg: &'static GameRules = Box::leak(Box::new(GameRules::default()));
         let ctx = WinContext {
             decomposition: d,
@@ -811,7 +811,7 @@ mod tests {
             from: Some(Seat::East),
         }];
         let r = decompose(&hand, &melds, TileIndex(20));
-        let d = r.iter().next().expect("应有拆解");
+        let d = r.first().expect("应有拆解");
         let ctx = ctx_for(d, false, false);
         assert!(evaluate(&ctx, &melds).is_none(), "无役应返 None");
     }
@@ -995,7 +995,7 @@ mod tests {
             (27, 2), // 东东 雀头
         ]);
         let r = decompose(&hand, &[], TileIndex(0));
-        let d = r.iter().next().unwrap();
+        let d = r.first().unwrap();
         // East seat + East round → 连风.
         let cfg: &'static GameRules = Box::leak(Box::new(GameRules::default()));
         let ctx = WinContext {
@@ -1055,7 +1055,7 @@ mod tests {
             from: None,
         }];
         let r = decompose(&closed, &melds, TileIndex(8));
-        let d = r.iter().next().expect("应有拆解");
+        let d = r.first().expect("应有拆解");
         let ctx = ctx_for(d, true, false); // 暗杠不破 menzen
         // 基础 20 + 门清 ron +10 + Ankan 1m 幺九 32 = 62 → 圆 70.
         assert_eq!(calculate_fu(d, &ctx, &melds), 70);
@@ -1088,7 +1088,7 @@ mod tests {
             from: Some(Seat::West),
         }];
         let r = decompose(&closed, &melds, TileIndex(8));
-        let d = r.iter().next().unwrap();
+        let d = r.first().unwrap();
         let ctx = ctx_for(d, false, false); // 副露 → 非 menzen
         // 基础 20 + Minkan 5p 中张 8 = 28 → 圆 30.
         assert_eq!(calculate_fu(d, &ctx, &melds), 30);
@@ -1120,7 +1120,7 @@ mod tests {
             from: Some(Seat::West),
         }];
         let r = decompose(&closed, &melds, TileIndex(8));
-        let d = r.iter().next().unwrap();
+        let d = r.first().unwrap();
         let ctx = ctx_for(d, false, false);
         // 基础 20 + Pon 1m 幺九 4 = 24 → 圆 30.
         assert_eq!(calculate_fu(d, &ctx, &melds), 30);
@@ -1222,7 +1222,7 @@ mod tests {
             from: Some(Seat::West),
         }];
         let r = decompose(&closed, &melds, TileIndex(0));
-        let d = r.iter().next().expect("应有拆解");
+        let _d = r.first().expect("应有拆解");
         // 副露 Pon (中张刻) + closed 3 刻 + 99m → 4 koutsu = toitoi 仍能成 1 番.
         // 改: 让闭手 ron 也无役 — 闭手散乱但成型. 4 顺/刻 + 雀头 + 1 副露 + 副露非役牌:
         // 副露 Pon 234m? Pon 不是顺子. 副露 Pon 中张 7m + 闭手 234p 234s 666p 88m = 9+3+2 = 14? 副露占 3.
@@ -1248,7 +1248,7 @@ mod tests {
             from: Some(Seat::West),
         }];
         let r = decompose(&closed, &melds, TileIndex(7));
-        let d = r.iter().next().expect("应有拆解");
+        let d = r.first().expect("应有拆解");
         let cfg: &'static GameRules = Box::leak(Box::new(GameRules::default()));
         let ctx = WinContext {
             decomposition: d,

@@ -5,7 +5,7 @@
 
 use tui_majo::engine::domain::meld::Seat;
 use tui_majo::engine::domain::tile::Tile;
-use tui_majo::legacy_state::RoundWind;
+use tui_majo::engine::round_state::RoundWind;
 
 use super::mjai_pai::parse_mjai_pai;
 use super::mjai_parser::{MjaiEvent, MjaiYaku};

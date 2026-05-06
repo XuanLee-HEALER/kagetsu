@@ -1773,7 +1773,7 @@ mod tests {
             from: Some(Seat::West),
         }];
         let r = decompose(&closed, &melds, TileIndex(1));
-        let d = r.iter().next().expect("应有拆解");
+        let d = r.first().expect("应有拆解");
         let ctx = std_ctx(d, false, false, false, false); // 副露 → 非 menzen
         let yakus = detect_yaku(&ctx, &melds);
         assert!(
@@ -1837,7 +1837,7 @@ mod tests {
         };
         let melds = vec![mk_kan(13, 0), mk_kan(22, 10), mk_kan(0, 20)];
         let r = decompose(&closed, &melds, TileIndex(1));
-        let d = r.iter().next().expect("应有拆解");
+        let d = r.first().expect("应有拆解");
         let ctx = std_ctx(d, false, false, false, false);
         let yakus = detect_yaku(&ctx, &melds);
         assert!(
