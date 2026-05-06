@@ -238,11 +238,23 @@ fn launch_iterm2(game: &Path) -> Result<bool> {
 //   会触发 -10000 errAEEventNotHandled.
 // - create window with default profile 返回 window 类型, 但变量要在 tell
 //   application 块内立即用; 保险起见我们用 current window 引用最稳.
+//
+// 窗口位置: 放到屏幕左上象限的中点 (W/4, H/4). 屏幕尺寸通过 Finder 的
+// `bounds of window of desktop` 拿 (主屏可用区, 不含 menubar/dock).
 #[cfg(target_os = "macos")]
-const ITERM_SCRIPT_TEMPLATE: &str = r#"tell application "iTerm"
+const ITERM_SCRIPT_TEMPLATE: &str = r#"tell application "Finder"
+    set screenBounds to bounds of window of desktop
+end tell
+set screenL to item 1 of screenBounds
+set screenT to item 2 of screenBounds
+set screenW to (item 3 of screenBounds) - screenL
+set screenH to (item 4 of screenBounds) - screenT
+set targetX to screenL + (screenW div 4)
+set targetY to screenT + (screenH div 4)
+tell application "iTerm"
     activate
     set newWindow to (create window with default profile)
-    set diag to "newWindow class=" & ((class of newWindow) as string)
+    set diag to "screen=" & screenW & "x" & screenH & "; target=(" & targetX & "," & targetY & "); newWindow class=" & ((class of newWindow) as string)
     tell current session of newWindow
         set columns to __COLS__
         set rows to __ROWS__
@@ -253,8 +265,8 @@ const ITERM_SCRIPT_TEMPLATE: &str = r#"tell application "iTerm"
         set b to bounds of current window
         set winW to (item 3 of b) - (item 1 of b)
         set winH to (item 4 of b) - (item 2 of b)
-        set diag to diag & "; before bounds={" & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & "} (w=" & winW & ",h=" & winH & ")"
-        set bounds of current window to {0, 0, winW, winH}
+        set diag to diag & "; winSize=" & winW & "x" & winH
+        set bounds of current window to {targetX, targetY, targetX + winW, targetY + winH}
         set b2 to bounds of current window
         set diag to diag & "; after bounds={" & (item 1 of b2) & "," & (item 2 of b2) & "," & (item 3 of b2) & "," & (item 4 of b2) & "}"
     on error errMsg number errNum
@@ -280,18 +292,28 @@ fn launch_terminal_app(game: &Path) -> Result<bool> {
     run_osascript(&script, "Terminal.app")
 }
 
+// Terminal.app: 同样放到屏幕左上象限中点.
 #[cfg(target_os = "macos")]
-const TERMINAL_APP_SCRIPT_TEMPLATE: &str = r#"tell application "Terminal"
+const TERMINAL_APP_SCRIPT_TEMPLATE: &str = r#"tell application "Finder"
+    set screenBounds to bounds of window of desktop
+end tell
+set screenL to item 1 of screenBounds
+set screenT to item 2 of screenBounds
+set screenW to (item 3 of screenBounds) - screenL
+set screenH to (item 4 of screenBounds) - screenT
+set targetX to screenL + (screenW div 4)
+set targetY to screenT + (screenH div 4)
+tell application "Terminal"
     activate
     do script "__PATH__"
     set custom title of front window to "__TITLE__"
-    set diag to "front window class=" & ((class of front window) as string)
+    set diag to "screen=" & screenW & "x" & screenH & "; target=(" & targetX & "," & targetY & "); front window class=" & ((class of front window) as string)
     try
         set b to bounds of front window
         set winW to (item 3 of b) - (item 1 of b)
         set winH to (item 4 of b) - (item 2 of b)
-        set diag to diag & "; before bounds={" & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & "} (w=" & winW & ",h=" & winH & ")"
-        set bounds of front window to {0, 0, winW, winH}
+        set diag to diag & "; winSize=" & winW & "x" & winH
+        set bounds of front window to {targetX, targetY, targetX + winW, targetY + winH}
         set b2 to bounds of front window
         set diag to diag & "; after bounds={" & (item 1 of b2) & "," & (item 2 of b2) & "," & (item 3 of b2) & "," & (item 4 of b2) & "}"
     on error errMsg number errNum
