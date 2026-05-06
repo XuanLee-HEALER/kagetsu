@@ -218,12 +218,13 @@ fn launch_iterm2(game: &Path) -> Result<bool> {
     let escaped = applescript_escape(&cmd);
     // try chain: 优先 newWindow 引用, 失败 fallback 到 front window. 某些
     // iTerm2 版本里 create window 返回的不是 window object, set position
-    // 会触发 -10000 errAEEventNotHandled. 用 try 包起来确保启动不被位置
-    // 设置阻塞.
+    // 会触发 -10000 errAEEventNotHandled. 用 try 包起来 + diag string 报告
+    // 实际是哪个分支生效, debug 模式下从 stdout 读到.
     let script = format!(
         r#"tell application "iTerm"
     activate
     set newWindow to (create window with default profile)
+    set diag to "newWindow class=" & ((class of newWindow) as string)
     tell current session of newWindow
         set columns to {cols}
         set rows to {rows}
@@ -232,11 +233,20 @@ fn launch_iterm2(game: &Path) -> Result<bool> {
     end tell
     try
         set position of newWindow to {{0, 0}}
-    on error
+        set diag to diag & "; via newWindow ok, pos=" & ((position of newWindow) as string)
+    on error errMsg number errNum
+        set diag to diag & "; newWindow set pos failed " & errNum & " " & errMsg
         try
             set position of front window to {{0, 0}}
+            set diag to diag & "; via front window ok, pos=" & ((position of front window) as string)
+        on error errMsg2 number errNum2
+            set diag to diag & "; front window also failed " & errNum2 & " " & errMsg2
         end try
     end try
+    try
+        set diag to diag & "; bounds=" & ((bounds of front window) as string)
+    end try
+    return diag
 end tell"#,
         cols = DEFAULT_COLS,
         rows = DEFAULT_ROWS,
@@ -261,9 +271,17 @@ fn launch_terminal_app(game: &Path) -> Result<bool> {
     activate
     do script "{path}"
     set custom title of front window to "{title}"
+    set diag to "front window class=" & ((class of front window) as string)
     try
         set position of front window to {{0, 0}}
+        set diag to diag & "; set pos ok, now=" & ((position of front window) as string)
+    on error errMsg number errNum
+        set diag to diag & "; set pos failed " & errNum & " " & errMsg
     end try
+    try
+        set diag to diag & "; bounds=" & ((bounds of front window) as string)
+    end try
+    return diag
 end tell"#,
         path = escaped,
         title = APP_TITLE,
@@ -297,6 +315,10 @@ fn run_osascript(script: &str, label: &str) -> Result<bool> {
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.trim().is_empty() {
             eprintln!("[launcher/{}] stdout: {}", label, stdout.trim());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            eprintln!("[launcher/{}] stderr (status 0): {}", label, stderr.trim());
         }
     }
     Ok(true)
