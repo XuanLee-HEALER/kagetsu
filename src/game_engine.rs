@@ -377,6 +377,8 @@ pub struct SelfOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::domain::meld::{Meld, MeldKind};
+    use crate::engine::round_state::RoundState;
     use crate::engine::rules::LengthRule;
 
     #[test]
@@ -464,5 +466,262 @@ mod tests {
         }
         let total: i32 = e.mat.scores.iter().sum();
         assert_eq!(total, 100_000, "tonpuusen 整庄分数守恒");
+    }
+
+    // ===== accessor 全覆盖 =====
+
+    #[test]
+    fn accessors_return_consistent_with_match_state() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(0xc0ffee);
+        assert_eq!(e.round_wind(), crate::engine::round_state::RoundWind::East);
+        assert_eq!(e.kyoku(), 1);
+        assert_eq!(e.honba(), 0);
+        assert_eq!(e.riichi_sticks(), 0);
+        assert_eq!(e.dealer(), Seat::East);
+        assert_eq!(e.rules().length, LengthRule::Hanchan);
+        assert!(e.last_discard().is_none());
+        assert_eq!(e.seat_wind_of(Seat::East), TileIndex::EAST);
+        assert_eq!(e.seat_wind_of(Seat::South), TileIndex::SOUTH);
+        assert!(e.wall_remaining() > 0);
+        assert!(!e.dora_indicators().is_empty());
+        assert!(e.wall().is_some());
+    }
+
+    // ===== phase 各路径 =====
+
+    #[test]
+    fn phase_maps_riichi_discard_to_await_discard() {
+        // RoundState::AwaitRiichiDiscard → Phase::AwaitDiscard.
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        // 黑魔法把 round 替成 AwaitRiichiDiscard.
+        let common = e.round.common().clone();
+        let last = e.round.last_drawn().unwrap();
+        e.round = RoundState::AwaitRiichiDiscard(crate::engine::round_state::AwaitRiichiDiscardState {
+            common,
+            turn: Seat::East,
+            last_drawn: last,
+        });
+        assert_eq!(e.phase(), Phase::AwaitDiscard);
+    }
+
+    #[test]
+    fn phase_maps_rinshan_draw_to_draw() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        let common = e.round.common().clone();
+        e.round = RoundState::AwaitRinshanDraw(crate::engine::round_state::AwaitRinshanDrawState {
+            common,
+            turn: Seat::East,
+        });
+        assert_eq!(e.phase(), Phase::Draw);
+    }
+
+    // ===== do_* 各方法直接覆盖 =====
+
+    #[test]
+    fn do_riichi_decreases_score_and_increments_pool() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        // 黑魔法替闭手为 14 张听牌型 (含 last_drawn).
+        if let RoundState::AwaitDiscard(s) = &mut e.round {
+            let hand = vec![
+                Tile { kind: TileIndex(1), red: false, id: 100 },
+                Tile { kind: TileIndex(2), red: false, id: 101 },
+                Tile { kind: TileIndex(3), red: false, id: 102 },
+                Tile { kind: TileIndex(10), red: false, id: 103 },
+                Tile { kind: TileIndex(11), red: false, id: 104 },
+                Tile { kind: TileIndex(12), red: false, id: 105 },
+                Tile { kind: TileIndex(19), red: false, id: 106 },
+                Tile { kind: TileIndex(20), red: false, id: 107 },
+                Tile { kind: TileIndex(21), red: false, id: 108 },
+                Tile { kind: TileIndex(22), red: false, id: 109 },
+                Tile { kind: TileIndex(23), red: false, id: 110 },
+                Tile { kind: TileIndex(24), red: false, id: 111 },
+                Tile { kind: TileIndex(8), red: false, id: 112 },
+                Tile { kind: TileIndex(8), red: false, id: 113 },
+            ];
+            s.common.players[Seat::East.index()].hand.closed = hand;
+            s.last_drawn = Some(Tile { kind: TileIndex(8), red: false, id: 113 });
+            s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+        }
+        let drawn = e.round.last_drawn().unwrap();
+        e.do_riichi(drawn).expect("立直应成功");
+        assert!(e.players()[Seat::East.index()].riichi);
+        assert_eq!(e.players()[Seat::East.index()].score, 24000);
+        // riichi_sticks_pool 在 round 的 common 内 +1; mat.pool 等 next_round 回写.
+        assert_eq!(e.round.common().riichi_sticks_pool, 1);
+    }
+
+    #[test]
+    fn do_ankan_creates_meld_and_advances_to_rinshan() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        // 替闭手为 4 张 1m + 9 其它 + last_drawn = 1m.
+        if let RoundState::AwaitDiscard(s) = &mut e.round {
+            let mut hand = vec![
+                Tile { kind: TileIndex(0), red: false, id: 200 },
+                Tile { kind: TileIndex(0), red: false, id: 201 },
+                Tile { kind: TileIndex(0), red: false, id: 202 },
+                Tile { kind: TileIndex(0), red: false, id: 203 },
+            ];
+            for k in 1..=10u8 {
+                hand.push(Tile { kind: TileIndex(k), red: false, id: 210 + k as u16 });
+            }
+            s.common.players[Seat::East.index()].hand.closed = hand;
+            s.last_drawn = Some(Tile { kind: TileIndex(0), red: false, id: 203 });
+            s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+        }
+        e.do_ankan(TileIndex(0)).expect("暗杠应成功");
+        // do_ankan 内部走 auto_rinshan_if_needed → RinshanDraw apply → 转 AwaitDiscard.
+        assert_eq!(e.phase(), Phase::AwaitDiscard);
+        assert_eq!(e.players()[Seat::East.index()].hand.melds.len(), 1);
+    }
+
+    #[test]
+    fn do_pon_chi_minkan_from_await_calls() {
+        // 测试 do_pon / do_chi / do_minkan 三个方法跑同一份 fixture: 切牌后 South 鸣.
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        let pon_tile = Tile { kind: TileIndex(13), red: false, id: 300 };
+        if let RoundState::AwaitDiscard(s) = &mut e.round {
+            s.common.players[Seat::East.index()].hand.closed.push(pon_tile);
+            s.last_drawn = Some(pon_tile);
+            s.common.players[Seat::East.index()].last_drawn = Some(pon_tile);
+            // South 手中插 2 张 5p 备 Pon.
+            s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                kind: TileIndex(13), red: false, id: 301,
+            });
+            s.common.players[Seat::South.index()].hand.closed.push(Tile {
+                kind: TileIndex(13), red: false, id: 302,
+            });
+        }
+        e.do_discard(pon_tile).expect("切 5p");
+        assert_eq!(e.phase(), Phase::AwaitCalls);
+        // 测 legal_calls.
+        let opts = e.legal_calls(Seat::South);
+        assert!(opts.pon.is_some());
+        // do_pon.
+        e.do_pon(
+            Seat::South,
+            [
+                Tile { kind: TileIndex(13), red: false, id: 301 },
+                Tile { kind: TileIndex(13), red: false, id: 302 },
+            ],
+        )
+        .expect("do_pon 应成功");
+        assert_eq!(e.turn(), Seat::South);
+        assert_eq!(e.phase(), Phase::AwaitDiscard);
+    }
+
+    #[test]
+    fn do_shouminkan_upgrades_existing_pon() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        if let RoundState::AwaitDiscard(s) = &mut e.round {
+            s.common.players[Seat::East.index()].hand.melds.push(Meld {
+                kind: MeldKind::Pon {
+                    tiles: [
+                        Tile { kind: TileIndex(13), red: false, id: 400 },
+                        Tile { kind: TileIndex(13), red: false, id: 401 },
+                        Tile { kind: TileIndex(13), red: false, id: 402 },
+                    ],
+                },
+                from: Some(Seat::West),
+            });
+            s.common.players[Seat::East.index()].hand.closed.push(Tile {
+                kind: TileIndex(13), red: false, id: 403,
+            });
+            s.last_drawn = Some(Tile { kind: TileIndex(13), red: false, id: 403 });
+            s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+        }
+        e.do_shouminkan(TileIndex(13)).expect("加杠应成功");
+        // do_shouminkan → auto_rinshan → AwaitDiscard.
+        assert_eq!(e.phase(), Phase::AwaitDiscard);
+    }
+
+    // ===== try_*/declare_*/can_* 系列 =====
+
+    #[test]
+    fn try_tsumo_and_can_tsumo_and_declare() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        // 把 East 替成国士单役满型, winning=1m.
+        if let RoundState::AwaitDiscard(s) = &mut e.round {
+            let mut hand = Vec::new();
+            let mut id = 500u16;
+            for &k in &[0u8, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33] {
+                hand.push(Tile { kind: TileIndex(k), red: false, id });
+                id += 1;
+            }
+            hand.push(Tile { kind: TileIndex(0), red: false, id });
+            s.common.players[Seat::East.index()].hand.closed = hand;
+            s.last_drawn = Some(Tile { kind: TileIndex(0), red: false, id });
+            s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+        }
+        assert!(e.can_tsumo());
+        let score = e.try_tsumo().expect("应能算 score");
+        e.declare_tsumo(score);
+        assert!(matches!(e.round, RoundState::RoundEnd(_)));
+    }
+
+    #[test]
+    fn try_ron_can_ron_and_declare_ron() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        let ron_tile = Tile { kind: TileIndex(8), red: false, id: 700 };
+        if let RoundState::AwaitDiscard(s) = &mut e.round {
+            s.common.players[Seat::East.index()].hand.closed.push(ron_tile);
+            s.last_drawn = Some(ron_tile);
+            s.common.players[Seat::East.index()].last_drawn = Some(ron_tile);
+            // South 闭手 13 张国士型, ron 9m.
+            let mut south_hand = Vec::new();
+            let mut id = 701u16;
+            for &k in &[0u8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33] {
+                south_hand.push(Tile { kind: TileIndex(k), red: false, id });
+                id += 1;
+            }
+            south_hand.push(Tile { kind: TileIndex(0), red: false, id }); // 1m 雀头
+            s.common.players[Seat::South.index()].hand.closed = south_hand;
+        }
+        e.do_discard(ron_tile).expect("切 9m");
+        assert!(e.can_ron(Seat::South));
+        let score = e.try_ron(Seat::South).expect("应能 ron");
+        e.declare_ron(Seat::South, score);
+        assert!(matches!(e.round, RoundState::RoundEnd(_)));
+    }
+
+    // ===== Phase::GameEnd 路径 =====
+
+    #[test]
+    fn phase_returns_game_end_when_mat_ended_with_result() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(0);
+        // 黑魔法直接设 mat.ended + last_result.
+        e.mat.ended = true;
+        e.last_result = Some(crate::engine::round_state::RoundResult::Ryuukyoku {
+            kind: crate::engine::round_state::RyuukyokuKind::Howaipai,
+        });
+        assert_eq!(e.phase(), Phase::GameEnd);
+    }
+
+    // ===== legal_self_options =====
+
+    #[test]
+    fn legal_self_options_returns_structured() {
+        let mut e = GameEngine::new(GameRules::default());
+        e.start_round(42);
+        e.do_draw();
+        let opts = e.legal_self_options();
+        // 应该不 panic, riichi_discards 0..=14.
+        assert!(opts.riichi_discards.len() <= 14);
     }
 }
