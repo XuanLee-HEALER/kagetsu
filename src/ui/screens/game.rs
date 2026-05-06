@@ -394,10 +394,24 @@ impl GameScreenState {
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 if self.engine.phase() == Phase::RoundEnd {
+                    // 推 mat (kyoku/dealer/honba/riichi_sticks_pool 推进 + 检测整庄结束).
                     self.engine.next_round();
+                    // 整庄结束 → 不起新一局, advance() 下次会转 EnterGameOver.
+                    if !self.engine.mat.ended {
+                        // 起新一局: 算下一 seed + reset 局内 UI 状态.
+                        self.round_index += 1;
+                        let seed = self.game_seed ^ self.round_index;
+                        self.engine.start_round(seed);
+                        self.selected = 0;
+                        self.player_calls = None;
+                        self.calls_resolved = false;
+                        #[cfg(feature = "dev-tools")]
+                        self.maybe_start_recording();
+                    }
                     self.round_end_at = None;
                     self.message.clear();
                     self.last_step_at = Instant::now();
+                    self.clear_deadline();
                 }
             }
             // 数字 1-9 选第 N 张牌 (索引 selectable_tiles, 不含摸到的).
@@ -2291,9 +2305,13 @@ mod tests {
                 Phase::RoundEnd => {
                     app.engine.next_round();
                     rounds += 1;
-                    if rounds >= 3 {
+                    if rounds >= 3 || app.engine.mat.ended {
                         break;
                     }
+                    // 起新一局 (跟 N 键 handler 行为一致).
+                    app.round_index += 1;
+                    let seed = app.game_seed ^ app.round_index;
+                    app.engine.start_round(seed);
                 }
                 Phase::GameEnd => break,
                 _ => {
