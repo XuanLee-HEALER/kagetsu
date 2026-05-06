@@ -130,6 +130,7 @@ fn try_launch_external(game: &Path) -> Result<bool> {
 
 /// WezTerm: 命令 `wezterm start --config initial_cols=N --config initial_rows=M -- <cmd>`.
 /// 跨 mac / linux / windows.
+/// 强制覆盖 exit_behavior=Close 让游戏退出后窗口自动关 (用户全局 config 可能设了 Hold).
 fn launch_wezterm(game: &Path) -> Result<bool> {
     if !binary_in_path(wezterm_bin_name()) {
         return Ok(false);
@@ -142,6 +143,8 @@ fn launch_wezterm(game: &Path) -> Result<bool> {
             &format!("initial_cols={DEFAULT_COLS}"),
             "--config",
             &format!("initial_rows={DEFAULT_ROWS}"),
+            "--config",
+            "exit_behavior='Close'",
             "--",
             path_str,
         ])
@@ -209,7 +212,10 @@ fn launch_iterm2(game: &Path) -> Result<bool> {
         return Ok(false);
     }
     let path_str = game.to_str().context("game path utf8")?;
-    let escaped = applescript_escape(path_str);
+    // append "; exit" 让 shell 在游戏退出后主动 exit, 触发 iTerm2 默认
+    // profile "When the session ends: Close" 关闭窗口.
+    let cmd = format!("{}; exit", path_str);
+    let escaped = applescript_escape(&cmd);
     let script = format!(
         r#"tell application "iTerm"
     activate
@@ -240,7 +246,10 @@ fn launch_terminal_app(game: &Path) -> Result<bool> {
         return Ok(false);
     }
     let path_str = game.to_str().context("game path utf8")?;
-    let escaped = applescript_escape(path_str);
+    // append "; exit" 让 shell 在游戏退出后主动 exit, 触发 Terminal.app
+    // 默认 profile "When the shell exits: Close if the shell exited cleanly".
+    let cmd = format!("{}; exit", path_str);
+    let escaped = applescript_escape(&cmd);
     let script = format!(
         r#"tell application "Terminal"
     activate

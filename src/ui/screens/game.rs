@@ -868,6 +868,7 @@ impl GameScreenState {
                 self.message = format!("暗杠失败: {}", e);
             } else {
                 self.message = format!("暗杠 {}!", kind.short());
+                self.selected = 0;
                 self.last_step_at = Instant::now();
                 self.clear_deadline();
             }
@@ -878,6 +879,7 @@ impl GameScreenState {
                 self.message = format!("加杠失败: {}", e);
             } else {
                 self.message = format!("加杠 {}!", kind.short());
+                self.selected = 0;
                 self.last_step_at = Instant::now();
                 self.clear_deadline();
             }
@@ -898,6 +900,7 @@ impl GameScreenState {
             self.message = format!("碰失败: {}", e);
         } else {
             self.message = "碰!".into();
+            self.selected = 0;
             self.player_calls = None;
             self.calls_resolved = false;
             self.last_step_at = Instant::now();
@@ -940,6 +943,7 @@ impl GameScreenState {
             self.message = format!("吃失败: {}", e);
         } else {
             self.message = "吃!".into();
+            self.selected = 0;
             self.player_calls = None;
             self.calls_resolved = false;
             self.last_step_at = Instant::now();
@@ -959,6 +963,7 @@ impl GameScreenState {
             self.message = format!("明杠失败: {}", e);
         } else {
             self.message = "明杠!".into();
+            self.selected = 0;
             self.player_calls = None;
             self.calls_resolved = false;
             self.last_step_at = Instant::now();
