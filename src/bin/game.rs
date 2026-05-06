@@ -5,7 +5,8 @@
 use anyhow::Result;
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, SetSize, disable_raw_mode, enable_raw_mode,
+    EnterAlternateScreen, LeaveAlternateScreen, SetSize, SetTitle, disable_raw_mode,
+    enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -25,6 +26,8 @@ fn main() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    // 改终端 title (终端不支持时 SetTitle 是 no-op, 不会失败).
+    let _ = execute!(stdout, SetTitle("tui-majo · 终端日麻"));
     let _ = execute!(stdout, SetSize(144, 40));
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
