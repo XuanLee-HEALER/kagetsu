@@ -1218,13 +1218,14 @@ fn _api_silence_warnings(_x: HashMap<Uuid, u32>) {}
 // Tests
 // ============================================================================
 
-// stage 7 follow-up: tests 大量直接戳 GameState 内部字段 (phase/turn/players/last_discard),
-// 迁移到 GameEngine 后这些字段不再可写, 测试需要重写为 round_apply 驱动. 暂时屏蔽.
-#[cfg(all(test, feature = "net-tests"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::rules::GameRules;
     use std::time::Duration;
+    // Phase A.2: tests 重写 — 之前直戳 GameState 内部字段 (phase/turn/players/last_discard),
+    // GameEngine 时代字段不可写. 改用 round_apply / 直构造 RoundState variant 模拟场景.
+    use crate::engine::round_state::{AwaitCallsState, CommonRound, RoundState};
 
     /// 模拟一个 client 连到 RoomActor, 拿到 (player_id, token, recv_rx).
     async fn join_player(
@@ -1525,9 +1526,9 @@ mod tests {
         }
         actor.next_player_id = 5;
 
-        let mut game = GameState::new(GameRules::default());
-        game.start_round(0xC0DE_C0DE);
-        actor.game = Some(game);
+        let mut engine = GameEngine::new(GameRules::default());
+        engine.start_round(0xC0DE_C0DE);
+        actor.game = Some(engine);
         actor.state = RoomLifecycle::InGame;
         actor.game_seed = 0xC0DE_C0DE;
         actor.round_index = 1;
@@ -1535,31 +1536,47 @@ mod tests {
         (actor, receivers)
     }
 
-    /// 设置场景: turn=`who` 切了 `tile`, phase=AwaitCalls.
-    /// 还会清掉 `who` 手中的对应 tile, 加入河里.
+    /// 拿到 RoundState 内 CommonRound 的可变引用 (无视 phase, match 任意 variant).
+    fn round_common_mut(round: &mut RoundState) -> &mut CommonRound {
+        match round {
+            RoundState::AwaitDraw(s) => &mut s.common,
+            RoundState::AwaitDiscard(s) => &mut s.common,
+            RoundState::AwaitRiichiDiscard(s) => &mut s.common,
+            RoundState::AwaitRinshanDraw(s) => &mut s.common,
+            RoundState::AwaitCalls(s) => &mut s.common,
+            RoundState::RoundEnd(s) => &mut s.common,
+        }
+    }
+
+    /// 设置场景: who 切了 tile, 进 AwaitCalls.
+    /// 直接构造 AwaitCallsState 替换 engine.round, 跳过真实 round_apply 驱动.
     fn force_discard_scenario(actor: &mut RoomActor, who: Seat, tile: Tile) {
-        let game = actor.game.as_mut().unwrap();
+        let engine = actor.game.as_mut().unwrap();
+        let mut common = round_common_mut(&mut engine.round).clone();
         // 移除 who 手中一张同 kind tile (若存在)
-        if let Some(pos) = game.players[who.index()]
+        if let Some(pos) = common.players[who.index()]
             .hand
             .closed
             .iter()
             .position(|t| t.kind == tile.kind)
         {
-            game.players[who.index()].hand.closed.remove(pos);
+            common.players[who.index()].hand.closed.remove(pos);
         }
-        game.players[who.index()].river.push(tile);
-        game.last_discard = Some((who, tile));
-        game.phase = Phase::AwaitCalls;
-        game.turn = who;
+        common.players[who.index()].river.push(tile);
+        common.first_go_around = false;
+        engine.round = RoundState::AwaitCalls(AwaitCallsState {
+            common,
+            last_discard: (who, tile),
+        });
     }
 
     /// 给 `target` 手中插入 `n` 张同 kind tile (id 不冲突).
     fn give_player_tiles(actor: &mut RoomActor, target: Seat, kind: TileIndex, n: usize) {
-        let game = actor.game.as_mut().unwrap();
+        let engine = actor.game.as_mut().unwrap();
+        let common = round_common_mut(&mut engine.round);
         for i in 0..n {
             let id = 9000_u16 + (i as u16) + (target.index() as u16) * 100;
-            game.players[target.index()].hand.closed.push(Tile {
+            common.players[target.index()].hand.closed.push(Tile {
                 id,
                 kind,
                 red: false,
@@ -1575,20 +1592,20 @@ mod tests {
     fn resolve_no_pending_is_noop() {
         let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
         // 没有 pending_calls, resolve 应直接返回无副作用.
-        let phase_before = actor.game.as_ref().unwrap().phase;
-        let turn_before = actor.game.as_ref().unwrap().turn;
+        let phase_before = actor.game.as_ref().unwrap().phase();
+        let turn_before = actor.game.as_ref().unwrap().turn();
         actor.resolve_call_window();
         assert!(actor.pending_calls.is_none());
-        assert_eq!(actor.game.as_ref().unwrap().phase, phase_before);
-        assert_eq!(actor.game.as_ref().unwrap().turn, turn_before);
+        assert_eq!(actor.game.as_ref().unwrap().phase(), phase_before);
+        assert_eq!(actor.game.as_ref().unwrap().turn(), turn_before);
     }
 
     #[test]
     fn resolve_all_pass_advances_turn() {
         let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
-        let game = actor.game.as_mut().unwrap();
-        game.phase = Phase::AwaitCalls;
-        let initial_turn = game.turn;
+        force_discard_scenario(&mut actor, Seat::East, Tile { id: 50000, kind: TileIndex(0), red: false });
+        let game = actor.game.as_ref().unwrap();
+        let initial_turn = game.turn();
 
         actor.pending_calls = Some(make_pending(vec![
             (2, NetAction::Pass),
@@ -1598,11 +1615,11 @@ mod tests {
 
         assert!(actor.pending_calls.is_none());
         assert_eq!(
-            actor.game.as_ref().unwrap().turn,
+            actor.game.as_ref().unwrap().turn(),
             initial_turn.next(),
             "全 Pass 应 advance_turn"
         );
-        assert_eq!(actor.game.as_ref().unwrap().phase, Phase::Draw);
+        assert_eq!(actor.game.as_ref().unwrap().phase(), Phase::Draw);
     }
 
     #[test]
@@ -1624,10 +1641,10 @@ mod tests {
 
         assert!(actor.pending_calls.is_none());
         let game = actor.game.as_ref().unwrap();
-        assert_eq!(game.turn, Seat::South, "Pon 后 turn 转给鸣牌方");
-        assert_eq!(game.phase, Phase::AwaitDiscard, "鸣牌后 South 应切牌");
+        assert_eq!(game.turn(), Seat::South, "Pon 后 turn 转给鸣牌方");
+        assert_eq!(game.phase(), Phase::AwaitDiscard, "鸣牌后 South 应切牌");
         assert_eq!(
-            game.players[Seat::South.index()].hand.melds.len(),
+            game.players()[Seat::South.index()].hand.melds.len(),
             1,
             "South 应有 1 个副露"
         );
@@ -1661,9 +1678,9 @@ mod tests {
 
         // West Ron 不合法 → fall through 到 Pon → South Pon
         let game = actor.game.as_ref().unwrap();
-        assert_eq!(game.turn, Seat::South);
+        assert_eq!(game.turn(), Seat::South);
         assert_eq!(
-            game.players[Seat::South.index()].hand.melds.len(),
+            game.players()[Seat::South.index()].hand.melds.len(),
             1,
             "Ron 不合法时应 fall through 到 Pon"
         );
@@ -1693,14 +1710,14 @@ mod tests {
         actor.resolve_call_window();
 
         let game = actor.game.as_ref().unwrap();
-        assert_eq!(game.turn, Seat::West, "Pon 优先于 Chi, turn 应给 Pon 方");
+        assert_eq!(game.turn(), Seat::West, "Pon 优先于 Chi, turn 应给 Pon 方");
         assert_eq!(
-            game.players[Seat::West.index()].hand.melds.len(),
+            game.players()[Seat::West.index()].hand.melds.len(),
             1,
             "West 应有 Pon 副露"
         );
         assert_eq!(
-            game.players[Seat::South.index()].hand.melds.len(),
+            game.players()[Seat::South.index()].hand.melds.len(),
             0,
             "South 不应吃成"
         );
@@ -1709,9 +1726,9 @@ mod tests {
     #[test]
     fn handle_call_response_partial_does_not_resolve() {
         let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South, Seat::West]);
-        let game = actor.game.as_mut().unwrap();
-        game.phase = Phase::AwaitCalls;
-        let turn_before = game.turn;
+        force_discard_scenario(&mut actor, Seat::East, Tile { id: 50000, kind: TileIndex(0), red: false });
+        let game = actor.game.as_ref().unwrap();
+        let turn_before = game.turn();
 
         actor.pending_calls = Some({
             let mut m = HashMap::new();
@@ -1723,15 +1740,15 @@ mod tests {
         actor.handle_call_response(2, NetAction::Pass);
         // 不应 resolve
         assert!(actor.pending_calls.is_some(), "未收齐响应不应 resolve");
-        assert_eq!(actor.game.as_ref().unwrap().turn, turn_before);
+        assert_eq!(actor.game.as_ref().unwrap().turn(), turn_before);
     }
 
     #[test]
     fn handle_call_response_full_triggers_resolve() {
         let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South, Seat::West]);
-        let game = actor.game.as_mut().unwrap();
-        game.phase = Phase::AwaitCalls;
-        let turn_before = game.turn;
+        force_discard_scenario(&mut actor, Seat::East, Tile { id: 50000, kind: TileIndex(0), red: false });
+        let game = actor.game.as_ref().unwrap();
+        let turn_before = game.turn();
 
         actor.pending_calls = Some({
             let mut m = HashMap::new();
@@ -1743,14 +1760,13 @@ mod tests {
         actor.handle_call_response(3, NetAction::Pass);
         // 收齐后 resolve, 全 Pass → advance_turn
         assert!(actor.pending_calls.is_none());
-        assert_eq!(actor.game.as_ref().unwrap().turn, turn_before.next());
+        assert_eq!(actor.game.as_ref().unwrap().turn(), turn_before.next());
     }
 
     #[test]
     fn handle_call_response_unknown_player_ignored() {
         let (mut actor, _rxs) = make_actor_in_game(&[Seat::East, Seat::South]);
-        let game = actor.game.as_mut().unwrap();
-        game.phase = Phase::AwaitCalls;
+        force_discard_scenario(&mut actor, Seat::East, Tile { id: 50000, kind: TileIndex(0), red: false });
         actor.pending_calls = Some({
             let mut m = HashMap::new();
             m.insert(2, None);

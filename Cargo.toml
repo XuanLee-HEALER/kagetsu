@@ -21,9 +21,6 @@ exclude = [
 default = []
 # Dev tools: F5/F9 quick savestate + replay recorder. 不带就纯净 release.
 dev-tools = []
-# net 模块的集成测试 (room/session/p2p). stage 7 重构期间因 GameState→GameEngine
-# 迁移而暂时屏蔽; 重写后可去掉这道闸门.
-net-tests = []
 
 [dependencies]
 ratatui = "0.30"
