@@ -1015,7 +1015,7 @@ impl RoomActor {
         tracing::warn!("advance_game 达到 200 步上限, 中止防死循环");
     }
 
-    /// 给真人 turn 推 ActionRequired (含 thinking_time deadline).
+    /// 给真人 turn 推 ActionRequired (含 thinking_time deadline + 真实 hints).
     /// 同一 turn 重复推不要紧 (client 用最新 deadline 覆盖).
     fn send_thinking_action_required(&self, seat: Seat) {
         let Some(slot) = self.slots.iter().find(|s| s.seat == Some(seat)) else {
@@ -1024,17 +1024,30 @@ impl RoomActor {
         let Some(sender) = &slot.sender else { return };
         let secs = self.config.thinking_time_secs.unwrap_or(0);
         let deadline_ms = if secs == 0 {
-            0 // 不限时
+            0
         } else {
             chrono_now_unix_ms() + (secs as i64) * 1000
         };
-        // hints 简化: 列出主要可用动作 (UI 自己渲染按键速查).
-        let hints = vec![
-            NetAction::Discard(crate::ui::screens::game::TileSpec {
-                kind: crate::engine::domain::tile::TileIndex(0),
-            }),
-            NetAction::Tsumo,
-        ];
+        // 从 GameEngine 真实算可宣动作: 自摸 / 立直 / 暗杠 / 加杠.
+        // 切牌不在 hints 内 (UI 自己枚举手牌). hints 仅列"宣告动作"让客户端 UI 高亮按键.
+        let mut hints: Vec<NetAction> = Vec::new();
+        if let Some(engine) = self.game.as_ref() {
+            let opts = engine.legal_self_options();
+            if opts.tsumo {
+                hints.push(NetAction::Tsumo);
+            }
+            for tile in &opts.riichi_discards {
+                hints.push(NetAction::Riichi(crate::ui::screens::game::TileSpec {
+                    kind: tile.kind,
+                }));
+            }
+            for kind in &opts.ankan {
+                hints.push(NetAction::Ankan(*kind));
+            }
+            for kind in &opts.shouminkan {
+                hints.push(NetAction::Shouminkan(*kind));
+            }
+        }
         let _ = sender.send(ServerMsg::ActionRequired {
             hints,
             deadline_unix_ms: deadline_ms,
