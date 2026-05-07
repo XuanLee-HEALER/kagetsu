@@ -12,7 +12,7 @@ pub fn default_action_on_timeout(state: &RoundState) -> Action {
     match state {
         RoundState::AwaitDiscard(s) => {
             let me = s.turn;
-            if let Some(t) = s.last_drawn {
+            if let Some(t) = s.last_drawn() {
                 return Action::Discard(t);
             }
             if let Some(&t) = s.common.players[me.index()].hand.closed.last() {

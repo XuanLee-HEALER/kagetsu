@@ -224,21 +224,45 @@ pub struct CommonRound {
     pub first_go_around: bool,
 }
 
-/// **AwaitDiscard** — 当前家已摸牌, 等切牌 / 立直 / 自摸 / 杠决策.
+/// **AwaitDiscard** — 当前家已摸牌或鸣牌后, 等切牌 / 立直 / 自摸 / 杠决策.
 ///
-/// 进入路径 (二选一):
-/// - [`AtomicOp::Draw`] / [`AtomicOp::RinshanDraw`] 后 → `last_drawn = Some(刚摸的牌)`
-/// - [`AtomicOp::Pon`] / [`AtomicOp::Chi`] / [`AtomicOp::Minkan`] 后 → `last_drawn = None` (鸣牌不摸新牌)
+/// 进入此 state 有两种来源, 由 [`origin`](Self::origin) 字段显式区分:
+/// - 摸牌后 (`Draw` / `RinshanDraw`): [`AwaitDiscardOrigin::AfterDraw`], 持新摸的 [`Tile`]
+/// - 鸣牌后 (`Pon` / `Chi`): [`AwaitDiscardOrigin::AfterCall`], 无新摸
 ///
-/// `Tsumo` / `RiichiDeclare` 等动作 *前提是刚摸了牌*, 因此在 try_op 里检查
-/// `last_drawn` 必须 `Some` 否则拒绝.
+/// 注: `Minkan` 后不直接进 `AwaitDiscard`, 而是先进
+/// [`AwaitRinshanDraw`](AwaitRinshanDrawState) 摸岭上, 再回 `AwaitDiscard` (此时 `AfterDraw`).
+///
+/// `Tsumo` / `RiichiDeclare` 等动作 *前提是刚摸了牌*, 用 enum origin 显式表达
+/// 让 try_op 分支自然拒绝 `AfterCall` 路径, 而不是用 `Option::is_some` runtime check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AwaitDiscardOrigin {
+    /// 摸牌后 (`Draw` / `RinshanDraw`): 刚摸了 `last_drawn` 这张. 玩家可
+    /// 切此牌 (摸切) 或切手中其它牌. Tsumo / Riichi / Ankan / Shouminkan
+    /// 在此分支可能合法 (具体看规则级 try_op 内检查).
+    AfterDraw { last_drawn: Tile },
+    /// 鸣牌后 (`Pon` / `Chi`): 鸣牌已副露, 无新摸, 玩家必须切手中已有牌之一.
+    /// Tsumo (无 last_drawn 必不和) / Riichi (鸣牌后非门清) 自动不合法.
+    AfterCall,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwaitDiscardState {
     pub common: CommonRound,
     /// 当前家 (待决策方).
     pub turn: Seat,
-    /// 刚摸到的那张. `Some` 仅在 Draw / RinshanDraw 之后, 鸣牌后 `None`.
-    pub last_drawn: Option<Tile>,
+    /// 进入此 state 的来源 — 区分摸牌后 vs 鸣牌后.
+    pub origin: AwaitDiscardOrigin,
+}
+
+impl AwaitDiscardState {
+    /// 兼容旧 API 的 helper. `AfterDraw` 返 `Some(tile)`, `AfterCall` 返 `None`.
+    pub fn last_drawn(&self) -> Option<Tile> {
+        match &self.origin {
+            AwaitDiscardOrigin::AfterDraw { last_drawn } => Some(*last_drawn),
+            AwaitDiscardOrigin::AfterCall => None,
+        }
+    }
 }
 
 /// **AwaitDraw** — 等当前家摸牌. 唯一合法 op = [`AtomicOp::Draw`].
@@ -374,7 +398,7 @@ impl RoundState {
     /// AwaitDiscard / AwaitRiichiDiscard / AwaitRinshanDraw 阶段当前家刚摸到的牌 (None 若鸣牌后或非这些阶段).
     pub fn last_drawn(&self) -> Option<Tile> {
         match self {
-            RoundState::AwaitDiscard(s) => s.last_drawn,
+            RoundState::AwaitDiscard(s) => s.last_drawn(),
             RoundState::AwaitRiichiDiscard(s) => Some(s.last_drawn),
             _ => None,
         }
@@ -407,10 +431,10 @@ impl CommonRound {
 // ============================================================
 
 /// AwaitDiscard 阶段判当前家是否可自摸. 返 ScoreResult 表示可以.
-/// 仅当 last_drawn 是 Some 时可能自摸 (鸣牌后无 last_drawn 不能自摸).
+/// 仅 origin = AfterDraw 时可能自摸 (AfterCall 鸣牌后无新摸不能自摸).
 fn try_tsumo(state: &AwaitDiscardState) -> Option<ScoreResult> {
     let p = &state.common.players[state.turn.index()];
-    let last = state.last_drawn?;
+    let last = state.last_drawn()?;
     let counts = count_by_kind(&p.hand.closed);
     let r = decompose(&counts, &p.hand.melds, last.kind);
     if r.is_empty() {
@@ -849,10 +873,10 @@ impl AwaitDiscardState {
                     return Err(OpError::TileNotInHand(tile.id));
                 }
                 if p.riichi {
-                    // 立直方在 AwaitDiscard 必然来自 Draw / RinshanDraw, last_drawn 必 Some.
-                    let last = self
-                        .last_drawn
-                        .expect("riichi player in AwaitDiscard implies recent draw");
+                    // 立直方非门清后无法保持 riichi=true, 所以 origin 必为 AfterDraw.
+                    let last = self.last_drawn().expect(
+                        "riichi player in AwaitDiscard implies AfterDraw (Pon/Chi 破门清自动否定)",
+                    );
                     if last.id != tile.id {
                         return Err(OpError::RiichiMustTsumogiri);
                     }
@@ -976,7 +1000,7 @@ impl AwaitDrawState {
                             NextAwaitDrawState::AwaitDiscard(AwaitDiscardState {
                                 common,
                                 turn: self.turn,
-                                last_drawn: Some(t),
+                                origin: AwaitDiscardOrigin::AfterDraw { last_drawn: t },
                             }),
                             events,
                         )
@@ -1032,6 +1056,9 @@ impl AwaitDiscardState {
                 )
             }
             AwaitDiscardOp::RiichiDeclare => {
+                let last_drawn = self
+                    .last_drawn()
+                    .expect("RiichiDeclare 在 AwaitDiscard 必有 last_drawn (try_op 保证)");
                 let mut common = self.common;
                 let p = &mut common.players[self.turn.index()];
                 p.riichi = true;
@@ -1043,9 +1070,6 @@ impl AwaitDiscardState {
                 // 那个 op 会 emit Discard event. 老代码用 GameEvent::Riichi 既标志宣告又
                 // 含 tile, 与新模型 2-op 拆分不符. 保留 GameEvent::Riichi 在 AwaitRiichiDiscard
                 // 切牌时一并 emit 更连贯.)
-                let last_drawn = self
-                    .last_drawn
-                    .expect("RiichiDeclare 在 AwaitDiscard 必有 last_drawn (try_op 保证)");
                 (
                     NextAwaitDiscardState::AwaitRiichiDiscard(AwaitRiichiDiscardState {
                         common,
@@ -1218,7 +1242,7 @@ impl AwaitRinshanDrawState {
                             NextAwaitRinshanDrawState::AwaitDiscard(AwaitDiscardState {
                                 common,
                                 turn: self.turn,
-                                last_drawn: Some(t),
+                                origin: AwaitDiscardOrigin::AfterDraw { last_drawn: t },
                             }),
                             events,
                         )
@@ -1385,11 +1409,7 @@ impl AwaitCallsState {
                     NextAwaitCallsState::AwaitDiscard(AwaitDiscardState {
                         common,
                         turn: who,
-                        // Pon 后没新摸的牌, last_drawn 概念不适用.
-                        // type-state 设计要求有 last_drawn — 用 called 牌作占位 (它已副露, 不会被切).
-                        // 实际 try_op 阶段会拒绝 Discard last_drawn (因为它在副露不在 closed).
-                        // FIXME: 想清楚 Pon 后的 AwaitDiscard 表达 — 当前 last_drawn 字段意义混乱.
-                        last_drawn: None, // Pon/Chi/Minkan 不摸新牌
+                        origin: AwaitDiscardOrigin::AfterCall,
                     }),
                     events,
                 )
@@ -1431,7 +1451,7 @@ impl AwaitCallsState {
                     NextAwaitCallsState::AwaitDiscard(AwaitDiscardState {
                         common,
                         turn: who,
-                        last_drawn: None, // Pon/Chi/Minkan 不摸新牌
+                        origin: AwaitDiscardOrigin::AfterCall,
                     }),
                     events,
                 )
@@ -1771,9 +1791,135 @@ mod tests {
     #[test]
     fn await_discard_try_op_discard_in_hand_ok() {
         let s = fixture_await_discard(42);
-        let some_tile = s.last_drawn.unwrap();
+        let some_tile = s.last_drawn().unwrap();
         let r = s.try_op(AtomicOp::Discard { tile: some_tile });
         assert!(matches!(r, Ok(AwaitDiscardOp::Discard { .. })));
+    }
+
+    // ─── AwaitDiscardOrigin enum 行为测试 ───
+
+    #[test]
+    fn origin_after_draw_exposes_last_drawn() {
+        let s = fixture_await_discard(42);
+        match s.origin {
+            AwaitDiscardOrigin::AfterDraw { last_drawn } => {
+                assert_eq!(s.last_drawn(), Some(last_drawn));
+            }
+            AwaitDiscardOrigin::AfterCall => panic!("Draw 后应是 AfterDraw"),
+        }
+    }
+
+    #[test]
+    fn origin_after_call_returns_none_last_drawn() {
+        let mut s = fixture_await_discard(42);
+        s.origin = AwaitDiscardOrigin::AfterCall;
+        assert!(s.last_drawn().is_none());
+    }
+
+    /// AfterCall (鸣牌后) 路径: Tsumo 必拒 (无 last_drawn 不和), Riichi 必拒 (非门清).
+    /// Discard 仍合法.
+    #[test]
+    fn origin_after_call_rejects_tsumo_and_riichi() {
+        let mut s = fixture_await_discard(42);
+        s.origin = AwaitDiscardOrigin::AfterCall;
+        // 给 East 加一个假 Pon 副露破门清 (Riichi 检查 menzen).
+        let p = &mut s.common.players[Seat::East.index()];
+        let dummy_meld_tile = Tile {
+            kind: TileIndex(0),
+            red: false,
+            id: 60000,
+        };
+        p.hand.melds.push(crate::engine::domain::meld::Meld {
+            kind: crate::engine::domain::meld::MeldKind::Pon {
+                tiles: [dummy_meld_tile, dummy_meld_tile, dummy_meld_tile],
+            },
+            from: Some(Seat::South),
+        });
+
+        // Tsumo: 无 last_drawn → try_tsumo None → NotWinning
+        let r = s.try_op(AtomicOp::Tsumo);
+        assert!(matches!(r, Err(OpError::NotWinning)));
+
+        // Riichi: 非门清 → NotMenzen
+        let r = s.try_op(AtomicOp::RiichiDeclare);
+        assert!(matches!(r, Err(OpError::NotMenzen)));
+
+        // Discard: 仍合法 (拿 East 手中第一张).
+        let any_tile = s.common.players[Seat::East.index()].hand.closed[0];
+        let r = s.try_op(AtomicOp::Discard { tile: any_tile });
+        assert!(matches!(r, Ok(AwaitDiscardOp::Discard { .. })));
+    }
+
+    /// 回归: Pon 后转 AwaitDiscard 时 origin = AfterCall (不再是 last_drawn=None 的占位).
+    #[test]
+    fn pon_transitions_into_after_call_origin() {
+        // 构造 East 切 5p, South 持 [5p,5p] Pon.
+        let m = MatchState::new(GameRules::default());
+        let r = init_round(&m, 7);
+        // 把 South 手中前两张替成 5p 5p, 把 East 手中加一张 5p, 让 East 切 5p.
+        let pon_kind = TileIndex(13); // 5p
+        let r = match r {
+            RoundState::AwaitDraw(s) => {
+                let mut common = s.common;
+                // South 替前两张
+                common.players[Seat::South.index()].hand.closed[0] = Tile {
+                    kind: pon_kind,
+                    red: false,
+                    id: 5001,
+                };
+                common.players[Seat::South.index()].hand.closed[1] = Tile {
+                    kind: pon_kind,
+                    red: false,
+                    id: 5002,
+                };
+                // East 摸到 5p (放 last_drawn 位置).
+                common.players[Seat::East.index()].hand.closed.push(Tile {
+                    kind: pon_kind,
+                    red: false,
+                    id: 5003,
+                });
+                RoundState::AwaitDiscard(AwaitDiscardState {
+                    common,
+                    turn: Seat::East,
+                    origin: AwaitDiscardOrigin::AfterDraw {
+                        last_drawn: Tile {
+                            kind: pon_kind,
+                            red: false,
+                            id: 5003,
+                        },
+                    },
+                })
+            }
+            _ => panic!(),
+        };
+        // East 切 5p
+        let (r, _) = round_apply(
+            &r,
+            AtomicOp::Discard {
+                tile: Tile {
+                    kind: pon_kind,
+                    red: false,
+                    id: 5003,
+                },
+            },
+        )
+        .unwrap();
+        // South Pon
+        let (r, _) = round_apply(
+            &r,
+            AtomicOp::Pon {
+                who: Seat::South,
+                hand_tile_ids: [5001, 5002],
+            },
+        )
+        .unwrap();
+        match r {
+            RoundState::AwaitDiscard(s) => {
+                assert!(matches!(s.origin, AwaitDiscardOrigin::AfterCall));
+                assert_eq!(s.turn, Seat::South);
+            }
+            _ => panic!("Pon 后应进 AwaitDiscard"),
+        }
     }
 
     #[test]
@@ -1849,7 +1995,7 @@ mod tests {
     #[test]
     fn await_discard_try_op_riichi_must_tsumogiri() {
         let mut s = fixture_await_discard(42);
-        let last_drawn_id = s.last_drawn.unwrap().id;
+        let last_drawn_id = s.last_drawn().unwrap().id;
         s.common.players[Seat::East.index()].riichi = true;
         // 选一张不是 last_drawn 的牌.
         let other_tile = s.common.players[Seat::East.index()]
@@ -1887,7 +2033,7 @@ mod tests {
 
         // 取一张能切的
         let some_tile = match &r {
-            RoundState::AwaitDiscard(s) => s.last_drawn.unwrap(),
+            RoundState::AwaitDiscard(s) => s.last_drawn().unwrap(),
             _ => panic!(),
         };
         let (r, evs) = round_apply(&r, AtomicOp::Discard { tile: some_tile }).unwrap();
@@ -1941,7 +2087,7 @@ mod tests {
         let ard = AwaitRiichiDiscardState {
             common: s.common.clone(),
             turn: s.turn,
-            last_drawn: s.last_drawn.unwrap(),
+            last_drawn: s.last_drawn().unwrap(),
         };
         let r = ard.try_op(AtomicOp::Tsumo);
         assert!(matches!(
@@ -2091,12 +2237,14 @@ mod tests {
                     }, // last drawn
                 ];
                 s.common.players[Seat::East.index()].hand.closed = hand;
-                s.last_drawn = Some(Tile {
-                    kind: TileIndex(8),
-                    red: false,
-                    id: 113,
-                });
-                s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+                s.origin = AwaitDiscardOrigin::AfterDraw {
+                    last_drawn: Tile {
+                        kind: TileIndex(8),
+                        red: false,
+                        id: 113,
+                    },
+                };
+                s.common.players[Seat::East.index()].last_drawn = s.last_drawn();
                 RoundState::AwaitDiscard(s)
             }
             _ => panic!("expected AwaitDiscard"),
@@ -2151,7 +2299,7 @@ mod tests {
                 };
                 hand.push(last);
                 s.common.players[Seat::East.index()].hand.closed = hand;
-                s.last_drawn = Some(last);
+                s.origin = AwaitDiscardOrigin::AfterDraw { last_drawn: last };
                 s.common.players[Seat::East.index()].last_drawn = Some(last);
                 RoundState::AwaitDiscard(s)
             }
@@ -2217,12 +2365,14 @@ mod tests {
                     id += 1;
                 }
                 s.common.players[Seat::East.index()].hand.closed = hand;
-                s.last_drawn = Some(Tile {
-                    kind: TileIndex(0),
-                    red: false,
-                    id: 303,
-                });
-                s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+                s.origin = AwaitDiscardOrigin::AfterDraw {
+                    last_drawn: Tile {
+                        kind: TileIndex(0),
+                        red: false,
+                        id: 303,
+                    },
+                };
+                s.common.players[Seat::East.index()].last_drawn = s.last_drawn();
                 RoundState::AwaitDiscard(s)
             }
             _ => panic!(),
@@ -2262,7 +2412,9 @@ mod tests {
                     .hand
                     .closed
                     .push(pon_tile);
-                s.last_drawn = Some(pon_tile);
+                s.origin = AwaitDiscardOrigin::AfterDraw {
+                    last_drawn: pon_tile,
+                };
                 s.common.players[Seat::East.index()].last_drawn = Some(pon_tile);
                 // South 手中插 2 张 5p
                 s.common.players[Seat::South.index()]
@@ -2305,7 +2457,7 @@ mod tests {
                 let p = &s.common.players[Seat::South.index()];
                 assert_eq!(p.hand.melds.len(), 1);
                 assert!(matches!(&p.hand.melds[0].kind, MeldKind::Pon { .. }));
-                assert!(s.last_drawn.is_none(), "鸣牌后无 last_drawn");
+                assert!(s.last_drawn().is_none(), "鸣牌后无 last_drawn");
             }
             _ => unreachable!(),
         }
@@ -2330,7 +2482,9 @@ mod tests {
                     .hand
                     .closed
                     .push(chi_tile);
-                s.last_drawn = Some(chi_tile);
+                s.origin = AwaitDiscardOrigin::AfterDraw {
+                    last_drawn: chi_tile,
+                };
                 s.common.players[Seat::East.index()].last_drawn = Some(chi_tile);
                 s.common.players[Seat::South.index()]
                     .hand
@@ -2392,7 +2546,9 @@ mod tests {
                     .hand
                     .closed
                     .push(kan_tile);
-                s.last_drawn = Some(kan_tile);
+                s.origin = AwaitDiscardOrigin::AfterDraw {
+                    last_drawn: kan_tile,
+                };
                 s.common.players[Seat::East.index()].last_drawn = Some(kan_tile);
                 for id in 701..=703 {
                     s.common.players[Seat::South.index()]
@@ -2431,7 +2587,7 @@ mod tests {
         let r = init_round(&m, 42);
         let (r, _) = round_apply(&r, AtomicOp::Draw).unwrap();
         let t = match &r {
-            RoundState::AwaitDiscard(s) => s.last_drawn.unwrap(),
+            RoundState::AwaitDiscard(s) => s.last_drawn().unwrap(),
             _ => panic!(),
         };
         let (r, _) = round_apply(&r, AtomicOp::Discard { tile: t }).unwrap();
@@ -2479,12 +2635,14 @@ mod tests {
                     red: false,
                     id: 803,
                 });
-                s.last_drawn = Some(Tile {
-                    kind: TileIndex(13),
-                    red: false,
-                    id: 803,
-                });
-                s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+                s.origin = AwaitDiscardOrigin::AfterDraw {
+                    last_drawn: Tile {
+                        kind: TileIndex(13),
+                        red: false,
+                        id: 803,
+                    },
+                };
+                s.common.players[Seat::East.index()].last_drawn = s.last_drawn();
                 RoundState::AwaitDiscard(s)
             }
             _ => panic!(),
@@ -2528,7 +2686,9 @@ mod tests {
                     .hand
                     .closed
                     .push(ron_tile);
-                s.last_drawn = Some(ron_tile);
+                s.origin = AwaitDiscardOrigin::AfterDraw {
+                    last_drawn: ron_tile,
+                };
                 s.common.players[Seat::East.index()].last_drawn = Some(ron_tile);
                 // South 闭手 13 张国士型, winning=9m.
                 let mut south_hand = Vec::new();
@@ -2615,7 +2775,9 @@ mod tests {
                     .hand
                     .closed
                     .push(pon_tile);
-                s.last_drawn = Some(pon_tile);
+                s.origin = AwaitDiscardOrigin::AfterDraw {
+                    last_drawn: pon_tile,
+                };
                 s.common.players[Seat::East.index()].last_drawn = Some(pon_tile);
                 // South 手中 2 张 5p
                 s.common.players[Seat::South.index()]
@@ -2685,12 +2847,14 @@ mod tests {
                     id += 1;
                 }
                 s.common.players[Seat::East.index()].hand.closed = hand;
-                s.last_drawn = Some(Tile {
-                    kind: TileIndex(13),
-                    red: false,
-                    id: 1103,
-                });
-                s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+                s.origin = AwaitDiscardOrigin::AfterDraw {
+                    last_drawn: Tile {
+                        kind: TileIndex(13),
+                        red: false,
+                        id: 1103,
+                    },
+                };
+                s.common.players[Seat::East.index()].last_drawn = s.last_drawn();
                 RoundState::AwaitDiscard(s)
             }
             _ => panic!(),
@@ -2738,12 +2902,14 @@ mod tests {
                     red: false,
                     id: 1203,
                 });
-                s.last_drawn = Some(Tile {
-                    kind: TileIndex(13),
-                    red: false,
-                    id: 1203,
-                });
-                s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+                s.origin = AwaitDiscardOrigin::AfterDraw {
+                    last_drawn: Tile {
+                        kind: TileIndex(13),
+                        red: false,
+                        id: 1203,
+                    },
+                };
+                s.common.players[Seat::East.index()].last_drawn = s.last_drawn();
                 RoundState::AwaitDiscard(s)
             }
             _ => panic!(),
@@ -2865,11 +3031,13 @@ mod tests {
             }, // 中 (last_drawn)
         ];
         s.common.players[Seat::East.index()].hand.closed = bad_hand;
-        s.last_drawn = Some(Tile {
-            kind: TileIndex(33),
-            red: false,
-            id: 1413,
-        });
+        s.origin = AwaitDiscardOrigin::AfterDraw {
+            last_drawn: Tile {
+                kind: TileIndex(33),
+                red: false,
+                id: 1413,
+            },
+        };
         let r = s.try_op(AtomicOp::RiichiDeclare);
         assert!(matches!(r, Err(OpError::NotTenpaiForRiichi)));
     }
@@ -3000,7 +3168,9 @@ mod tests {
                     .hand
                     .closed
                     .push(kan_tile);
-                s.last_drawn = Some(kan_tile);
+                s.origin = AwaitDiscardOrigin::AfterDraw {
+                    last_drawn: kan_tile,
+                };
                 s.common.players[Seat::East.index()].last_drawn = Some(kan_tile);
                 // South 手中插 3 张 5p 备明杠.
                 for id in 7001..=7003 {

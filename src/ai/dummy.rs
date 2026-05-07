@@ -21,7 +21,7 @@ pub fn ai_choose_discard(state: &RoundState) -> Action {
     }
     let me = s.turn;
     // 切刚摸到的那张 (摸什么切什么).
-    if let Some(t) = s.last_drawn {
+    if let Some(t) = s.last_drawn() {
         return Action::Discard(t);
     }
     // 鸣牌后无 last_drawn, 兜底切第一张.

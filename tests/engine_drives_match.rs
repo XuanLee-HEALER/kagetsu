@@ -34,7 +34,7 @@ fn decide(state: &RoundState) -> AtomicOp {
                 return AtomicOp::Tsumo;
             }
             // 摸切.
-            if let Some(t) = s.last_drawn {
+            if let Some(t) = s.last_drawn() {
                 return AtomicOp::Discard { tile: t };
             }
             // 鸣牌后无 last_drawn, 切第一张.

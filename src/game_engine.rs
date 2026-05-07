@@ -378,7 +378,7 @@ pub struct SelfOptions {
 mod tests {
     use super::*;
     use crate::engine::domain::meld::{Meld, MeldKind};
-    use crate::engine::round_state::RoundState;
+    use crate::engine::round_state::{AwaitDiscardOrigin, RoundState};
     use crate::engine::rules::LengthRule;
 
     #[test]
@@ -602,12 +602,14 @@ mod tests {
                 },
             ];
             s.common.players[Seat::East.index()].hand.closed = hand;
-            s.last_drawn = Some(Tile {
-                kind: TileIndex(8),
-                red: false,
-                id: 113,
-            });
-            s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+            s.origin = AwaitDiscardOrigin::AfterDraw {
+                last_drawn: Tile {
+                    kind: TileIndex(8),
+                    red: false,
+                    id: 113,
+                },
+            };
+            s.common.players[Seat::East.index()].last_drawn = s.last_drawn();
         }
         let drawn = e.round.last_drawn().unwrap();
         e.do_riichi(drawn).expect("立直应成功");
@@ -654,12 +656,14 @@ mod tests {
                 });
             }
             s.common.players[Seat::East.index()].hand.closed = hand;
-            s.last_drawn = Some(Tile {
-                kind: TileIndex(0),
-                red: false,
-                id: 203,
-            });
-            s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+            s.origin = AwaitDiscardOrigin::AfterDraw {
+                last_drawn: Tile {
+                    kind: TileIndex(0),
+                    red: false,
+                    id: 203,
+                },
+            };
+            s.common.players[Seat::East.index()].last_drawn = s.last_drawn();
         }
         e.do_ankan(TileIndex(0)).expect("暗杠应成功");
         // do_ankan 内部走 auto_rinshan_if_needed → RinshanDraw apply → 转 AwaitDiscard.
@@ -683,7 +687,9 @@ mod tests {
                 .hand
                 .closed
                 .push(pon_tile);
-            s.last_drawn = Some(pon_tile);
+            s.origin = AwaitDiscardOrigin::AfterDraw {
+                last_drawn: pon_tile,
+            };
             s.common.players[Seat::East.index()].last_drawn = Some(pon_tile);
             // South 手中插 2 张 5p 备 Pon.
             s.common.players[Seat::South.index()]
@@ -762,12 +768,14 @@ mod tests {
                 red: false,
                 id: 403,
             });
-            s.last_drawn = Some(Tile {
-                kind: TileIndex(13),
-                red: false,
-                id: 403,
-            });
-            s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+            s.origin = AwaitDiscardOrigin::AfterDraw {
+                last_drawn: Tile {
+                    kind: TileIndex(13),
+                    red: false,
+                    id: 403,
+                },
+            };
+            s.common.players[Seat::East.index()].last_drawn = s.last_drawn();
         }
         e.do_shouminkan(TileIndex(13)).expect("加杠应成功");
         // do_shouminkan → auto_rinshan → AwaitDiscard.
@@ -799,12 +807,14 @@ mod tests {
                 id,
             });
             s.common.players[Seat::East.index()].hand.closed = hand;
-            s.last_drawn = Some(Tile {
-                kind: TileIndex(0),
-                red: false,
-                id,
-            });
-            s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
+            s.origin = AwaitDiscardOrigin::AfterDraw {
+                last_drawn: Tile {
+                    kind: TileIndex(0),
+                    red: false,
+                    id,
+                },
+            };
+            s.common.players[Seat::East.index()].last_drawn = s.last_drawn();
         }
         assert!(e.can_tsumo());
         let score = e.try_tsumo().expect("应能算 score");
@@ -827,7 +837,9 @@ mod tests {
                 .hand
                 .closed
                 .push(ron_tile);
-            s.last_drawn = Some(ron_tile);
+            s.origin = AwaitDiscardOrigin::AfterDraw {
+                last_drawn: ron_tile,
+            };
             s.common.players[Seat::East.index()].last_drawn = Some(ron_tile);
             // South 闭手 13 张国士型, ron 9m.
             let mut south_hand = Vec::new();
@@ -922,7 +934,9 @@ mod tests {
                 .hand
                 .closed
                 .push(chi_tile);
-            s.last_drawn = Some(chi_tile);
+            s.origin = AwaitDiscardOrigin::AfterDraw {
+                last_drawn: chi_tile,
+            };
             s.common.players[Seat::East.index()].last_drawn = Some(chi_tile);
             // South 手中加 1m + 2m 备吃 (吃成 1-2-3m).
             s.common.players[Seat::South.index()]
@@ -981,7 +995,9 @@ mod tests {
                 .hand
                 .closed
                 .push(kan_tile);
-            s.last_drawn = Some(kan_tile);
+            s.origin = AwaitDiscardOrigin::AfterDraw {
+                last_drawn: kan_tile,
+            };
             s.common.players[Seat::East.index()].last_drawn = Some(kan_tile);
             for id in 1101..=1103 {
                 s.common.players[Seat::South.index()]
