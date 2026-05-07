@@ -92,8 +92,13 @@ impl Permutation {
 /// - π: 用过的置换, ZK 证明时需要
 /// - r: 用过的 mask 因子向量, ZK 证明时需要
 ///
-/// **ZK 证明在 M4.C.5 加上**. 当前函数本身不带证明 — 调用方传入的 in/out
-/// 一致性由后续 `prove_shuffle` (TODO) 保证.
+/// 本函数本身不带 ZK 证明, 但 (π, r) 会喂给
+/// [`crate::mental_poker::cut_and_choose::prove`] 生成 [`ShuffleProof`],
+/// verifier 通过 [`crate::mental_poker::cut_and_choose::verify`] 检查
+/// in/out 一致性 — 这套流程在 [`crate::net::mp::actor`] 和
+/// [`crate::mental_poker::session`] 已 wire, 协议层每次 shuffle 必带 proof.
+///
+/// [`ShuffleProof`]: crate::mental_poker::cut_and_choose::ShuffleProof
 pub fn shuffle_and_remask<R: Rng + ?Sized>(
     rng: &mut R,
     pk: &PublicKey,
