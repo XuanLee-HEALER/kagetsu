@@ -31,9 +31,9 @@
 //! 设计文档: `docs/design/abstract-model.md` §Layer 1
 
 use crate::engine::domain::meld::Seat;
+use crate::engine::round_state::{RoundWind, RyuukyokuKind};
 use crate::engine::rules::{GameRules, LengthRule};
 use crate::engine::score::PaymentDistribution;
-use crate::engine::round_state::{RoundWind, RyuukyokuKind};
 use serde::{Deserialize, Serialize};
 
 /// 跨局累积的庄状态.

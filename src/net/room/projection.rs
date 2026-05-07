@@ -2,13 +2,10 @@
 //!
 //! impl block 直接读 super::RoomActor 私有字段 (Rust 子 module 可访问 parent 私有).
 
+use super::*;
 use crate::engine::domain::meld::Seat;
 use crate::engine::round_state::RoundResult;
-use crate::net::protocol::{
-    GameStateView, PlayerView,
-    RoomView, RoundResultView, ServerMsg,
-};
-use super::*;
+use crate::net::protocol::{GameStateView, PlayerView, RoomView, RoundResultView, ServerMsg};
 
 impl RoomActor {
     pub(super) fn room_view(&self) -> RoomView {

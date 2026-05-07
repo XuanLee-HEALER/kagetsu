@@ -12,8 +12,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::net::p2p::{Region, RoomMode};
 use crate::net::p2p::discovery::{RoomBrowser, RoomEntry};
+use crate::net::p2p::{Region, RoomMode};
 use crate::ui::Transition;
 
 /// 大厅项目焦点.
@@ -319,9 +319,7 @@ impl OnlineLobbyState {
         {
             let (mode_label, mode_color) = match self.room_mode {
                 RoomMode::Standard => ("Standard (房主权威)", Color::Cyan),
-                RoomMode::ZeroTrust => {
-                    ("ZeroTrust (P2P mental poker, 需 4 真人)", Color::Magenta)
-                }
+                RoomMode::ZeroTrust => ("ZeroTrust (P2P mental poker, 需 4 真人)", Color::Magenta),
             };
             lines.push(Line::from(vec![
                 Span::raw("  模式: "),
@@ -329,10 +327,7 @@ impl OnlineLobbyState {
                     mode_label,
                     Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    "   ('M' 键切换)",
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled("   ('M' 键切换)", Style::default().fg(Color::DarkGray)),
             ]));
             lines.push(Line::from(""));
         }

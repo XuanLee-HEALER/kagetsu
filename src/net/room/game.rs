@@ -2,15 +2,13 @@
 //!
 //! impl block 直接读 super::RoomActor 私有字段 (Rust 子 module 可访问 parent 私有).
 
-use std::collections::HashMap;
+use super::*;
 use crate::engine::domain::meld::Seat;
 use crate::engine::domain::tile::Tile;
 use crate::engine::phase::Phase;
 use crate::engine::score::final_ranking;
-use crate::net::protocol::{
-    GameOverView, NetAction, RoomLifecycle, ServerMsg,
-};
-use super::*;
+use crate::net::protocol::{GameOverView, NetAction, RoomLifecycle, ServerMsg};
+use std::collections::HashMap;
 
 impl RoomActor {
     pub(super) fn handle_action(&mut self, player_id: u32, action: NetAction) {

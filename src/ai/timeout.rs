@@ -56,4 +56,3 @@ mod tests {
         assert!(matches!(default_action_on_timeout(&r), Action::Pass));
     }
 }
-

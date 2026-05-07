@@ -24,8 +24,8 @@ use tui_majo::engine::domain::decompose::{Decomposition, decompose};
 use tui_majo::engine::domain::meld::{Meld, MeldKind, Seat};
 use tui_majo::engine::domain::tile::{Tile, TileIndex, count_by_kind};
 use tui_majo::engine::domain::yaku::WinContext;
-use tui_majo::engine::rules::GameRules;
 use tui_majo::engine::round_state::RoundWind;
+use tui_majo::engine::rules::GameRules;
 
 use super::replay_log::{KyokuEvent, KyokuLog, KyokuResult};
 

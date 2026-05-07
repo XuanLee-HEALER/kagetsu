@@ -129,7 +129,12 @@ pub fn dispatch_swarm_command(
     cmd: SwarmCommand,
     subscribed_topics: &mut std::collections::HashSet<String>,
 ) {
-    dispatch_swarm_command_with_pending(swarm, cmd, subscribed_topics, &mut PendingBroadcasts::new())
+    dispatch_swarm_command_with_pending(
+        swarm,
+        cmd,
+        subscribed_topics,
+        &mut PendingBroadcasts::new(),
+    )
 }
 
 /// 跟 dispatch_swarm_command 一样, 但失败的 Broadcast 入 pending 队列.

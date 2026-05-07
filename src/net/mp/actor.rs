@@ -1644,7 +1644,9 @@ impl MpPlayerActor {
         // 协议消息 (state 已不一致, 继续可能引入更多错误).
         if self.phase != MpPhase::GameOver {
             self.phase = MpPhase::GameOver;
-            let _ = self.event_tx.send(MpEvent::PhaseChanged { phase: self.phase });
+            let _ = self
+                .event_tx
+                .send(MpEvent::PhaseChanged { phase: self.phase });
             let _ = self.event_tx.send(MpEvent::GameOver {
                 reason: format!("协议错误 abort: {reason}"),
             });

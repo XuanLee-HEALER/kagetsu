@@ -93,9 +93,7 @@ fn engine_drives_one_round_to_end() {
     let outcome = summarize_round(&end).expect("RoundEnd should summarize");
     // 至少不 panic, outcome 必合法.
     match outcome {
-        tui_majo::engine::match_state::RoundOutcome::Win {
-            payments, ..
-        } => {
+        tui_majo::engine::match_state::RoundOutcome::Win { payments, .. } => {
             assert!(!payments.is_empty(), "Win 必有 payments");
         }
         tui_majo::engine::match_state::RoundOutcome::Ryuukyoku { .. } => {}
@@ -119,7 +117,10 @@ fn engine_drives_full_tonpuusen_match() {
         m = match_apply(&m, outcome);
         round_seed = round_seed.wrapping_add(1);
         rounds_played += 1;
-        assert!(rounds_played < 30, "tonpuusen 不可能跑超过 30 局, 死循环了?");
+        assert!(
+            rounds_played < 30,
+            "tonpuusen 不可能跑超过 30 局, 死循环了?"
+        );
     }
 
     assert!(m.ended, "match 应已结束");

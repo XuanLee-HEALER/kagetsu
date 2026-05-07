@@ -834,9 +834,8 @@ mod tests {
 
     #[test]
     fn parse_metadata_kv_without_eq_is_skipped() {
-        let agent = format!(
-            "{AGENT_PREFIX}host_nick=Z;orphankey;players=1;lifecycle=lobby;room_id=r"
-        );
+        let agent =
+            format!("{AGENT_PREFIX}host_nick=Z;orphankey;players=1;lifecycle=lobby;room_id=r");
         let md = parse_metadata(&agent).unwrap();
         assert_eq!(md.host_nick, "Z");
     }

@@ -1644,11 +1644,7 @@ mod tests {
     fn selectable_count_with_drawn_excludes_drawn() {
         let (state, _, _) = make_state(1);
         let drawn = tile(5, 100);
-        let view = make_view(
-            Seat::East,
-            vec![tile(0, 1), tile(1, 2), drawn],
-            Some(drawn),
-        );
+        let view = make_view(Seat::East, vec![tile(0, 1), tile(1, 2), drawn], Some(drawn));
         assert_eq!(state.selectable_count(&view), 2);
     }
 
@@ -1662,11 +1658,7 @@ mod tests {
     #[test]
     fn split_hand_separates_drawn_tile() {
         let drawn = tile(5, 100);
-        let view = make_view(
-            Seat::East,
-            vec![tile(0, 1), drawn, tile(1, 2)],
-            Some(drawn),
-        );
+        let view = make_view(Seat::East, vec![tile(0, 1), drawn, tile(1, 2)], Some(drawn));
         let (sel, d) = OnlineGameState::split_hand(&view);
         assert_eq!(sel.len(), 2);
         assert!(d.is_some());
@@ -1811,11 +1803,7 @@ mod tests {
     #[test]
     fn k_key_ankan_without_4_tiles_sets_message() {
         let (mut s, mut out_rx, _) = make_state(1);
-        s.state_view = Some(make_view(
-            Seat::East,
-            vec![tile(5, 1), tile(5, 2)],
-            None,
-        ));
+        s.state_view = Some(make_view(Seat::East, vec![tile(5, 1), tile(5, 2)], None));
         s.handle_event(key('K'));
         assert!(out_rx.try_recv().is_err(), "无 4 张同 kind 不应发 Ankan");
         assert!(s.message.contains("无可暗杠"));
@@ -1966,10 +1954,12 @@ mod tests {
         let (mut s, _out_rx, in_tx) = make_state(1);
         s.current_hints = Some(vec![NetAction::Pon]);
         in_tx
-            .send(ServerMsg::RoundResult(crate::net::protocol::RoundResultView {
-                message: "流局".into(),
-                scores: [25_000, 25_000, 25_000, 25_000],
-            }))
+            .send(ServerMsg::RoundResult(
+                crate::net::protocol::RoundResultView {
+                    message: "流局".into(),
+                    scores: [25_000, 25_000, 25_000, 25_000],
+                },
+            ))
             .unwrap();
         let _ = s.advance();
         assert!(s.message.contains("局结算"));

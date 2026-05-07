@@ -31,9 +31,8 @@ pub struct RoundRecording {
 
 /// recordings 目录, 不存在时创建.
 pub fn recordings_dir() -> std::io::Result<PathBuf> {
-    let mut dir = dirs::config_dir().ok_or_else(|| {
-        std::io::Error::other("无可用配置目录 (dirs::config_dir 返回 None)")
-    })?;
+    let mut dir = dirs::config_dir()
+        .ok_or_else(|| std::io::Error::other("无可用配置目录 (dirs::config_dir 返回 None)"))?;
     dir.push("tui-majo");
     dir.push("recordings");
     if !dir.exists() {

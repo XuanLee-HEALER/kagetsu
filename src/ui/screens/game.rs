@@ -1098,10 +1098,30 @@ impl GameScreenState {
         );
         // 4 家分数 (相对自家位置: 东=自家, 南=下家, 西=对家, 北=上家)
         let scores = [
-            (Seat::East, "東", g.players()[0].score, g.players()[0].riichi),
-            (Seat::South, "南", g.players()[1].score, g.players()[1].riichi),
-            (Seat::West, "西", g.players()[2].score, g.players()[2].riichi),
-            (Seat::North, "北", g.players()[3].score, g.players()[3].riichi),
+            (
+                Seat::East,
+                "東",
+                g.players()[0].score,
+                g.players()[0].riichi,
+            ),
+            (
+                Seat::South,
+                "南",
+                g.players()[1].score,
+                g.players()[1].riichi,
+            ),
+            (
+                Seat::West,
+                "西",
+                g.players()[2].score,
+                g.players()[2].riichi,
+            ),
+            (
+                Seat::North,
+                "北",
+                g.players()[3].score,
+                g.players()[3].riichi,
+            ),
         ];
         let mut col = ox + 48;
         for (i, (_seat, label, score, riichi)) in scores.iter().enumerate() {
@@ -1141,8 +1161,8 @@ impl GameScreenState {
             "tui-majo",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
-        let now = time::OffsetDateTime::now_local()
-            .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        let now =
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
         paint_str(
             buf,
             ox + 130,
@@ -1615,11 +1635,8 @@ impl GameScreenState {
         // 切后能进入听牌的牌 (legal_self_options.riichi_discards) 用 danger
         // 高亮, 玩家用 ←/→ 选中再 R 立直.
         let opts = self.engine.legal_self_options();
-        let riichi_kinds: std::collections::HashSet<u8> = opts
-            .riichi_discards
-            .iter()
-            .map(|t| t.kind.0)
-            .collect();
+        let riichi_kinds: std::collections::HashSet<u8> =
+            opts.riichi_discards.iter().map(|t| t.kind.0).collect();
         let drawn_gap = 3u16;
         let mut cx = ox + 4 + 1;
         for (i, t) in display.iter().enumerate() {
@@ -2084,7 +2101,9 @@ impl GameScreenState {
                 key: 'T',
                 label: "摸切",
                 detail: "切出刚摸到的牌(不变手牌)".into(),
-                enabled: self.engine.players()[PLAYER_SEAT.index()].last_drawn.is_some(),
+                enabled: self.engine.players()[PLAYER_SEAT.index()]
+                    .last_drawn
+                    .is_some(),
             });
         }
         // AwaitCalls (玩家有响应)
@@ -2289,7 +2308,10 @@ mod tests {
             }
         }
         term.draw(|f| app.render(f, f.area())).unwrap();
-        assert!(matches!(app.engine.phase(), Phase::RoundEnd | Phase::GameEnd));
+        assert!(matches!(
+            app.engine.phase(),
+            Phase::RoundEnd | Phase::GameEnd
+        ));
     }
 
     #[test]

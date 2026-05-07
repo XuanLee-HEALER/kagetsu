@@ -28,10 +28,7 @@ use uuid::Uuid;
 use crate::engine::domain::meld::Seat;
 use crate::engine::rules::GameRules;
 use crate::game_engine::GameEngine;
-use crate::net::protocol::{
-    ClientMsg, NetAction, PlayerSlot, RoomLifecycle,
-    RoomView, ServerMsg,
-};
+use crate::net::protocol::{ClientMsg, NetAction, PlayerSlot, RoomLifecycle, RoomView, ServerMsg};
 
 // ============================================================================
 // 公开 API
@@ -363,12 +360,12 @@ impl RoomActor {
 
 // 让外部 (用于 Phase 4 client UI) 也能拿到 token → player_id 映射. 暂存在
 // `RoomActor::pending_host_nickname` 等字段不太干净, 待后续重构.
+mod game;
 #[allow(dead_code)]
 // 拆分子模块 (impl RoomActor 在 sibling file 内, 共享私有字段访问).
 mod lobby;
-mod zerotrust;
-mod game;
 mod projection;
+mod zerotrust;
 
 fn _api_silence_warnings(_x: HashMap<Uuid, u32>) {}
 
@@ -378,4 +375,3 @@ fn _api_silence_warnings(_x: HashMap<Uuid, u32>) {}
 
 #[cfg(test)]
 mod tests;
-

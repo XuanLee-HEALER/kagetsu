@@ -651,7 +651,11 @@ mod tests {
         ]);
         let melds = vec![pon(13, 200)];
         let waits = tenpai_tiles(&closed, &melds);
-        assert!(waits.contains(&TileIndex(22)), "1 碰副露 + 单 5s 应听 5s, got {:?}", waits);
+        assert!(
+            waits.contains(&TileIndex(22)),
+            "1 碰副露 + 单 5s 应听 5s, got {:?}",
+            waits
+        );
     }
 
     #[test]
@@ -712,12 +716,16 @@ mod tests {
             (4, 1), // 单 5m
         ]);
         let melds = vec![
-            pon(11, 500),    // 碰 3p (kind=11)
-            pon(22, 510),    // 碰 5s (kind=22)
-            ankan(24, 520),  // 暗杠 7s (kind=24)
+            pon(11, 500),   // 碰 3p (kind=11)
+            pon(22, 510),   // 碰 5s (kind=22)
+            ankan(24, 520), // 暗杠 7s (kind=24)
         ];
         let waits = tenpai_tiles(&closed, &melds);
-        assert!(waits.contains(&TileIndex(4)), "3 副露 + 234m+5m 应听 5m, got {:?}", waits);
+        assert!(
+            waits.contains(&TileIndex(4)),
+            "3 副露 + 234m+5m 应听 5m, got {:?}",
+            waits
+        );
     }
 
     #[test]
@@ -732,7 +740,11 @@ mod tests {
             ankan(29, 630),  // 暗杠 西
         ];
         let waits = tenpai_tiles(&closed, &melds);
-        assert!(waits.contains(&TileIndex(9)), "4 副露 + 单 1p 应听 1p, got {:?}", waits);
+        assert!(
+            waits.contains(&TileIndex(9)),
+            "4 副露 + 单 1p 应听 1p, got {:?}",
+            waits
+        );
         assert_eq!(waits.len(), 1, "4 副露单骑只听这 1 张, got {:?}", waits);
     }
 

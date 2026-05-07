@@ -2,15 +2,13 @@
 //!
 //! impl block 直接读 super::RoomActor 私有字段 (Rust 子 module 可访问 parent 私有).
 
-use uuid::Uuid;
-use tokio::sync::mpsc::UnboundedSender;
+use super::*;
 use crate::engine::domain::meld::Seat;
 use crate::engine::rules::GameRules;
 use crate::game_engine::GameEngine;
-use crate::net::protocol::{
-    ClientMsg, RoomLifecycle, ServerMsg,
-};
-use super::*;
+use crate::net::protocol::{ClientMsg, RoomLifecycle, ServerMsg};
+use tokio::sync::mpsc::UnboundedSender;
+use uuid::Uuid;
 
 impl RoomActor {
     pub(super) fn handle_join(
@@ -77,7 +75,7 @@ impl RoomActor {
             connected: true,
             sender: Some(sender.clone()),
             reconnect_token: token,
-                disconnected_at: None,
+            disconnected_at: None,
         });
         // M5.D.2: host slot 若已有 pending_host_peer_id (spawn_p2p_listener 先发的)
         // 立即关联. 否则等 SetLocalPeerId 后处理.

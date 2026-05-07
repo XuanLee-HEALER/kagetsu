@@ -494,8 +494,7 @@ impl App {
         // 真正传到 RoomActor.
         use crate::net::room::spawn_room_with_mode;
         let setup_result = self.runtime.block_on(async {
-            let handle =
-                spawn_room_with_mode(nickname.clone(), self.last_config.clone(), mode);
+            let handle = spawn_room_with_mode(nickname.clone(), self.last_config.clone(), mode);
             let listener = spawn_p2p_listener(handle.clone(), metadata, bootstrap, lobby_meta)
                 .await
                 .map_err(|e| format!("P2P listener 启动失败: {e}"))?;

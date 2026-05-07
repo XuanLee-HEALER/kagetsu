@@ -281,8 +281,9 @@ impl GameEngine {
 
     /// 自摸宣告. score 参数兼容 legacy API; 实际从 round_apply 的 RoundEnd 取.
     pub fn declare_tsumo(&mut self, _score: ScoreResult) {
-        self.apply(AtomicOp::Tsumo)
-            .expect("declare_tsumo: round_apply Tsumo should succeed (caller must try_tsumo first)");
+        self.apply(AtomicOp::Tsumo).expect(
+            "declare_tsumo: round_apply Tsumo should succeed (caller must try_tsumo first)",
+        );
     }
 
     pub fn can_ron(&self, who: Seat) -> bool {
@@ -315,8 +316,7 @@ impl GameEngine {
     /// 推进到下一局. legacy 内部含 GameEnd 判定 + dealer/honba/kyoku 推进 +
     /// phase 转 Phase::Deal. engine 用 match_apply 完成前两件.
     pub fn next_round(&mut self) {
-        let outcome = summarize_round(&self.round)
-            .expect("next_round: 必须先到 RoundEnd 才能推进");
+        let outcome = summarize_round(&self.round).expect("next_round: 必须先到 RoundEnd 才能推进");
         self.mat = match_apply(&self.mat, outcome);
         // last_result 不清, 留给 phase() 判 GameEnd. start_round 时清.
     }
@@ -499,11 +499,12 @@ mod tests {
         // 黑魔法把 round 替成 AwaitRiichiDiscard.
         let common = e.round.common().clone();
         let last = e.round.last_drawn().unwrap();
-        e.round = RoundState::AwaitRiichiDiscard(crate::engine::round_state::AwaitRiichiDiscardState {
-            common,
-            turn: Seat::East,
-            last_drawn: last,
-        });
+        e.round =
+            RoundState::AwaitRiichiDiscard(crate::engine::round_state::AwaitRiichiDiscardState {
+                common,
+                turn: Seat::East,
+                last_drawn: last,
+            });
         assert_eq!(e.phase(), Phase::AwaitDiscard);
     }
 
@@ -529,23 +530,83 @@ mod tests {
         // 黑魔法替闭手为 14 张听牌型 (含 last_drawn).
         if let RoundState::AwaitDiscard(s) = &mut e.round {
             let hand = vec![
-                Tile { kind: TileIndex(1), red: false, id: 100 },
-                Tile { kind: TileIndex(2), red: false, id: 101 },
-                Tile { kind: TileIndex(3), red: false, id: 102 },
-                Tile { kind: TileIndex(10), red: false, id: 103 },
-                Tile { kind: TileIndex(11), red: false, id: 104 },
-                Tile { kind: TileIndex(12), red: false, id: 105 },
-                Tile { kind: TileIndex(19), red: false, id: 106 },
-                Tile { kind: TileIndex(20), red: false, id: 107 },
-                Tile { kind: TileIndex(21), red: false, id: 108 },
-                Tile { kind: TileIndex(22), red: false, id: 109 },
-                Tile { kind: TileIndex(23), red: false, id: 110 },
-                Tile { kind: TileIndex(24), red: false, id: 111 },
-                Tile { kind: TileIndex(8), red: false, id: 112 },
-                Tile { kind: TileIndex(8), red: false, id: 113 },
+                Tile {
+                    kind: TileIndex(1),
+                    red: false,
+                    id: 100,
+                },
+                Tile {
+                    kind: TileIndex(2),
+                    red: false,
+                    id: 101,
+                },
+                Tile {
+                    kind: TileIndex(3),
+                    red: false,
+                    id: 102,
+                },
+                Tile {
+                    kind: TileIndex(10),
+                    red: false,
+                    id: 103,
+                },
+                Tile {
+                    kind: TileIndex(11),
+                    red: false,
+                    id: 104,
+                },
+                Tile {
+                    kind: TileIndex(12),
+                    red: false,
+                    id: 105,
+                },
+                Tile {
+                    kind: TileIndex(19),
+                    red: false,
+                    id: 106,
+                },
+                Tile {
+                    kind: TileIndex(20),
+                    red: false,
+                    id: 107,
+                },
+                Tile {
+                    kind: TileIndex(21),
+                    red: false,
+                    id: 108,
+                },
+                Tile {
+                    kind: TileIndex(22),
+                    red: false,
+                    id: 109,
+                },
+                Tile {
+                    kind: TileIndex(23),
+                    red: false,
+                    id: 110,
+                },
+                Tile {
+                    kind: TileIndex(24),
+                    red: false,
+                    id: 111,
+                },
+                Tile {
+                    kind: TileIndex(8),
+                    red: false,
+                    id: 112,
+                },
+                Tile {
+                    kind: TileIndex(8),
+                    red: false,
+                    id: 113,
+                },
             ];
             s.common.players[Seat::East.index()].hand.closed = hand;
-            s.last_drawn = Some(Tile { kind: TileIndex(8), red: false, id: 113 });
+            s.last_drawn = Some(Tile {
+                kind: TileIndex(8),
+                red: false,
+                id: 113,
+            });
             s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
         }
         let drawn = e.round.last_drawn().unwrap();
@@ -564,16 +625,40 @@ mod tests {
         // 替闭手为 4 张 1m + 9 其它 + last_drawn = 1m.
         if let RoundState::AwaitDiscard(s) = &mut e.round {
             let mut hand = vec![
-                Tile { kind: TileIndex(0), red: false, id: 200 },
-                Tile { kind: TileIndex(0), red: false, id: 201 },
-                Tile { kind: TileIndex(0), red: false, id: 202 },
-                Tile { kind: TileIndex(0), red: false, id: 203 },
+                Tile {
+                    kind: TileIndex(0),
+                    red: false,
+                    id: 200,
+                },
+                Tile {
+                    kind: TileIndex(0),
+                    red: false,
+                    id: 201,
+                },
+                Tile {
+                    kind: TileIndex(0),
+                    red: false,
+                    id: 202,
+                },
+                Tile {
+                    kind: TileIndex(0),
+                    red: false,
+                    id: 203,
+                },
             ];
             for k in 1..=10u8 {
-                hand.push(Tile { kind: TileIndex(k), red: false, id: 210 + k as u16 });
+                hand.push(Tile {
+                    kind: TileIndex(k),
+                    red: false,
+                    id: 210 + k as u16,
+                });
             }
             s.common.players[Seat::East.index()].hand.closed = hand;
-            s.last_drawn = Some(Tile { kind: TileIndex(0), red: false, id: 203 });
+            s.last_drawn = Some(Tile {
+                kind: TileIndex(0),
+                red: false,
+                id: 203,
+            });
             s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
         }
         e.do_ankan(TileIndex(0)).expect("暗杠应成功");
@@ -588,18 +673,35 @@ mod tests {
         let mut e = GameEngine::new(GameRules::default());
         e.start_round(42);
         e.do_draw();
-        let pon_tile = Tile { kind: TileIndex(13), red: false, id: 300 };
+        let pon_tile = Tile {
+            kind: TileIndex(13),
+            red: false,
+            id: 300,
+        };
         if let RoundState::AwaitDiscard(s) = &mut e.round {
-            s.common.players[Seat::East.index()].hand.closed.push(pon_tile);
+            s.common.players[Seat::East.index()]
+                .hand
+                .closed
+                .push(pon_tile);
             s.last_drawn = Some(pon_tile);
             s.common.players[Seat::East.index()].last_drawn = Some(pon_tile);
             // South 手中插 2 张 5p 备 Pon.
-            s.common.players[Seat::South.index()].hand.closed.push(Tile {
-                kind: TileIndex(13), red: false, id: 301,
-            });
-            s.common.players[Seat::South.index()].hand.closed.push(Tile {
-                kind: TileIndex(13), red: false, id: 302,
-            });
+            s.common.players[Seat::South.index()]
+                .hand
+                .closed
+                .push(Tile {
+                    kind: TileIndex(13),
+                    red: false,
+                    id: 301,
+                });
+            s.common.players[Seat::South.index()]
+                .hand
+                .closed
+                .push(Tile {
+                    kind: TileIndex(13),
+                    red: false,
+                    id: 302,
+                });
         }
         e.do_discard(pon_tile).expect("切 5p");
         assert_eq!(e.phase(), Phase::AwaitCalls);
@@ -610,8 +712,16 @@ mod tests {
         e.do_pon(
             Seat::South,
             [
-                Tile { kind: TileIndex(13), red: false, id: 301 },
-                Tile { kind: TileIndex(13), red: false, id: 302 },
+                Tile {
+                    kind: TileIndex(13),
+                    red: false,
+                    id: 301,
+                },
+                Tile {
+                    kind: TileIndex(13),
+                    red: false,
+                    id: 302,
+                },
             ],
         )
         .expect("do_pon 应成功");
@@ -628,17 +738,35 @@ mod tests {
             s.common.players[Seat::East.index()].hand.melds.push(Meld {
                 kind: MeldKind::Pon {
                     tiles: [
-                        Tile { kind: TileIndex(13), red: false, id: 400 },
-                        Tile { kind: TileIndex(13), red: false, id: 401 },
-                        Tile { kind: TileIndex(13), red: false, id: 402 },
+                        Tile {
+                            kind: TileIndex(13),
+                            red: false,
+                            id: 400,
+                        },
+                        Tile {
+                            kind: TileIndex(13),
+                            red: false,
+                            id: 401,
+                        },
+                        Tile {
+                            kind: TileIndex(13),
+                            red: false,
+                            id: 402,
+                        },
                     ],
                 },
                 from: Some(Seat::West),
             });
             s.common.players[Seat::East.index()].hand.closed.push(Tile {
-                kind: TileIndex(13), red: false, id: 403,
+                kind: TileIndex(13),
+                red: false,
+                id: 403,
             });
-            s.last_drawn = Some(Tile { kind: TileIndex(13), red: false, id: 403 });
+            s.last_drawn = Some(Tile {
+                kind: TileIndex(13),
+                red: false,
+                id: 403,
+            });
             s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
         }
         e.do_shouminkan(TileIndex(13)).expect("加杠应成功");
@@ -658,12 +786,24 @@ mod tests {
             let mut hand = Vec::new();
             let mut id = 500u16;
             for &k in &[0u8, 8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33] {
-                hand.push(Tile { kind: TileIndex(k), red: false, id });
+                hand.push(Tile {
+                    kind: TileIndex(k),
+                    red: false,
+                    id,
+                });
                 id += 1;
             }
-            hand.push(Tile { kind: TileIndex(0), red: false, id });
+            hand.push(Tile {
+                kind: TileIndex(0),
+                red: false,
+                id,
+            });
             s.common.players[Seat::East.index()].hand.closed = hand;
-            s.last_drawn = Some(Tile { kind: TileIndex(0), red: false, id });
+            s.last_drawn = Some(Tile {
+                kind: TileIndex(0),
+                red: false,
+                id,
+            });
             s.common.players[Seat::East.index()].last_drawn = s.last_drawn;
         }
         assert!(e.can_tsumo());
@@ -677,19 +817,34 @@ mod tests {
         let mut e = GameEngine::new(GameRules::default());
         e.start_round(42);
         e.do_draw();
-        let ron_tile = Tile { kind: TileIndex(8), red: false, id: 700 };
+        let ron_tile = Tile {
+            kind: TileIndex(8),
+            red: false,
+            id: 700,
+        };
         if let RoundState::AwaitDiscard(s) = &mut e.round {
-            s.common.players[Seat::East.index()].hand.closed.push(ron_tile);
+            s.common.players[Seat::East.index()]
+                .hand
+                .closed
+                .push(ron_tile);
             s.last_drawn = Some(ron_tile);
             s.common.players[Seat::East.index()].last_drawn = Some(ron_tile);
             // South 闭手 13 张国士型, ron 9m.
             let mut south_hand = Vec::new();
             let mut id = 701u16;
             for &k in &[0u8, 9, 17, 18, 26, 27, 28, 29, 30, 31, 32, 33] {
-                south_hand.push(Tile { kind: TileIndex(k), red: false, id });
+                south_hand.push(Tile {
+                    kind: TileIndex(k),
+                    red: false,
+                    id,
+                });
                 id += 1;
             }
-            south_hand.push(Tile { kind: TileIndex(0), red: false, id }); // 1m 雀头
+            south_hand.push(Tile {
+                kind: TileIndex(0),
+                red: false,
+                id,
+            }); // 1m 雀头
             s.common.players[Seat::South.index()].hand.closed = south_hand;
         }
         e.do_discard(ron_tile).expect("切 9m");
@@ -757,25 +912,50 @@ mod tests {
         let mut e = GameEngine::new(GameRules::default());
         e.start_round(42);
         e.do_draw();
-        let chi_tile = Tile { kind: TileIndex(2), red: false, id: 1000 };
+        let chi_tile = Tile {
+            kind: TileIndex(2),
+            red: false,
+            id: 1000,
+        };
         if let RoundState::AwaitDiscard(s) = &mut e.round {
-            s.common.players[Seat::East.index()].hand.closed.push(chi_tile);
+            s.common.players[Seat::East.index()]
+                .hand
+                .closed
+                .push(chi_tile);
             s.last_drawn = Some(chi_tile);
             s.common.players[Seat::East.index()].last_drawn = Some(chi_tile);
             // South 手中加 1m + 2m 备吃 (吃成 1-2-3m).
-            s.common.players[Seat::South.index()].hand.closed.push(Tile {
-                kind: TileIndex(0), red: false, id: 1001,
-            });
-            s.common.players[Seat::South.index()].hand.closed.push(Tile {
-                kind: TileIndex(1), red: false, id: 1002,
-            });
+            s.common.players[Seat::South.index()]
+                .hand
+                .closed
+                .push(Tile {
+                    kind: TileIndex(0),
+                    red: false,
+                    id: 1001,
+                });
+            s.common.players[Seat::South.index()]
+                .hand
+                .closed
+                .push(Tile {
+                    kind: TileIndex(1),
+                    red: false,
+                    id: 1002,
+                });
         }
         e.do_discard(chi_tile).expect("切 3m");
         e.do_chi(
             Seat::South,
             [
-                Tile { kind: TileIndex(0), red: false, id: 1001 },
-                Tile { kind: TileIndex(1), red: false, id: 1002 },
+                Tile {
+                    kind: TileIndex(0),
+                    red: false,
+                    id: 1001,
+                },
+                Tile {
+                    kind: TileIndex(1),
+                    red: false,
+                    id: 1002,
+                },
             ],
         )
         .expect("吃应成功");
@@ -791,24 +971,48 @@ mod tests {
         let mut e = GameEngine::new(GameRules::default());
         e.start_round(42);
         e.do_draw();
-        let kan_tile = Tile { kind: TileIndex(24), red: false, id: 1100 };
+        let kan_tile = Tile {
+            kind: TileIndex(24),
+            red: false,
+            id: 1100,
+        };
         if let RoundState::AwaitDiscard(s) = &mut e.round {
-            s.common.players[Seat::East.index()].hand.closed.push(kan_tile);
+            s.common.players[Seat::East.index()]
+                .hand
+                .closed
+                .push(kan_tile);
             s.last_drawn = Some(kan_tile);
             s.common.players[Seat::East.index()].last_drawn = Some(kan_tile);
             for id in 1101..=1103 {
-                s.common.players[Seat::South.index()].hand.closed.push(Tile {
-                    kind: TileIndex(24), red: false, id,
-                });
+                s.common.players[Seat::South.index()]
+                    .hand
+                    .closed
+                    .push(Tile {
+                        kind: TileIndex(24),
+                        red: false,
+                        id,
+                    });
             }
         }
         e.do_discard(kan_tile).expect("切 7s");
         e.do_minkan(
             Seat::South,
             [
-                Tile { kind: TileIndex(24), red: false, id: 1101 },
-                Tile { kind: TileIndex(24), red: false, id: 1102 },
-                Tile { kind: TileIndex(24), red: false, id: 1103 },
+                Tile {
+                    kind: TileIndex(24),
+                    red: false,
+                    id: 1101,
+                },
+                Tile {
+                    kind: TileIndex(24),
+                    red: false,
+                    id: 1102,
+                },
+                Tile {
+                    kind: TileIndex(24),
+                    red: false,
+                    id: 1103,
+                },
             ],
         )
         .expect("明杠应成功");

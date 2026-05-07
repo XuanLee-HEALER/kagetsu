@@ -13,9 +13,8 @@ use std::path::PathBuf;
 
 /// savestates 目录, 不存在时创建.
 pub fn savestates_dir() -> std::io::Result<PathBuf> {
-    let mut dir = dirs::config_dir().ok_or_else(|| {
-        std::io::Error::other("无可用配置目录 (dirs::config_dir 返回 None)")
-    })?;
+    let mut dir = dirs::config_dir()
+        .ok_or_else(|| std::io::Error::other("无可用配置目录 (dirs::config_dir 返回 None)"))?;
     dir.push("tui-majo");
     dir.push("savestates");
     if !dir.exists() {
@@ -57,10 +56,7 @@ mod tests {
 
     #[test]
     fn roundtrip_dummy_state() {
-        let g = DummyState {
-            seed: 42,
-            kyoku: 3,
-        };
+        let g = DummyState { seed: 42, kyoku: 3 };
         let slot = format!("__test_{}", std::process::id());
         save(&g, &slot).unwrap();
         let g2: DummyState = load(&slot).unwrap();

@@ -719,9 +719,21 @@ mod tests {
         let melds = vec![Meld {
             kind: MeldKind::Chi {
                 tiles: [
-                    Tile { kind: TileIndex(0), red: false, id: 0 },
-                    Tile { kind: TileIndex(1), red: false, id: 1 },
-                    Tile { kind: TileIndex(2), red: false, id: 2 },
+                    Tile {
+                        kind: TileIndex(0),
+                        red: false,
+                        id: 0,
+                    },
+                    Tile {
+                        kind: TileIndex(1),
+                        red: false,
+                        id: 1,
+                    },
+                    Tile {
+                        kind: TileIndex(2),
+                        red: false,
+                        id: 2,
+                    },
                 ],
             },
             from: Some(Seat::East),
@@ -730,7 +742,11 @@ mod tests {
         let d = r.first().expect("应有标准拆解");
         let ctx = ctx_for(d, false, false); // 副露 → 非 menzen, ron
         // 副露无副 fu (Chi=0), 9m 雀头无加, ron 无门清+10, 子家无连风, 应是基础 20 → 兜底 30.
-        assert_eq!(calculate_fu(d, &ctx, &melds), 30, "副露 ron 无加成应兜底 30");
+        assert_eq!(
+            calculate_fu(d, &ctx, &melds),
+            30,
+            "副露 ron 无加成应兜底 30"
+        );
     }
 
     #[test]
@@ -803,9 +819,21 @@ mod tests {
         let melds = vec![Meld {
             kind: MeldKind::Chi {
                 tiles: [
-                    Tile { kind: TileIndex(0), red: false, id: 0 },
-                    Tile { kind: TileIndex(1), red: false, id: 1 },
-                    Tile { kind: TileIndex(2), red: false, id: 2 },
+                    Tile {
+                        kind: TileIndex(0),
+                        red: false,
+                        id: 0,
+                    },
+                    Tile {
+                        kind: TileIndex(1),
+                        red: false,
+                        id: 1,
+                    },
+                    Tile {
+                        kind: TileIndex(2),
+                        red: false,
+                        id: 2,
+                    },
                 ],
             },
             from: Some(Seat::East),
@@ -827,7 +855,15 @@ mod tests {
         let r = decompose(&hand, &[], TileIndex(8));
         let d = r
             .iter()
-            .find(|d| matches!(d, Decomposition::Kokushi { thirteen_wait: false, .. }))
+            .find(|d| {
+                matches!(
+                    d,
+                    Decomposition::Kokushi {
+                        thirteen_wait: false,
+                        ..
+                    }
+                )
+            })
             .expect("应有非 13 面待的国士拆解");
         let ctx = ctx_for(d, true, false);
         let result = evaluate(&ctx, &[]).expect("国士应能算分");
@@ -846,7 +882,15 @@ mod tests {
         let r = decompose(&hand, &[], TileIndex(0));
         let d = r
             .iter()
-            .find(|d| matches!(d, Decomposition::Kokushi { thirteen_wait: true, .. }))
+            .find(|d| {
+                matches!(
+                    d,
+                    Decomposition::Kokushi {
+                        thirteen_wait: true,
+                        ..
+                    }
+                )
+            })
             .expect("应有 13 面待的国士拆解");
         let ctx = ctx_for(d, true, false);
         let result = evaluate(&ctx, &[]).expect("国士 13 面待应能算分");
@@ -866,7 +910,15 @@ mod tests {
             base_points: 2000,
             level: ScoreLevel::Mangan,
         };
-        let d = distribute(&result, Seat::South, Seat::East, false, Some(Seat::West), 0, 0);
+        let d = distribute(
+            &result,
+            Seat::South,
+            Seat::East,
+            false,
+            Some(Seat::West),
+            0,
+            0,
+        );
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].from, Seat::West);
         assert_eq!(d[0].to, Seat::South);
@@ -902,11 +954,21 @@ mod tests {
             base_points: 480,
             level: ScoreLevel::Normal,
         };
-        let d = distribute(&result, Seat::South, Seat::East, false, Some(Seat::West), 2, 1);
+        let d = distribute(
+            &result,
+            Seat::South,
+            Seat::East,
+            false,
+            Some(Seat::West),
+            2,
+            1,
+        );
         // 主支付: 4*480=1920 圆 2000, +honba 2*300=600 → 2600
         assert_eq!(d[0].amount, 2600, "1番30符 ron + 2本场");
         // 立直棒 1 根: +1000.
-        let stick = d.iter().find(|p| p.from == Seat::South && p.to == Seat::South);
+        let stick = d
+            .iter()
+            .find(|p| p.from == Seat::South && p.to == Seat::South);
         assert!(stick.is_some(), "立直棒应作为单独 PaymentDistribution");
         assert_eq!(stick.unwrap().amount, 1000);
     }
@@ -947,7 +1009,10 @@ mod tests {
         // 14 张: 111m + 333p + 555s + 777m + 99m. 1m=幺九暗刻 (8 fu),
         // 3p/5s/7m=中张暗刻 (4 fu × 3 = 12). winning=1m 自摸.
         let r = toitoi_decompose();
-        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let d = r
+            .iter()
+            .find(|d| matches!(d, Decomposition::Standard { .. }))
+            .unwrap();
         let ctx = ctx_for(d, true, true);
         // 基础 20 + tsumo +2 + 1m 暗幺九 8 + 3 个中张暗刻 4×3 = 12 = 42 → 圆 50.
         assert_eq!(calculate_fu(d, &ctx, &[]), 50);
@@ -966,11 +1031,14 @@ mod tests {
             (19, 1),
             (20, 1),
             (21, 1),
-            (5, 3), // 666m 刻
+            (5, 3),  // 666m 刻
             (33, 2), // 中中 (yakuhai 雀头, 三元龙)
         ]);
         let r = decompose(&hand, &[], TileIndex(33));
-        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let d = r
+            .iter()
+            .find(|d| matches!(d, Decomposition::Standard { .. }))
+            .unwrap();
         let ctx = ctx_for(d, true, false); // menzen + ron
         // 基础 20 + 门清 ron +10 + 雀头三元 +2 + 中张暗刻 +4 = 36 → 圆 40.
         assert_eq!(calculate_fu(d, &ctx, &[]), 40);
@@ -1041,15 +1109,31 @@ mod tests {
             (4, 1),
             (5, 1),
             (6, 1), // 567m
-            (8, 2),  // 99m 雀头
+            (8, 2), // 99m 雀头
         ]);
         let melds = vec![Meld {
             kind: MeldKind::Ankan {
                 tiles: [
-                    Tile { kind: TileIndex(0), red: false, id: 0 },
-                    Tile { kind: TileIndex(0), red: false, id: 1 },
-                    Tile { kind: TileIndex(0), red: false, id: 2 },
-                    Tile { kind: TileIndex(0), red: false, id: 3 },
+                    Tile {
+                        kind: TileIndex(0),
+                        red: false,
+                        id: 0,
+                    },
+                    Tile {
+                        kind: TileIndex(0),
+                        red: false,
+                        id: 1,
+                    },
+                    Tile {
+                        kind: TileIndex(0),
+                        red: false,
+                        id: 2,
+                    },
+                    Tile {
+                        kind: TileIndex(0),
+                        red: false,
+                        id: 3,
+                    },
                 ],
             },
             from: None,
@@ -1074,15 +1158,31 @@ mod tests {
             (4, 1),
             (5, 1),
             (6, 1), // 567m
-            (8, 2),  // 99m 雀头
+            (8, 2), // 99m 雀头
         ]);
         let melds = vec![Meld {
             kind: MeldKind::Minkan {
                 tiles: [
-                    Tile { kind: TileIndex(13), red: false, id: 100 },
-                    Tile { kind: TileIndex(13), red: false, id: 101 },
-                    Tile { kind: TileIndex(13), red: false, id: 102 },
-                    Tile { kind: TileIndex(13), red: false, id: 103 },
+                    Tile {
+                        kind: TileIndex(13),
+                        red: false,
+                        id: 100,
+                    },
+                    Tile {
+                        kind: TileIndex(13),
+                        red: false,
+                        id: 101,
+                    },
+                    Tile {
+                        kind: TileIndex(13),
+                        red: false,
+                        id: 102,
+                    },
+                    Tile {
+                        kind: TileIndex(13),
+                        red: false,
+                        id: 103,
+                    },
                 ],
             },
             from: Some(Seat::West),
@@ -1112,9 +1212,21 @@ mod tests {
         let melds = vec![Meld {
             kind: MeldKind::Pon {
                 tiles: [
-                    Tile { kind: TileIndex(0), red: false, id: 200 },
-                    Tile { kind: TileIndex(0), red: false, id: 201 },
-                    Tile { kind: TileIndex(0), red: false, id: 202 },
+                    Tile {
+                        kind: TileIndex(0),
+                        red: false,
+                        id: 200,
+                    },
+                    Tile {
+                        kind: TileIndex(0),
+                        red: false,
+                        id: 201,
+                    },
+                    Tile {
+                        kind: TileIndex(0),
+                        red: false,
+                        id: 202,
+                    },
                 ],
             },
             from: Some(Seat::West),
@@ -1162,10 +1274,21 @@ mod tests {
         // 升到 Baiman, 这里只验"至少 Haneman 且 base ≥ 3000".
         // 顺子型避开 4 暗刻役满: 123m + 234m + 456m + 678m + 99m.
         let hand = h(&[
-            (0, 1), (1, 2), (2, 2), (3, 2), (4, 1), (5, 2), (6, 1), (7, 1), (8, 2),
+            (0, 1),
+            (1, 2),
+            (2, 2),
+            (3, 2),
+            (4, 1),
+            (5, 2),
+            (6, 1),
+            (7, 1),
+            (8, 2),
         ]);
         let r = decompose(&hand, &[], TileIndex(0));
-        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let d = r
+            .iter()
+            .find(|d| matches!(d, Decomposition::Standard { .. }))
+            .unwrap();
         let ctx = ctx_for(d, true, true); // menzen + tsumo
         let result = evaluate(&ctx, &[]).expect("Chinitsu+Tsumo 应能算");
         assert!(
@@ -1189,16 +1312,20 @@ mod tests {
         //        6m=1, 7m=1, 8m=1 (678m); 5m=2 (55m雀头) → 5m 总=4 但只能 4 张同 kind.
         // 调整: 234m + 234m (重复); 改: 234m + 345m + 456m + 678m + 88m.
         // counts: 2=1,3=2,4=3,5=2,6=2,7=1,8=3 → 14? 1+2+3+2+2+1+3=14 ✓.
-        let hand = h(&[
-            (1, 1), (2, 2), (3, 3), (4, 2), (5, 2), (6, 1), (7, 3),
-        ]);
+        let hand = h(&[(1, 1), (2, 2), (3, 3), (4, 2), (5, 2), (6, 1), (7, 3)]);
         let r = decompose(&hand, &[], TileIndex(1));
-        let d = r.iter().find(|d| matches!(d, Decomposition::Standard { .. })).unwrap();
+        let d = r
+            .iter()
+            .find(|d| matches!(d, Decomposition::Standard { .. }))
+            .unwrap();
         let ctx = ctx_for(d, true, true);
         let result = evaluate(&ctx, &[]).expect("Chinitsu+Tanyao+Tsumo 应能算");
         // 至少是 Baiman (8 番), 可能 Sanbaiman 或更高 (取决于额外役).
         assert!(
-            matches!(result.level, ScoreLevel::Baiman | ScoreLevel::Sanbaiman | ScoreLevel::KazoeYakuman),
+            matches!(
+                result.level,
+                ScoreLevel::Baiman | ScoreLevel::Sanbaiman | ScoreLevel::KazoeYakuman
+            ),
             "应至少 Baiman, got {:?} ({} 番)",
             result.level,
             result.han
@@ -1214,9 +1341,21 @@ mod tests {
         let melds = vec![Meld {
             kind: MeldKind::Pon {
                 tiles: [
-                    Tile { kind: TileIndex(6), red: false, id: 0 },
-                    Tile { kind: TileIndex(6), red: false, id: 1 },
-                    Tile { kind: TileIndex(6), red: false, id: 2 },
+                    Tile {
+                        kind: TileIndex(6),
+                        red: false,
+                        id: 0,
+                    },
+                    Tile {
+                        kind: TileIndex(6),
+                        red: false,
+                        id: 1,
+                    },
+                    Tile {
+                        kind: TileIndex(6),
+                        red: false,
+                        id: 2,
+                    },
                 ],
             },
             from: Some(Seat::West),
@@ -1240,9 +1379,21 @@ mod tests {
         let melds = vec![Meld {
             kind: MeldKind::Pon {
                 tiles: [
-                    Tile { kind: TileIndex(4), red: false, id: 0 },
-                    Tile { kind: TileIndex(4), red: false, id: 1 },
-                    Tile { kind: TileIndex(4), red: false, id: 2 },
+                    Tile {
+                        kind: TileIndex(4),
+                        red: false,
+                        id: 0,
+                    },
+                    Tile {
+                        kind: TileIndex(4),
+                        red: false,
+                        id: 1,
+                    },
+                    Tile {
+                        kind: TileIndex(4),
+                        red: false,
+                        id: 2,
+                    },
                 ],
             },
             from: Some(Seat::West),
@@ -1297,7 +1448,15 @@ mod tests {
             base_points: 2000,
             level: ScoreLevel::Mangan,
         };
-        let d = distribute(&result, Seat::East, Seat::East, false, Some(Seat::South), 0, 0);
+        let d = distribute(
+            &result,
+            Seat::East,
+            Seat::East,
+            false,
+            Some(Seat::South),
+            0,
+            0,
+        );
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].amount, 12000, "亲家荣和 = 6B = 12000");
     }

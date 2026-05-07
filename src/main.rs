@@ -383,7 +383,11 @@ fn launch_windows_terminal(game: &Path) -> Result<bool> {
 // ============================================================
 
 fn wezterm_bin_name() -> &'static str {
-    if cfg!(windows) { "wezterm.exe" } else { "wezterm" }
+    if cfg!(windows) {
+        "wezterm.exe"
+    } else {
+        "wezterm"
+    }
 }
 
 fn kitty_bin_name() -> &'static str {

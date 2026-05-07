@@ -41,4 +41,3 @@ pub fn ai_react_to_discard(state: &RoundState, who: Seat) -> Action {
     }
     Action::Pass
 }
-
