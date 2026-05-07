@@ -1,0 +1,140 @@
+name: Release
+
+# 触发: 推一个 v*.*.* 形式的 tag.
+# 流程: build matrix (Linux/macOS×2/Windows) → 上传 artifact →
+#       聚合到 GitHub Release → 触发 winget PR.
+# 详细步骤见 docs/release.md.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write   # softprops/action-gh-release 创建 release 需要
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # release 构建不带 dev-tools feature, 给最终用户最小 binary.
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }} --bins
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          name="tui-majo-${version}-${{ matrix.target }}"
+          stage="dist/${name}"
+          mkdir -p "${stage}"
+          cp "target/${{ matrix.target }}/release/tui-majo" "${stage}/"
+          cp "target/${{ matrix.target }}/release/tui-majo-game" "${stage}/"
+          cp "target/${{ matrix.target }}/release/tui-majo-relay" "${stage}/"
+          cp README.md LICENSE "${stage}/"
+          tar czf "dist/${name}.tar.gz" -C dist "${name}"
+          (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          ls -lh dist/
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          $name = "tui-majo-$version-${{ matrix.target }}"
+          $stage = "dist/$name"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/tui-majo.exe" "$stage/"
+          Copy-Item "target/${{ matrix.target }}/release/tui-majo-game.exe" "$stage/"
+          Copy-Item "target/${{ matrix.target }}/release/tui-majo-relay.exe" "$stage/"
+          Copy-Item README.md, LICENSE -Destination $stage
+          Compress-Archive -Path $stage -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File "dist/$name.zip.sha256" -Encoding ASCII
+          Get-ChildItem dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lhR dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  winget:
+    name: Submit winget PR
+    needs: release
+    runs-on: windows-latest
+    # 只在正式版触发, 预发 (v2.1.0-rc1 等) 跳过.
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - name: Submit to winget-pkgs
+        uses: vedantmgoyal2009/winget-releaser@v2
+        with:
+          identifier: XuanLeeHEALER.tui-majo
+          version: ${{ github.ref_name }}
+          installers-regex: 'x86_64-pc-windows-msvc\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}

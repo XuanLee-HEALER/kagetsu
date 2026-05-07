@@ -1,31 +1,58 @@
-//! 手牌容器.
+//! 手牌 (手牌 / Tehai) 容器.
+//!
+//! 一手牌分两部分:
+//! - **暗手** (闭手 / 暗牌 / Closed): 未公开的牌, 含刚摸的那张
+//! - **副露** (鳴き / 副露 / Furo): 已公开的鸣牌牌组 (Chi / Pon / Kan)
 
-use crate::domain::meld::Meld;
-use crate::domain::tile::{TILE_KINDS, Tile, count_by_kind};
+use crate::engine::domain::meld::Meld;
+use crate::engine::domain::tile::{TILE_KINDS, Tile, count_by_kind};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default)]
+/// 一家的完整手牌.
+///
+/// # 数量约束
+///
+/// - 局开始: `closed` = 13 张, `melds` = 空
+/// - 摸完牌后 (待切): `closed` = 14 张, `melds` 不变
+/// - 切完牌后: `closed` = 13 张
+/// - 每副露一组减少 closed 中相应张数, 加 1 个 `melds` 条目:
+///   - Chi/Pon: closed -2, melds +1 (3 张)
+///   - Kan (任意): closed -3 或 -4, melds +1 (4 张)
+///
+/// 整手牌净张数 = 13 (待切时 14), 与杠子数无关 (杠子有 4 张但只占 3 张"位置",
+/// 因为杠后必摸岭上一张补回).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Hand {
-    /// 暗手部分(未鸣牌的部分),包括摸到尚未切的那张.
+    /// 暗手 (Closed). 未公开的牌, 含刚摸尚未切出的那张. 排序按 `(kind, !red)`,
+    /// 即同 kind 红 5 排前面.
     pub closed: Vec<Tile>,
-    /// 副露.
+    /// 副露列表 (按副露发生时间从早到晚排序).
     pub melds: Vec<Meld>,
 }
 
 impl Hand {
+    /// 空手牌. 局开始前由 `init_round` 配 13 张牌.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 是否门清(无副露; 暗杠在判定特定役时另行处理).
+    /// 门前清 (門前清 / Menzen) — 没有 *他人来源* 的副露.
+    ///
+    /// 暗杠 (Ankan) 仍算门前清. 立直 / 平和 / 三色同顺等门前限定役需此 true.
     pub fn is_menzen(&self) -> bool {
         self.melds.iter().all(|m| m.is_concealed())
     }
 
-    /// 是否完全无副露(包括暗杠).用于天和等极端役.
+    /// 完全闭手 (无任何 melds, 含暗杠也算破).
+    ///
+    /// 用于天和 (Tenhou) / 地和 (Chiihou) / 人和 (Renhou) 等极端役判定 —
+    /// 这些役要求局开始就和, 不能有任何副露 (即使暗杠也不行, 因为暗杠后必摸岭上).
     pub fn is_fully_concealed(&self) -> bool {
         self.melds.is_empty()
     }
 
+    /// 暗手按 kind 计数, 返 `[count_of_kind_0, count_of_kind_1, ..., count_of_kind_33]`.
+    /// 不含副露. 每个 count ∈ 0..=4.
     pub fn closed_counts(&self) -> [u8; TILE_KINDS] {
         count_by_kind(&self.closed)
     }
@@ -34,8 +61,8 @@ impl Hand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::meld::{Meld, MeldKind, Seat};
-    use crate::domain::tile::TileIndex;
+    use crate::engine::domain::meld::{Meld, MeldKind, Seat};
+    use crate::engine::domain::tile::TileIndex;
 
     fn t(kind: u8, id: u16) -> Tile {
         Tile {

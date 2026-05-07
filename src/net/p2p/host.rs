@@ -16,7 +16,7 @@ use libp2p::{
     swarm::SwarmEvent,
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::mental_poker::wire::MentalPokerMsg;
 use crate::net::p2p::behaviour::{
@@ -37,6 +37,25 @@ pub struct LobbyMeta {
     pub region: crate::net::p2p::Region,
     /// 房间信任模式 (M4.B). 决定开局走 Standard 还是 ZeroTrust.
     pub mode: crate::net::p2p::RoomMode,
+}
+
+/// LobbyAnnouncement 中随房间状态变化的字段. RoomActor 每次 broadcast_room_update
+/// 时通过 watch channel 推送, host_swarm_task 在 publish_lobby 时拉最新值.
+#[derive(Debug, Clone)]
+pub struct LobbyDynState {
+    /// 当前房间已 join 的玩家数 (含 AI? — 只算真人, AI 槽位不计入大厅显示).
+    pub players: u8,
+    /// 房间生命周期字符串: "lobby" / "in_game" / "game_end".
+    pub lifecycle: String,
+}
+
+impl Default for LobbyDynState {
+    fn default() -> Self {
+        Self {
+            players: 0,
+            lifecycle: "lobby".into(),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -144,6 +163,9 @@ pub async fn spawn_p2p_listener(
     // 发 SwarmCommand, 通过 mp_inbound_rx 接 (PeerId, MentalPokerMsg) 入站消息.
     let (mp_command_tx, mp_command_rx) = mpsc::unbounded_channel::<SwarmCommand>();
     let (mp_inbound_tx, mp_inbound_rx) = mpsc::unbounded_channel::<(PeerId, MentalPokerMsg)>();
+    // LobbyAnnouncement 动态字段 (玩家数 / lifecycle): RoomActor 每次
+    // broadcast_room_update 时 send_replace, host swarm publish_lobby 时 borrow.
+    let (lobby_dyn_tx, lobby_dyn_rx) = watch::channel(LobbyDynState::default());
 
     // M5.D.2: 通知 RoomActor 房主自己的 libp2p PeerId, ZeroTrust 模式开局时填
     // MpStart.all_peer_ids 用. host slot 已 join 时立即关联 (handle_cmd 内处理),
@@ -151,6 +173,8 @@ pub async fn spawn_p2p_listener(
     let _ = handle.tx.send(RoomCmd::SetLocalPeerId {
         peer_id_bytes: local_peer_id.to_bytes(),
     });
+    // LobbyDynState 反向通道注入: RoomActor 持 sender, 状态变更时 push 一次.
+    let _ = handle.tx.send(RoomCmd::SetLobbyWatch { tx: lobby_dyn_tx });
 
     tokio::spawn(host_swarm_task(
         swarm,
@@ -162,6 +186,7 @@ pub async fn spawn_p2p_listener(
         local_peer_id,
         mp_command_rx,
         mp_inbound_tx,
+        lobby_dyn_rx,
     ));
 
     Ok(HostHandle {
@@ -249,6 +274,7 @@ async fn host_swarm_task(
     local_peer_id: PeerId,
     mut mp_command_rx: mpsc::UnboundedReceiver<SwarmCommand>,
     mp_inbound_tx: mpsc::UnboundedSender<(PeerId, MentalPokerMsg)>,
+    lobby_dyn_rx: watch::Receiver<LobbyDynState>,
 ) {
     let mut peers: HashMap<PeerId, PeerSlot> = HashMap::new();
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<(PeerId, ServerMsg)>();
@@ -283,7 +309,8 @@ async fn host_swarm_task(
                 handle_mp_command(&mut swarm, cmd, &mut mp_subscribed_topics);
             }
             _ = publish_interval.tick() => {
-                publish_lobby(&mut swarm, &topic, &lobby_meta, local_peer_id, &my_listen_addrs);
+                let dyn_state = lobby_dyn_rx.borrow().clone();
+                publish_lobby(&mut swarm, &topic, &lobby_meta, &dyn_state, local_peer_id, &my_listen_addrs);
                 if !public_addrs.is_empty() {
                     publish_relays(&mut swarm, &relays_topic, local_peer_id, &public_addrs);
                 }
@@ -359,6 +386,7 @@ fn publish_lobby(
     swarm: &mut Swarm<P2pBehaviour>,
     topic: &gossipsub::IdentTopic,
     meta: &LobbyMeta,
+    dyn_state: &LobbyDynState,
     local_peer_id: PeerId,
     listen_addrs: &[Multiaddr],
 ) {
@@ -369,8 +397,8 @@ fn publish_lobby(
         schema_version: 1,
         host_peer_id: local_peer_id.to_string(),
         host_nick: meta.host_nick.clone(),
-        players: 1, // TODO: 跟 RoomActor 同步真实人数
-        lifecycle: "lobby".into(),
+        players: dyn_state.players,
+        lifecycle: dyn_state.lifecycle.clone(),
         room_id: meta.room_id.clone(),
         multiaddrs: listen_addrs.iter().map(|a| a.to_string()).collect(),
         timestamp_unix_ms: std::time::SystemTime::now()

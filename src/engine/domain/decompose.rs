@@ -1,49 +1,79 @@
-//! 和牌型拆解.
+//! 和牌型 (和了形 / Agari-kei) 分解.
 //!
-//! 三种和牌结构:
-//! - 标准型: 4 面子 + 1 雀头
-//! - 七对子: 7 组不同对子
-//! - 国士无双: 13 种幺九各一 + 任一为雀头
+//! 日麻三种合法和牌结构:
+//! - **标准型** (4 面子 + 1 雀头, 14 张): 最常见. 4 个 [`Mentsu`] + 1 对子.
+//! - **七对子** (七対子 / Chiitoitsu): 7 组不同的对子.
+//! - **国士无双** (国士無双 / Kokushi-musou): 13 种幺九牌各一 + 任一为雀头.
 //!
-//! 算法详见 docs/spec/winning-shapes.md
+//! [`decompose`] 函数枚举所有可能的拆解 (一手牌可能有多解, 例: 平和能拆成
+//! 不同顺子组合), 调用方按 yaku 评估选最优.
+//!
+//! 算法详见 `docs/spec/winning-shapes.md`.
 
-use crate::domain::meld::Meld;
-use crate::domain::tile::TileIndex;
+use crate::engine::domain::meld::Meld;
+use crate::engine::domain::tile::TileIndex;
 
+/// 面子 (面子 / Mentsu) — 标准型和牌的基本组成单位.
+///
+/// 4 个面子 + 1 雀头构成 14 张和牌. 鸣牌副露也算面子, 但本 enum 仅描述
+/// 暗手分解出的面子 (副露见 [`Meld`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mentsu {
-    /// 顺子(同花色连续三张). 索引为起始牌.
+    /// 顺子 (順子 / Shuntsu) — 同花色连续 3 张. 参数 = 起始牌 (例: 3m4m5m → `Shuntsu(3m)`).
     Shuntsu(TileIndex),
-    /// 刻子. (kind, concealed). 拆解阶段统一标 concealed=true,
-    /// 由调用方在荣和+双碰时修正为明刻.
+    /// 刻子 (刻子 / Koutsu) — 同 kind 3 张.
+    /// 参数: `(kind, concealed)`. 拆解阶段统一标 `concealed=true`, 调用方在
+    /// 荣和 + 双碰待 时修正为明刻.
     Koutsu(TileIndex, bool),
-    /// 杠子. (kind, concealed).
+    /// 杠子 (槓子 / Kantsu) — 同 kind 4 张.
+    /// 参数: `(kind, concealed)`. 暗杠 = true, 明杠 / 加杠 = false.
     Kantsu(TileIndex, bool),
 }
 
+/// 听牌型 (待ち / Wait / Machi) — 和牌时填入 `winning_tile` 那张的等待结构.
+///
+/// 5 种待型, 影响符 (Fu) 计算 + 平和 (Pinfu) 役判定 (仅 Ryanmen 算平和).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitKind {
-    Tanki,   // 单骑
-    Kanchan, // 嵌张
-    Penchan, // 边张
-    Ryanmen, // 两面
-    Shanpon, // 双碰
+    /// 单骑 (単騎 / Tanki) — 等雀头. +2 符.
+    Tanki,
+    /// 嵌张 (嵌張 / Kanchan) — 顺子中间缺一张, 例: 3m_5m 等 4m. +2 符.
+    Kanchan,
+    /// 边张 (辺張 / Penchan) — 顺子边端缺一张, 例: 1m2m 等 3m, 8m9m 等 7m. +2 符.
+    Penchan,
+    /// 两面 (両面 / Ryanmen) — 顺子两端可和, 例: 4m5m 等 3m/6m. 0 符 (平和必要条件).
+    Ryanmen,
+    /// 双碰 (双碰 / Shanpon) — 两对中任一对升级成刻子, 例: 4m4m 5p5p 等 4m 或 5p.
+    Shanpon,
 }
 
+/// 和牌拆解结果 — [`decompose`] 输出.
 #[derive(Debug, Clone)]
 pub enum Decomposition {
+    /// 标准型: 4 面子 + 1 雀头. 含具体的待型 + 和牌张.
     Standard {
+        /// 雀头 (頭 / Atama / 对子).
         pair: TileIndex,
+        /// 4 个面子.
         mentsu: Vec<Mentsu>,
+        /// 和牌张 kind (用于鉴定该张所在面子是否明刻).
         winning_tile: TileIndex,
+        /// 听牌型.
         wait: WaitKind,
     },
+    /// 七对子型. 7 组不同对子 + 待对子的最后 1 张 = 14 张.
     Chiitoitsu {
+        /// 7 个雀头 (含和了对).
         pairs: [TileIndex; 7],
+        /// 和牌张 (与某 pair 的另 1 张配对).
         winning_tile: TileIndex,
     },
+    /// 国士无双型 (国士無双). 13 种幺九各 1 张 + 任 1 张作雀头.
     Kokushi {
+        /// 和牌张.
         winning_tile: TileIndex,
+        /// 是否 13 面待 (即手牌已是 13 种幺九各 1 张, 任和 1 张).
+        /// `true` 时升级为双倍役满 (若 `rules.double_yakuman` 开).
         thirteen_wait: bool,
     },
 }
@@ -315,7 +345,7 @@ pub fn tenpai_tiles(closed: &[u8; 34], melds: &[Meld]) -> Vec<TileIndex> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::tile::TileIndex;
+    use crate::engine::domain::tile::TileIndex;
 
     fn h(spec: &[(u8, u8)]) -> [u8; 34] {
         let mut a = [0u8; 34];
@@ -503,5 +533,241 @@ mod tests {
         hand[13] = 1; // 5p
         let waits = tenpai_tiles(&hand, &[]);
         assert!(waits.contains(&TileIndex(13)), "应听 5p, got {:?}", waits);
+    }
+
+    // ===== 副露 + 听牌测试 (tenpai_tiles / can_win 在 melds 非空时的契约) =====
+    //
+    // 听牌型不变量: closed.len() + melds.len() * 3 == 13. 杠虽 4 张但听牌型容量
+    // 仍占 1 面子 (杠后岭上摸不增 closed 容量). 下面 helper 构造副露时, 用占位
+    // tile id (实际算法不读 id, 只读 kind), 仅保证 Meld 结构合法.
+
+    use crate::engine::domain::meld::{Meld, MeldKind, Seat};
+    use crate::engine::domain::tile::Tile;
+
+    fn tile(kind: u8, id: u16) -> Tile {
+        Tile {
+            kind: TileIndex(kind),
+            red: false,
+            id,
+        }
+    }
+
+    /// 构造吃副露 (3 张连续同花色, start = 起始 kind).
+    fn chi(start: u8, base_id: u16) -> Meld {
+        Meld {
+            kind: MeldKind::Chi {
+                tiles: [
+                    tile(start, base_id),
+                    tile(start + 1, base_id + 1),
+                    tile(start + 2, base_id + 2),
+                ],
+            },
+            from: Some(Seat::East),
+        }
+    }
+
+    /// 构造碰副露 (3 张同 kind).
+    fn pon(kind: u8, base_id: u16) -> Meld {
+        Meld {
+            kind: MeldKind::Pon {
+                tiles: [
+                    tile(kind, base_id),
+                    tile(kind, base_id + 1),
+                    tile(kind, base_id + 2),
+                ],
+            },
+            from: Some(Seat::South),
+        }
+    }
+
+    /// 构造明杠 (4 张同 kind).
+    fn minkan(kind: u8, base_id: u16) -> Meld {
+        Meld {
+            kind: MeldKind::Minkan {
+                tiles: [
+                    tile(kind, base_id),
+                    tile(kind, base_id + 1),
+                    tile(kind, base_id + 2),
+                    tile(kind, base_id + 3),
+                ],
+            },
+            from: Some(Seat::West),
+        }
+    }
+
+    /// 构造暗杠 (4 张同 kind, from = None).
+    fn ankan(kind: u8, base_id: u16) -> Meld {
+        Meld {
+            kind: MeldKind::Ankan {
+                tiles: [
+                    tile(kind, base_id),
+                    tile(kind, base_id + 1),
+                    tile(kind, base_id + 2),
+                    tile(kind, base_id + 3),
+                ],
+            },
+            from: None,
+        }
+    }
+
+    #[test]
+    fn tenpai_with_chi_meld_ryanmen() {
+        // 副露: 吃 123m + 闭手 10 张 = 78m + 234p + 678p + 11s 雀头, 听 6m(5)/9m(8) 双面.
+        let closed = h(&[
+            (6, 1),
+            (7, 1), // 78m
+            (10, 1),
+            (11, 1),
+            (12, 1), // 234p
+            (14, 1),
+            (15, 1),
+            (16, 1), // 678p
+            (18, 2), // 11s 雀头
+        ]);
+        let melds = vec![chi(0, 100)];
+        let waits = tenpai_tiles(&closed, &melds);
+        assert!(
+            waits.contains(&TileIndex(5)) && waits.contains(&TileIndex(8)),
+            "1 吃副露 + 78m 双面应听 6m(5)/9m(8), got {:?}",
+            waits
+        );
+    }
+
+    #[test]
+    fn tenpai_with_pon_meld_tanki() {
+        // 副露 1 + 闭手 3 面子 (9 张) + 单骑 (1 张) = 10 张. 听单 = 雀头.
+        // 副露: 碰 5p. 闭手: 123m + 456m + 789m + 单 5s.
+        let closed = h(&[
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (7, 1),
+            (8, 1),
+            (22, 1),
+        ]);
+        let melds = vec![pon(13, 200)];
+        let waits = tenpai_tiles(&closed, &melds);
+        assert!(
+            waits.contains(&TileIndex(22)),
+            "1 碰副露 + 单 5s 应听 5s, got {:?}",
+            waits
+        );
+    }
+
+    #[test]
+    fn tenpai_with_minkan_shanpon() {
+        // 副露 1 + 闭手 2 面子 + 2 对 = 10 张. 对碰: 听其中一对升刻.
+        // 副露 明杠 9s. 闭手 123m + 456p + 11s + 22s, 听 1s(18)/2s(19).
+        let closed = h(&[
+            (0, 1),
+            (1, 1),
+            (2, 1),
+            (12, 1),
+            (13, 1),
+            (14, 1),
+            (18, 2),
+            (19, 2),
+        ]);
+        let melds = vec![minkan(26, 300)];
+        let waits = tenpai_tiles(&closed, &melds);
+        assert!(
+            waits.contains(&TileIndex(18)) && waits.contains(&TileIndex(19)),
+            "1 明杠 + 11s+22s 对碰应听 1s/2s, got {:?}",
+            waits
+        );
+    }
+
+    #[test]
+    fn tenpai_with_ankan_ryanmen() {
+        // 副露 1 (暗杠) + 闭手 2 顺子 + 雀头 + 1 双面搭子 = 10 张.
+        // 副露 暗杠 1m. 闭手 234p + 567p + 78s + 99m, 听 6s(23)/9s(26).
+        let closed = h(&[
+            (10, 1),
+            (11, 1),
+            (12, 1),
+            (13, 1),
+            (14, 1),
+            (15, 1),
+            (24, 1),
+            (25, 1),
+            (8, 2),
+        ]);
+        let melds = vec![ankan(0, 400)];
+        let waits = tenpai_tiles(&closed, &melds);
+        assert!(
+            waits.contains(&TileIndex(23)) && waits.contains(&TileIndex(26)),
+            "1 暗杠 + 78s 双面应听 6s(23)/9s(26), got {:?}",
+            waits
+        );
+    }
+
+    #[test]
+    fn tenpai_with_three_melds_tanki() {
+        // 3 副露 → 闭手 13-9=4 张 = 1 面子 + 单骑.
+        // 副露: 碰 333p + 碰 555s + 暗杠 7777s. 闭手 4 张: 234m + 单 5m, 听 5m 单骑.
+        let closed = h(&[
+            (1, 1),
+            (2, 1),
+            (3, 1), // 234m
+            (4, 1), // 单 5m
+        ]);
+        let melds = vec![
+            pon(11, 500),   // 碰 3p (kind=11)
+            pon(22, 510),   // 碰 5s (kind=22)
+            ankan(24, 520), // 暗杠 7s (kind=24)
+        ];
+        let waits = tenpai_tiles(&closed, &melds);
+        assert!(
+            waits.contains(&TileIndex(4)),
+            "3 副露 + 234m+5m 应听 5m, got {:?}",
+            waits
+        );
+    }
+
+    #[test]
+    fn tenpai_with_four_melds_tanki() {
+        // 4 副露 → 闭手 13-12=1 张 = 单骑等雀头. 极端情况.
+        // 4 副露随便选: 吃123m + 碰 555p + 明杠 9999s + 暗杠 西西西西 (kind=29). 闭手 = 单 1p, 听 1p 单骑.
+        let closed = h(&[(9, 1)]); // 单 1p
+        let melds = vec![
+            chi(0, 600),     // 吃 123m
+            pon(13, 610),    // 碰 5p
+            minkan(26, 620), // 明杠 9s
+            ankan(29, 630),  // 暗杠 西
+        ];
+        let waits = tenpai_tiles(&closed, &melds);
+        assert!(
+            waits.contains(&TileIndex(9)),
+            "4 副露 + 单 1p 应听 1p, got {:?}",
+            waits
+        );
+        assert_eq!(waits.len(), 1, "4 副露单骑只听这 1 张, got {:?}", waits);
+    }
+
+    #[test]
+    fn can_win_with_meld_completes_hand() {
+        // can_win 接受闭手数组 (含 winning). 14 张型 = 闭手 11 张 + 副露 1 (3 张).
+        // 副露 吃 123m. 闭手 11 张: 234p + 567p + 234s + 99m, winning=9m.
+        let closed = h(&[
+            (10, 1),
+            (11, 1),
+            (12, 1), // 234p
+            (13, 1),
+            (14, 1),
+            (15, 1), // 567p
+            (19, 1),
+            (20, 1),
+            (21, 1), // 234s
+            (8, 2),  // 99m 雀头 (含 winning)
+        ]);
+        let melds = vec![chi(0, 700)];
+        assert!(
+            can_win(&closed, &melds, TileIndex(8)),
+            "1 吃 + 11 张闭手 (含 99m 雀头) 应能和 (winning=9m)"
+        );
     }
 }

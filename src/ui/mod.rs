@@ -87,6 +87,7 @@ pub enum Transition {
     /// 大厅创建房间 → 进 OnlineRoom.
     CreateOnlineRoom {
         nickname: String,
+        mode: crate::net::p2p::RoomMode,
     },
     /// 大厅加入房间 → 进 OnlineRoom (远程, 走 ws).
     JoinOnlineRoom {
@@ -289,6 +290,12 @@ impl App {
             self.cycle_theme();
             return None;
         }
+        // F8: dev-tools 录像全局开关 (持久化到 LocalPrefs).
+        #[cfg(feature = "dev-tools")]
+        if key.code == KeyCode::F(8) {
+            self.toggle_record_replays();
+            return None;
+        }
         // 全局快捷键: Q 弹确认 modal (主菜单除外, 直接退).
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q')) {
             return Some(Transition::RequestConfirm {
@@ -369,6 +376,19 @@ impl App {
         }
     }
 
+    /// F8: 切换录像全局开关 + 持久化 + 同步到当前 InGame 屏 (下一局生效).
+    #[cfg(feature = "dev-tools")]
+    fn toggle_record_replays(&mut self) {
+        let v = !self.local_prefs.dev.record_replays;
+        self.local_prefs.dev.record_replays = v;
+        if let Err(e) = self.local_prefs.save() {
+            tracing::warn!("保存 prefs 失败: {e}");
+        }
+        if let Screen::InGame(s) = &mut self.screen {
+            s.set_record_replays(v);
+        }
+    }
+
     fn apply_transition(&mut self, t: Transition) {
         match t {
             Transition::Quit => {
@@ -397,6 +417,7 @@ impl App {
                     self.last_config.clone(),
                     seed,
                     self.local_prefs.theme,
+                    self.local_prefs.dev.record_replays,
                 )));
             }
             Transition::EnterGameOver { rankings } => {
@@ -410,10 +431,11 @@ impl App {
                     &self.runtime,
                     bootstrap,
                     self.local_prefs.network.region,
+                    self.local_prefs.network.default_room_mode,
                 ));
             }
-            Transition::CreateOnlineRoom { nickname } => {
-                self.create_online_room(nickname);
+            Transition::CreateOnlineRoom { nickname, mode } => {
+                self.create_online_room(nickname, mode);
             }
             Transition::JoinOnlineRoom { nickname, addr } => {
                 self.join_online_room(nickname, addr);
@@ -432,11 +454,11 @@ impl App {
 
     /// 创建本地 RoomActor (房主), 同时启动 P2P listener 让远程玩家可加入,
     /// 自己用 LocalSession 直连 RoomActor. listener 内部跑 mDNS 广告 + libp2p swarm.
-    fn create_online_room(&mut self, nickname: String) {
+    /// `mode`: 房间模式 (Standard 房主权威 / ZeroTrust P2P mental poker).
+    fn create_online_room(&mut self, nickname: String, mode: crate::net::p2p::RoomMode) {
         use crate::net::p2p::bootstrap::{effective_bootstrap_relays, merge_relay_pool};
         use crate::net::p2p::discovery::encode_metadata;
         use crate::net::p2p::host::spawn_p2p_listener;
-        use crate::net::room::spawn_room;
         use crate::net::session::spawn_local_session;
 
         let room_id = format!("{}", uuid::Uuid::new_v4());
@@ -464,12 +486,15 @@ impl App {
             host_nick: nickname.clone(),
             room_id: room_id.clone(),
             region: self.local_prefs.network.region,
-            mode: self.local_prefs.network.default_room_mode,
+            mode,
         };
 
         // spawn_room 内部用 tokio::spawn, 必须在 runtime context 中调用.
+        // 用 spawn_room_with_mode 让用户选的 mode (大厅 'M' 键 picker / prefs)
+        // 真正传到 RoomActor.
+        use crate::net::room::spawn_room_with_mode;
         let setup_result = self.runtime.block_on(async {
-            let handle = spawn_room(nickname.clone(), self.last_config.clone());
+            let handle = spawn_room_with_mode(nickname.clone(), self.last_config.clone(), mode);
             let listener = spawn_p2p_listener(handle.clone(), metadata, bootstrap, lobby_meta)
                 .await
                 .map_err(|e| format!("P2P listener 启动失败: {e}"))?;
@@ -489,6 +514,7 @@ impl App {
                     &self.runtime,
                     bootstrap,
                     self.local_prefs.network.region,
+                    self.local_prefs.network.default_room_mode,
                     format!("创建失败: {e}"),
                 ));
                 return;
@@ -508,7 +534,7 @@ impl App {
             config: self.last_config.clone(),
             players: vec![],
             state: crate::net::protocol::RoomLifecycle::Lobby,
-            mode: self.local_prefs.network.default_room_mode,
+            mode,
         };
         let mut room_state = OnlineRoomState::new(session, placeholder_view);
         room_state.set_theme(self.local_prefs.theme);
@@ -528,6 +554,7 @@ impl App {
                     &self.runtime,
                     bootstrap,
                     self.local_prefs.network.region,
+                    self.local_prefs.network.default_room_mode,
                     format!("地址格式错误: {e}"),
                 ));
                 return;
@@ -560,6 +587,7 @@ impl App {
                     &self.runtime,
                     bootstrap,
                     self.local_prefs.network.region,
+                    self.local_prefs.network.default_room_mode,
                     format!("加入失败: {e}"),
                 ));
             }
@@ -678,14 +706,11 @@ impl App {
                 ));
             }
             Screen::InGame(s) => {
-                spans.push(Span::styled(
-                    "  Esc 回主菜单  |  Q 退出  ",
-                    Style::default().fg(Color::DarkGray),
-                ));
+                // Esc / Q 已在游戏屏 row 39 右侧菜单中, 这里不再重复.
                 if let Some(secs) = s.remaining_seconds() {
                     let color = if secs <= 5 { Color::Red } else { Color::Yellow };
                     spans.push(Span::styled(
-                        format!("|  ⏱ 剩 {}s  ", secs),
+                        format!("  ⏱ 剩 {}s  ", secs),
                         Style::default().fg(color),
                     ));
                 }

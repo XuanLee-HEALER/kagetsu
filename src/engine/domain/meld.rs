@@ -1,20 +1,45 @@
-//! 副露(鸣牌)与座位.
+//! 座位 (Seat) + 副露 (Meld / 鳴き / 副露 / Furo).
+//!
+//! 麻将 4 家固定按 *逆时针* 排列: 东 → 南 → 西 → 北 → 东... [`Seat::next`]
+//! 实现这个轮转. 副露指鸣牌后公开亮在桌上的牌组 ([`Meld`]) — 含吃 (Chi) /
+//! 碰 (Pon) / 杠 (Kan, 三种).
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::tile::Tile;
+use crate::engine::domain::tile::Tile;
 
+/// 4 家座位.
+///
+/// 顺序: `East → South → West → North → East...` ([`Seat::next`]).
+/// 与日麻惯例一致 (逆时针, 即麻将桌上的左旋).
+///
+/// 索引: [`Seat::index`] 返回 0..=3, 用于数组寻址 (例: `players[seat.index()]`).
+///
+/// # 术语
+///
+/// - 当庄家 (亲家 / 親 / Oya) = 当前局的 `MatchState::dealer`
+/// - 上家 (上家 / カミチャ / Kamicha) = 当前家的 *逆方向* 一家 (即 [`Seat::next`] 反向)
+/// - 下家 (下家 / シモチャ / Shimocha) = `current.next()`
+/// - 对家 (対面 / トイメン / Toimen) = `current.next().next()`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Seat {
+    /// 东 (东家 / トン / Ton).
     East,
+    /// 南 (南家 / ナン / Nan).
     South,
+    /// 西 (西家 / シャー / Shaa).
     West,
+    /// 北 (北家 / ペー / Pee).
     North,
 }
 
 impl Seat {
+    /// 4 家全集合, 用于 `for seat in Seat::ALL { ... }` 遍历.
     pub const ALL: [Seat; 4] = [Seat::East, Seat::South, Seat::West, Seat::North];
 
+    /// 下家 (Shimocha) — 麻将桌逆时针下一家.
+    ///
+    /// `East → South → West → North → East...`
     pub fn next(self) -> Seat {
         match self {
             Seat::East => Seat::South,
@@ -24,6 +49,9 @@ impl Seat {
         }
     }
 
+    /// 数组索引 (East=0, South=1, West=2, North=3).
+    ///
+    /// 用于 `players[seat.index()]` 等数组寻址.
     pub fn index(self) -> usize {
         match self {
             Seat::East => 0,
@@ -34,32 +62,49 @@ impl Seat {
     }
 }
 
+/// 副露 (鳴き / Naki) 类型.
+///
+/// 5 个 variant 对应日麻 5 种合法副露:
+/// - **顺子类** (Chi): 3 张连续同花色
+/// - **刻子类** (Pon): 3 张同 kind
+/// - **杠子类** (Minkan / Shouminkan / Ankan): 4 张同 kind, 来源不同
+///
+/// 各 variant `tiles` 数组长度匹配该副露的牌数 (3 或 4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MeldKind {
-    /// 吃: 必为下家弃牌.
+    /// 吃 (チー / Chi) — 顺子鸣牌. 3 张连续同花色 (例: 3m/4m/5m).
+    /// 仅可吃 *上家* 弃牌, 因此 [`Meld::from`] = `current.next()` 反向 = 上家.
     Chi { tiles: [Tile; 3] },
-    /// 碰.
+    /// 碰 (ポン / Pon) — 刻子鸣牌. 3 张同 kind, 来自任意他家弃牌.
     Pon { tiles: [Tile; 3] },
-    /// 大明杠.
+    /// 大明杠 (大明槓 / Minkan) — 鸣方手中 3 张同 kind 配他家弃牌成 4 张杠子.
     Minkan { tiles: [Tile; 4] },
-    /// 加杠(小明杠): 由已碰刻子加上自摸第四张.
+    /// 加杠 / 小明杠 (加槓 / 小明槓 / Shouminkan) — 已有副露 Pon 加自手第 4 张同 kind.
+    /// 是 *被抢杠* (Chankan / 槍槓役) 的唯一时机.
     Shouminkan { tiles: [Tile; 4] },
-    /// 暗杠.
+    /// 暗杠 (暗槓 / Ankan) — 自手 4 张同 kind 直接副露成杠.
+    /// 不破坏门前清 (Menzen) 状态.
     Ankan { tiles: [Tile; 4] },
 }
 
+/// 一个副露牌组 (Meld) — `kind` + 来源.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Meld {
+    /// 副露类型 + 包含的牌.
     pub kind: MeldKind,
-    /// 牌取自哪家(暗杠为 None).
+    /// 牌取自哪家. 暗杠 (Ankan) 没有来源 = `None`, 其它都 `Some`.
     pub from: Option<Seat>,
 }
 
 impl Meld {
+    /// 是否暗副露 (Concealed). 仅暗杠 (Ankan) 算.
+    ///
+    /// 暗杠不破坏门前清, 影响役判定 (例: 三暗刻可含暗杠).
     pub fn is_concealed(&self) -> bool {
         matches!(self.kind, MeldKind::Ankan { .. })
     }
 
+    /// 是否杠子. Minkan / Shouminkan / Ankan 均 true.
     pub fn is_kan(&self) -> bool {
         matches!(
             self.kind,
@@ -67,6 +112,7 @@ impl Meld {
         )
     }
 
+    /// 副露包含的所有牌 (3 或 4 张).
     pub fn tiles(&self) -> &[Tile] {
         match &self.kind {
             MeldKind::Chi { tiles } | MeldKind::Pon { tiles } => tiles,
@@ -80,7 +126,7 @@ impl Meld {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::tile::TileIndex;
+    use crate::engine::domain::tile::TileIndex;
 
     fn t(kind: u8, id: u16) -> Tile {
         Tile {

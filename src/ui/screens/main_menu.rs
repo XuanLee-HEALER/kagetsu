@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::ui::Transition;
 
-const ITEMS: &[&str] = &["单人游戏", "在线游戏", "退出"];
+const ITEMS: &[&str] = &["单人游戏", "在线游戏 (本分支暂不可用)", "退出"];
 
 #[derive(Debug, Default)]
 pub struct MainMenuState {
@@ -38,7 +38,11 @@ impl MainMenuState {
             }
             KeyCode::Enter | KeyCode::Char(' ') => match self.selected {
                 0 => Some(Transition::EnterConfig),
-                1 => Some(Transition::EnterOnlineLobby),
+                1 => {
+                    self.message =
+                        "在线模式在 pure-fn-refactor 分支暂不可用, 等单机迁移完成后恢复".into();
+                    None
+                }
                 2 => Some(Transition::Quit),
                 _ => None,
             },

@@ -1631,7 +1631,7 @@ impl MpPlayerActor {
         });
     }
 
-    fn emit_protocol_error(&self, offender: Option<usize>, reason: String) {
+    fn emit_protocol_error(&mut self, offender: Option<usize>, reason: String) {
         let _ = self.event_tx.send(MpEvent::ProtocolError {
             offender,
             reason: reason.clone(),
@@ -1640,6 +1640,17 @@ impl MpPlayerActor {
             "MpPlayerActor[{}] ProtocolError offender={offender:?}: {reason}",
             self.cfg.own_index
         );
+        // 协议错误后转 GameOver, 让 UI 知道局已 abort 可以干净退出. 不再继续推
+        // 协议消息 (state 已不一致, 继续可能引入更多错误).
+        if self.phase != MpPhase::GameOver {
+            self.phase = MpPhase::GameOver;
+            let _ = self
+                .event_tx
+                .send(MpEvent::PhaseChanged { phase: self.phase });
+            let _ = self.event_tx.send(MpEvent::GameOver {
+                reason: format!("协议错误 abort: {reason}"),
+            });
+        }
     }
 
     // M5.B.5+ 添加: handle_draw_request / handle_reveal_share / handle_discard /
@@ -1766,7 +1777,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_action_in_keyexchange_ignored_no_panic() {
-        use crate::domain::action::Action;
+        use crate::engine::domain::action::Action;
         let mut h = spawn_mp_player(test_cfg(0), Some(42));
         let mut rx = h.take_event_rx().unwrap();
         // 吞掉 init phase event

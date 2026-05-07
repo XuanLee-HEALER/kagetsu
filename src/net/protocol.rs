@@ -14,13 +14,13 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::meld::{Meld, Seat};
-use crate::domain::tile::{Tile, TileIndex};
+use crate::engine::domain::meld::{Meld, Seat};
+use crate::engine::domain::tile::{Tile, TileIndex};
 use crate::engine::event::GameEvent;
 use crate::engine::phase::Phase;
+use crate::engine::round_state::RoundWind;
 use crate::engine::rules::GameRules;
 use crate::engine::score::Ranking;
-use crate::engine::state::RoundWind;
 use crate::ui::screens::game::TileSpec;
 
 // ============================================================================
@@ -178,7 +178,7 @@ pub struct GameStateView {
     pub round_wind: RoundWind,
     pub kyoku: u8,
     pub honba: u8,
-    pub riichi_sticks: u8,
+    pub riichi_sticks: u32,
     pub dealer: Seat,
     pub turn: Seat,
     pub phase: Phase,

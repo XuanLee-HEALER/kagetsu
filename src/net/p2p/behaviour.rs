@@ -122,11 +122,18 @@ impl P2pBehaviour {
     ) -> Self {
         let agent_version = format!("{AGENT_PREFIX}{agent_metadata}");
 
-        // gossipsub 配置: 默认 + 签名 (用 swarm 同一个 keypair 签, 让 sender peer-id
-        // 跟连接 peer-id 一致) + 短 heartbeat 让 mesh 快速建立.
+        // gossipsub 配置: ZeroTrust 房间固定 4 节点, 默认 mesh_n_low=4 / mesh_n=6 在
+        // N=4 时永远低于 low watermark (每节点最多 3 mesh peer < 4) → mesh 不稳 →
+        // publish 返 InsufficientPeers → 协议卡 KeyExchange. 调到适配 4 节点拓扑.
+        // 大厅 (LobbyTopic) 节点数可能更多, 这套参数仍兼容 (mesh_n_high=4 限制 mesh
+        // 大小, fanout 走 gossip 兜底, lobby 房间发现仍 OK).
         let gossipsub_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(std::time::Duration::from_secs(1))
             .validation_mode(gossipsub::ValidationMode::Strict)
+            .mesh_n_low(2)
+            .mesh_n(3)
+            .mesh_n_high(4)
+            .mesh_outbound_min(1)
             .build()
             .expect("valid gossipsub config");
         let gossipsub_behaviour = gossipsub::Behaviour::new(

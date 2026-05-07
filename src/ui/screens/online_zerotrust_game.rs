@@ -603,10 +603,10 @@ impl ZeroTrustGameState {
         if win.player != self.args.own_index {
             return None;
         }
-        use crate::domain::decompose::decompose;
-        use crate::domain::meld::{Meld, MeldKind, Seat};
-        use crate::domain::tile::{Tile, TileIndex};
-        use crate::domain::yaku::{WinContext, detect_yaku};
+        use crate::engine::domain::decompose::decompose;
+        use crate::engine::domain::meld::{Meld, MeldKind, Seat};
+        use crate::engine::domain::tile::{Tile, TileIndex};
+        use crate::engine::domain::yaku::{WinContext, detect_yaku};
         use crate::engine::rules::GameRules;
         use crate::engine::score::evaluate;
 
@@ -1282,6 +1282,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -1398,6 +1399,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -1562,6 +1564,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -1711,6 +1714,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -1893,6 +1897,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -2116,6 +2121,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -2287,6 +2293,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -2465,6 +2472,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {
@@ -2659,6 +2667,7 @@ mod tests {
             tokio::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
+                        SwarmCommand::Subscribe { topic: _ } => {}
                         SwarmCommand::Broadcast { topic: _, msg } => {
                             for (idx, tx) in inbound_txs.iter().enumerate() {
                                 if idx == i {

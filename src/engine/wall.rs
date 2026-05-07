@@ -1,28 +1,50 @@
-//! 牌山 + 王牌 + dora 指示牌.
+//! 牌山 (牌山 / Wall / Yama) — 含活牌区 / 死墙 / 宝牌指示.
 //!
-//! 一副牌共 136 张, 王牌固定 14 张:
-//! - 4 张岭上(rinshan)
-//! - 5 对 dora 指示牌(上层为表 dora, 下层为里 dora)
+//! # 牌山结构 (136 张总数)
 //!
-//! 活牌山可摸 `136 - 14 - 13×4 = 70` 张.
+//! - **活牌区** (live wall / 山): 122 张, 摸牌从这里 pop. 配牌 13×4 = 52 张消耗后,
+//!   剩 70 张是真正能摸的 (荒牌流局 / 海底牌 / Haitei 都基于这个).
+//! - **死墙** (王牌 / Wanpai / 死牌): 14 张, 不参与正常摸牌. 内部:
+//!   - **岭上区** (嶺上 / Rinshan): 4 张, 给杠后摸 ([`Wall::rinshan_drawn`])
+//!   - **宝牌区** (ドラ / Dora): 10 张 (5 对). 偶数索引 = 表宝牌指示牌,
+//!     奇数索引 = 里宝牌 (Ura-Dora) 指示牌
+//!
+//! # Dora 翻牌规则
+//!
+//! - 局开始翻第 1 枚表宝牌指示
+//! - 每次杠后翻新一枚 (新ドラ / Shin-Dora)
+//! - 立直方和了时翻全部已翻位置对应的里宝牌
+//!
+//! # API: `&mut self` vs `consume self`
+//!
+//! 提供两套 API:
+//! - **mut 版** (`draw` / `rinshan_draw` / `reveal_next_dora`): legacy 风格,
+//!   原 GameState 用.
+//! - **pure 版** (`drawn` / `rinshan_drawn` / `revealed_next_dora`):
+//!   consume self 返新 Wall, type-state apply 内部用.
 
-use crate::domain::tile::{Tile, standard_set};
+use crate::engine::domain::tile::{Tile, standard_set};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
+use serde::{Deserialize, Serialize};
 
 const DEAD_WALL_LEN: usize = 14;
 const RINSHAN_LEN: usize = 4;
 const DORA_INDICATORS_MAX: usize = 5;
 
+/// 牌山实例. 由 [`Wall::shuffled`] 用确定性 seed 构造.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wall {
-    /// 活牌山(从尾部摸: pop()).
+    /// 活牌区 (Live wall). 摸牌从尾部 pop. 配牌后剩 70 张.
     live: Vec<Tile>,
-    /// 王牌区(共 14 张). 索引约定:
-    /// `[0..4]` 岭上(从 0 开始消耗),
-    /// `[4..14]` dora 区, 偶数 index = 表 dora 表牌, 奇数 = 对应里 dora.
+    /// 死墙 (Dead wall, 14 张). 内部分布:
+    /// - `[0..4]` 岭上区 (Rinshan), 杠后从 index 0 起消耗
+    /// - `[4..14]` 宝牌区, 偶数 = 表宝牌指示, 奇数 = 对应里宝牌 (Ura-Dora) 指示
     dead: Vec<Tile>,
+    /// 已用岭上张数 (0..=4).
     rinshan_used: usize,
+    /// 已翻表宝牌指示张数 (1..=5). 局开始 = 1, 每次杠后 +1, 上限 5.
     dora_revealed: usize,
 }
 
@@ -53,12 +75,20 @@ impl Wall {
         }
     }
 
-    /// 摸一张活牌(从尾部).
+    /// 摸一张活牌(从尾部). [`&mut self`] 版本, 旧 do_* 仍在用.
     pub fn draw(&mut self) -> Option<Tile> {
         self.live.pop()
     }
 
-    /// 杠后从岭上摸牌.
+    /// 摸一张活牌, **pure 风格**: consume self, 返新 Wall + Option<Tile>.
+    /// 用于 type-state apply 内部.
+    pub fn drawn(self) -> (Self, Option<Tile>) {
+        let mut next = self;
+        let t = next.live.pop();
+        (next, t)
+    }
+
+    /// 杠后从岭上摸牌. [`&mut self`] 版本, 旧 do_* 仍在用.
     pub fn rinshan_draw(&mut self) -> Option<Tile> {
         if self.rinshan_used >= RINSHAN_LEN {
             return None;
@@ -68,11 +98,31 @@ impl Wall {
         Some(t)
     }
 
-    /// 揭开新一张表 dora 指示牌(在杠成立后调用).
+    /// 杠后岭上摸, **pure 风格**: consume self.
+    pub fn rinshan_drawn(self) -> (Self, Option<Tile>) {
+        if self.rinshan_used >= RINSHAN_LEN {
+            return (self, None);
+        }
+        let t = self.dead[self.rinshan_used];
+        let mut next = self;
+        next.rinshan_used += 1;
+        (next, Some(t))
+    }
+
+    /// 揭开新一张表 dora 指示牌. [`&mut self`] 版本.
     pub fn reveal_next_dora(&mut self) {
         if self.dora_revealed < DORA_INDICATORS_MAX {
             self.dora_revealed += 1;
         }
+    }
+
+    /// 揭开新一张表 dora, **pure 风格**: consume self, 返新 Wall.
+    pub fn revealed_next_dora(self) -> Self {
+        let mut next = self;
+        if next.dora_revealed < DORA_INDICATORS_MAX {
+            next.dora_revealed += 1;
+        }
+        next
     }
 
     /// 当前已揭开的表 dora 指示牌列表.
@@ -141,7 +191,7 @@ mod tests {
 
     #[test]
     fn from_components_preserves_state() {
-        use crate::domain::tile::TileIndex;
+        use crate::engine::domain::tile::TileIndex;
         let mk = |k: u8, id: u16| Tile {
             id,
             kind: TileIndex(k),
@@ -179,7 +229,7 @@ mod tests {
     /// 同一张表 dora 指示牌 (除非两张随机刚好相同).
     #[test]
     fn ura_dora_indices_distinct_from_omote() {
-        use crate::domain::tile::TileIndex;
+        use crate::engine::domain::tile::TileIndex;
         // 用 from_components 显式控制 dead 区让 omote/ura 必定不同.
         let mk = |k: u8, id: u16| Tile {
             id,
@@ -276,7 +326,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "dora_revealed")]
     fn from_components_rejects_zero_dora() {
-        use crate::domain::tile::TileIndex;
+        use crate::engine::domain::tile::TileIndex;
         let mk = |k: u8, id: u16| Tile {
             id,
             kind: TileIndex(k),
@@ -287,11 +337,53 @@ mod tests {
         let _ = Wall::from_components(live, dead, 0);
     }
 
+    /// pure 版 drawn 与 mut 版 draw 行为等价.
+    #[test]
+    fn drawn_pure_equivalent_to_mut_draw() {
+        let mut w_mut = Wall::shuffled(42, false);
+        let mut w_pure = Wall::shuffled(42, false);
+        for _ in 0..5 {
+            let t_mut = w_mut.draw();
+            let (next_pure, t_pure) = w_pure.drawn();
+            w_pure = next_pure;
+            assert_eq!(t_mut.map(|t| t.id), t_pure.map(|t| t.id));
+            assert_eq!(w_mut.remaining(), w_pure.remaining());
+        }
+    }
+
+    /// pure 版 rinshan_drawn 行为正确, 4 次后返 None.
+    #[test]
+    fn rinshan_drawn_pure_capped_at_4() {
+        let w = Wall::shuffled(42, false);
+        let mut current = w;
+        for i in 0..4 {
+            let (next, t) = current.rinshan_drawn();
+            assert!(t.is_some(), "第 {i} 张应有");
+            current = next;
+        }
+        let (_, t) = current.rinshan_drawn();
+        assert!(t.is_none(), "第 5 张应无");
+    }
+
+    /// pure 版 revealed_next_dora 行为正确.
+    #[test]
+    fn revealed_next_dora_pure_caps() {
+        let mut w = Wall::shuffled(42, false);
+        assert_eq!(w.dora_indicators().len(), 1);
+        for expected in 2..=5 {
+            w = w.revealed_next_dora();
+            assert_eq!(w.dora_indicators().len(), expected);
+        }
+        // 已 5 张, 再 reveal 应 no-op.
+        w = w.revealed_next_dora();
+        assert_eq!(w.dora_indicators().len(), 5);
+    }
+
     /// from_components dead 长度 ≠ 14 → panic.
     #[test]
     #[should_panic(expected = "dead wall 必须 14 张")]
     fn from_components_rejects_wrong_dead_size() {
-        use crate::domain::tile::TileIndex;
+        use crate::engine::domain::tile::TileIndex;
         let mk = |k: u8, id: u16| Tile {
             id,
             kind: TileIndex(k),

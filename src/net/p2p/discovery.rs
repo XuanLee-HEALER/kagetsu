@@ -554,4 +554,446 @@ mod tests {
         let _br = RoomBrowser::start(rt.handle(), vec![]).expect("start");
         // drop runtime 让 spawn 的 task 退出.
     }
+
+    // ============================================================================
+    // helpers
+    // ============================================================================
+
+    fn make_peer() -> PeerId {
+        let kp = libp2p::identity::Keypair::generate_ed25519();
+        PeerId::from(&kp.public())
+    }
+
+    fn make_entry(addrs: Vec<Multiaddr>) -> RoomEntry {
+        RoomEntry {
+            peer_id: make_peer(),
+            addrs,
+            host_nick: "h".into(),
+            players: 0,
+            state: "lobby".into(),
+            room_id: "r".into(),
+            region: Region::default(),
+            mode: RoomMode::default(),
+        }
+    }
+
+    fn now_ms() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    }
+
+    impl RoomBrowser {
+        /// 测试用: 直接构造一个带预填 state 的 browser, 跳过 swarm 启动.
+        fn with_state_for_test(state: BrowserState) -> Self {
+            Self {
+                state,
+                rx: None,
+                _shutdown: None,
+            }
+        }
+    }
+
+    // ============================================================================
+    // RoomEntry 字段 / addr 选择
+    // ============================================================================
+
+    #[test]
+    fn room_entry_primary_addr_prefers_quic() {
+        let entry = make_entry(vec![
+            "/ip4/127.0.0.1/tcp/4001".parse().unwrap(),
+            "/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap(),
+        ]);
+        assert!(addr_is_quic(entry.primary_addr().unwrap()));
+    }
+
+    #[test]
+    fn room_entry_primary_addr_no_quic_falls_back_to_first() {
+        let entry = make_entry(vec!["/ip4/127.0.0.1/tcp/4001".parse().unwrap()]);
+        let primary = entry.primary_addr().unwrap();
+        assert!(!addr_is_quic(primary));
+        assert_eq!(primary.to_string(), "/ip4/127.0.0.1/tcp/4001");
+    }
+
+    #[test]
+    fn room_entry_primary_addr_empty_returns_none_and_addr_returns_question_mark() {
+        let entry = make_entry(vec![]);
+        assert!(entry.primary_addr().is_none());
+        assert_eq!(entry.addr(), "?");
+        assert!(entry.dial_multiaddr().is_none());
+    }
+
+    #[test]
+    fn room_entry_addr_returns_quic_string() {
+        let entry = make_entry(vec!["/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap()]);
+        assert!(entry.addr().contains("quic-v1"));
+    }
+
+    #[test]
+    fn room_entry_dial_multiaddr_appends_p2p() {
+        let entry = make_entry(vec!["/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap()]);
+        let dial = entry.dial_multiaddr().unwrap();
+        assert!(
+            dial.iter()
+                .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_))),
+            "dial_multiaddr 应自动 append /p2p/<peer-id>"
+        );
+    }
+
+    // ============================================================================
+    // BrowserState::apply 各 variant
+    // ============================================================================
+
+    #[test]
+    fn apply_peer_found_dedupes_addrs() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        let addr: Multiaddr = "/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap();
+        state.apply(BrowserEvent::PeerFound {
+            peer,
+            addr: addr.clone(),
+        });
+        state.apply(BrowserEvent::PeerFound {
+            peer,
+            addr: addr.clone(),
+        });
+        assert_eq!(state.addrs.get(&peer).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn apply_peer_lost_removes_addr_and_metadata() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        state.apply(BrowserEvent::PeerFound {
+            peer,
+            addr: "/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap(),
+        });
+        state.apply(BrowserEvent::Identified {
+            peer,
+            agent_version: format!("{AGENT_PREFIX}host_nick=Z;players=1;lifecycle=lobby;room_id=t"),
+        });
+        assert!(state.addrs.contains_key(&peer));
+        assert!(state.metadata.contains_key(&peer));
+
+        state.apply(BrowserEvent::PeerLost { peer });
+        assert!(!state.addrs.contains_key(&peer));
+        assert!(!state.metadata.contains_key(&peer));
+    }
+
+    #[test]
+    fn apply_identified_with_non_tui_majo_agent_does_not_overwrite() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        state.apply(BrowserEvent::Identified {
+            peer,
+            agent_version: format!("{AGENT_PREFIX}host_nick=A;players=1;lifecycle=lobby;room_id=r"),
+        });
+        let before = state.metadata.get(&peer).unwrap().host_nick.clone();
+        state.apply(BrowserEvent::Identified {
+            peer,
+            agent_version: "ipfs/0.1.0".into(),
+        });
+        assert_eq!(state.metadata.get(&peer).unwrap().host_nick, before);
+    }
+
+    #[test]
+    fn apply_lobby_announcement_writes_metadata_and_addrs() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        state.apply(BrowserEvent::LobbyAnnouncement(LobbyAnnouncement {
+            schema_version: 1,
+            host_peer_id: peer.to_string(),
+            host_nick: "Host".into(),
+            players: 2,
+            lifecycle: "lobby".into(),
+            room_id: "abc".into(),
+            multiaddrs: vec!["/ip4/1.2.3.4/udp/4001/quic-v1".into()],
+            timestamp_unix_ms: now_ms(),
+            region: Region::CnEast,
+            mode: RoomMode::ZeroTrust,
+        }));
+        let md = state.metadata.get(&peer).unwrap();
+        assert_eq!(md.host_nick, "Host");
+        assert_eq!(md.players, 2);
+        assert_eq!(md.region, Region::CnEast);
+        assert_eq!(md.mode, RoomMode::ZeroTrust);
+        assert_eq!(state.addrs.get(&peer).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn apply_lobby_announcement_with_invalid_peer_id_is_no_op() {
+        let mut state = BrowserState::default();
+        state.apply(BrowserEvent::LobbyAnnouncement(LobbyAnnouncement {
+            schema_version: 1,
+            host_peer_id: "garbage".into(),
+            host_nick: "X".into(),
+            players: 1,
+            lifecycle: "lobby".into(),
+            room_id: "r".into(),
+            multiaddrs: vec![],
+            timestamp_unix_ms: 1,
+            region: Region::Unknown,
+            mode: RoomMode::Standard,
+        }));
+        assert!(state.metadata.is_empty());
+        assert!(state.addrs.is_empty());
+    }
+
+    #[test]
+    fn apply_lobby_announcement_skips_unparseable_addrs() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        state.apply(BrowserEvent::LobbyAnnouncement(LobbyAnnouncement {
+            schema_version: 1,
+            host_peer_id: peer.to_string(),
+            host_nick: "h".into(),
+            players: 0,
+            lifecycle: "lobby".into(),
+            room_id: "r".into(),
+            multiaddrs: vec!["garbage".into(), "/ip4/1.2.3.4/udp/4001/quic-v1".into()],
+            timestamp_unix_ms: now_ms(),
+            region: Region::Unknown,
+            mode: RoomMode::Standard,
+        }));
+        assert_eq!(
+            state.addrs.get(&peer).unwrap().len(),
+            1,
+            "garbage addr 应被跳过"
+        );
+    }
+
+    #[test]
+    fn apply_lobby_announcement_dedupes_existing_addrs() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        let same: Multiaddr = "/ip4/1.2.3.4/udp/4001/quic-v1".parse().unwrap();
+        state.apply(BrowserEvent::PeerFound {
+            peer,
+            addr: same.clone(),
+        });
+        state.apply(BrowserEvent::LobbyAnnouncement(LobbyAnnouncement {
+            schema_version: 1,
+            host_peer_id: peer.to_string(),
+            host_nick: "h".into(),
+            players: 0,
+            lifecycle: "lobby".into(),
+            room_id: "r".into(),
+            multiaddrs: vec![same.to_string()],
+            timestamp_unix_ms: now_ms(),
+            region: Region::Unknown,
+            mode: RoomMode::Standard,
+        }));
+        assert_eq!(state.addrs.get(&peer).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn apply_relay_announcement_invalid_peer_id_is_no_op() {
+        let mut state = BrowserState::default();
+        state.apply(BrowserEvent::RelayAnnouncement(RelayAnnouncement {
+            schema_version: 1,
+            peer_id: "garbage".into(),
+            multiaddrs: vec!["/ip4/1.2.3.4/udp/4001/quic-v1".into()],
+            timestamp_unix_ms: 1,
+        }));
+        assert!(state.relays.is_empty());
+    }
+
+    // ============================================================================
+    // parse_metadata 边界
+    // ============================================================================
+
+    #[test]
+    fn parse_metadata_lifecycle_alias() {
+        let agent = format!("{AGENT_PREFIX}host_nick=Bob;players=1;lifecycle=in_game;room_id=x");
+        let md = parse_metadata(&agent).unwrap();
+        assert_eq!(md.state, "in_game");
+    }
+
+    #[test]
+    fn parse_metadata_state_legacy_alias() {
+        let agent = format!("{AGENT_PREFIX}host_nick=Bob;players=1;state=in_game;room_id=x");
+        let md = parse_metadata(&agent).unwrap();
+        assert_eq!(md.state, "in_game");
+    }
+
+    #[test]
+    fn parse_metadata_unknown_keys_skipped() {
+        let agent =
+            format!("{AGENT_PREFIX}host_nick=Z;players=1;lifecycle=lobby;room_id=r;extra=ok");
+        let md = parse_metadata(&agent).unwrap();
+        assert_eq!(md.host_nick, "Z");
+    }
+
+    #[test]
+    fn parse_metadata_invalid_players_clamps_to_zero() {
+        let agent = format!("{AGENT_PREFIX}host_nick=Z;players=abc;lifecycle=lobby;room_id=r");
+        let md = parse_metadata(&agent).unwrap();
+        assert_eq!(md.players, 0);
+    }
+
+    #[test]
+    fn parse_metadata_kv_without_eq_is_skipped() {
+        let agent =
+            format!("{AGENT_PREFIX}host_nick=Z;orphankey;players=1;lifecycle=lobby;room_id=r");
+        let md = parse_metadata(&agent).unwrap();
+        assert_eq!(md.host_nick, "Z");
+    }
+
+    // ============================================================================
+    // RoomBrowser::rooms() / relays() / poll()
+    // ============================================================================
+
+    #[test]
+    fn rooms_filters_peer_without_metadata() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        state.apply(BrowserEvent::PeerFound {
+            peer,
+            addr: "/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap(),
+        });
+        let br = RoomBrowser::with_state_for_test(state);
+        assert!(br.rooms().is_empty());
+    }
+
+    #[test]
+    fn rooms_returns_mdns_entry_with_zero_timestamp() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        state.apply(BrowserEvent::PeerFound {
+            peer,
+            addr: "/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap(),
+        });
+        state.apply(BrowserEvent::Identified {
+            peer,
+            agent_version: format!(
+                "{AGENT_PREFIX}host_nick=Bob;players=1;lifecycle=lobby;room_id=r"
+            ),
+        });
+        let br = RoomBrowser::with_state_for_test(state);
+        let rooms = br.rooms();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].host_nick, "Bob");
+    }
+
+    #[test]
+    fn rooms_filters_expired_gossipsub_entries() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        state.apply(BrowserEvent::LobbyAnnouncement(LobbyAnnouncement {
+            schema_version: 1,
+            host_peer_id: peer.to_string(),
+            host_nick: "Stale".into(),
+            players: 1,
+            lifecycle: "lobby".into(),
+            room_id: "r".into(),
+            multiaddrs: vec!["/ip4/1.2.3.4/udp/4001/quic-v1".into()],
+            timestamp_unix_ms: now_ms() - 60_000, // 60s 前
+            region: Region::Unknown,
+            mode: RoomMode::Standard,
+        }));
+        let br = RoomBrowser::with_state_for_test(state);
+        assert!(br.rooms().is_empty(), "60s 前的 announcement 应过期");
+    }
+
+    #[test]
+    fn rooms_sorted_by_host_nick() {
+        let mut state = BrowserState::default();
+        let peers: Vec<PeerId> = (0..3).map(|_| make_peer()).collect();
+        let nicks = ["Charlie", "Alice", "Bob"];
+        for (i, peer) in peers.iter().enumerate() {
+            state.apply(BrowserEvent::PeerFound {
+                peer: *peer,
+                addr: "/ip4/127.0.0.1/udp/4001/quic-v1".parse().unwrap(),
+            });
+            state.apply(BrowserEvent::Identified {
+                peer: *peer,
+                agent_version: format!(
+                    "{AGENT_PREFIX}host_nick={};players=1;lifecycle=lobby;room_id=r{i}",
+                    nicks[i],
+                ),
+            });
+        }
+        let br = RoomBrowser::with_state_for_test(state);
+        let rooms = br.rooms();
+        assert_eq!(rooms.len(), 3);
+        assert_eq!(rooms[0].host_nick, "Alice");
+        assert_eq!(rooms[1].host_nick, "Bob");
+        assert_eq!(rooms[2].host_nick, "Charlie");
+    }
+
+    #[test]
+    fn relays_returns_addr_with_p2p_appended_when_missing() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        state.apply(BrowserEvent::RelayAnnouncement(RelayAnnouncement {
+            schema_version: 1,
+            peer_id: peer.to_string(),
+            multiaddrs: vec!["/ip4/1.2.3.4/udp/4001/quic-v1".into()],
+            timestamp_unix_ms: now_ms(),
+        }));
+        let br = RoomBrowser::with_state_for_test(state);
+        let relays = br.relays();
+        assert_eq!(relays.len(), 1);
+        assert!(
+            relays[0]
+                .iter()
+                .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_))),
+            "relays() 应自动 append /p2p/ 段"
+        );
+    }
+
+    #[test]
+    fn relays_keeps_addr_with_existing_p2p() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        let addr_with_p2p = format!("/ip4/1.2.3.4/udp/4001/quic-v1/p2p/{peer}");
+        state.apply(BrowserEvent::RelayAnnouncement(RelayAnnouncement {
+            schema_version: 1,
+            peer_id: peer.to_string(),
+            multiaddrs: vec![addr_with_p2p.clone()],
+            timestamp_unix_ms: now_ms(),
+        }));
+        let br = RoomBrowser::with_state_for_test(state);
+        let relays = br.relays();
+        assert_eq!(relays.len(), 1);
+        assert_eq!(relays[0].to_string(), addr_with_p2p);
+    }
+
+    #[test]
+    fn relays_filters_expired_entries() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        state.apply(BrowserEvent::RelayAnnouncement(RelayAnnouncement {
+            schema_version: 1,
+            peer_id: peer.to_string(),
+            multiaddrs: vec!["/ip4/1.2.3.4/udp/4001/quic-v1".into()],
+            timestamp_unix_ms: now_ms() - 60_000,
+        }));
+        let br = RoomBrowser::with_state_for_test(state);
+        assert!(br.relays().is_empty());
+    }
+
+    #[test]
+    fn relays_dedupes_same_full_addr_across_announcements() {
+        let mut state = BrowserState::default();
+        let peer = make_peer();
+        state.apply(BrowserEvent::RelayAnnouncement(RelayAnnouncement {
+            schema_version: 1,
+            peer_id: peer.to_string(),
+            multiaddrs: vec![
+                "/ip4/1.2.3.4/udp/4001/quic-v1".into(),
+                "/ip4/1.2.3.4/udp/4001/quic-v1".into(),
+            ],
+            timestamp_unix_ms: now_ms(),
+        }));
+        let br = RoomBrowser::with_state_for_test(state);
+        assert_eq!(br.relays().len(), 1, "同 multiaddr 应去重");
+    }
+
+    #[test]
+    fn poll_with_no_rx_does_not_panic() {
+        let mut br = RoomBrowser::with_state_for_test(BrowserState::default());
+        br.poll();
+    }
 }

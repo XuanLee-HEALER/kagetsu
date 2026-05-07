@@ -24,14 +24,15 @@ use std::time::{Duration, Instant};
 
 use crate::ai::dummy::ai_choose_discard;
 use crate::ai::timeout::default_action_on_timeout;
-use crate::domain::action::Action;
-use crate::domain::meld::{MeldKind, Seat};
-use crate::domain::tile::{Tile, TileIndex};
+use crate::engine::domain::action::Action;
+use crate::engine::domain::meld::{MeldKind, Seat};
+use crate::engine::domain::tile::{Tile, TileIndex};
 use crate::engine::event::GameEvent;
 use crate::engine::phase::Phase;
+use crate::engine::round_state::RoundResult;
 use crate::engine::rules::GameRules;
 use crate::engine::score::final_ranking;
-use crate::engine::state::{CallOptions, GameState, RoundResult, RyuukyokuKind};
+use crate::game_engine::{CallOptions, GameEngine};
 use crate::ui::Transition;
 use crate::ui::paint::{
     TileState, paint_back_column_wide, paint_back_row_wide, paint_boxed_row_hl,
@@ -47,7 +48,7 @@ const PLAYER_SEAT: Seat = Seat::East;
 const AI_STEP_DELAY_MS: u64 = 350;
 
 pub struct GameScreenState {
-    pub game: GameState,
+    pub engine: GameEngine,
     /// 玩家选中的手牌索引.
     pub selected: usize,
     /// 当玩家有可执行的鸣牌/荣和时缓存.
@@ -74,14 +75,27 @@ pub struct GameScreenState {
     pub theme_kind: crate::ui::theme::ThemeKind,
     /// 多选吃法时弹出的 picker. 非 None 时优先吃所有按键.
     pub chi_picker: Option<crate::ui::chi_picker::ChiPicker>,
+    /// 全局录像开关 (来自 LocalPrefs.dev.record_replays). feature 关时
+    /// 字段还在但永远不被读, F8 也不会改它.
+    pub record_replays: bool,
+    /// 当前局的初始 engine snapshot. 局开始时若 record_replays 为
+    /// true 则填充, RoundEnd 时连同 engine.recorded_actions 一起 flush.
+    #[cfg(feature = "dev-tools")]
+    pub recording_initial: Option<GameEngine>,
 }
 
 impl GameScreenState {
-    pub fn new(config: GameRules, game_seed: u64, theme_kind: crate::ui::theme::ThemeKind) -> Self {
-        let mut g = GameState::new(config);
+    pub fn new(
+        config: GameRules,
+        game_seed: u64,
+        theme_kind: crate::ui::theme::ThemeKind,
+        record_replays: bool,
+    ) -> Self {
+        let mut g = GameEngine::new(config);
         g.start_round(game_seed ^ 1);
-        Self {
-            game: g,
+        #[allow(unused_mut)]
+        let mut s = Self {
+            engine: g,
             selected: 0,
             player_calls: None,
             calls_resolved: false,
@@ -95,7 +109,15 @@ impl GameScreenState {
             round_end_at: None,
             theme_kind,
             chi_picker: None,
-        }
+            record_replays,
+            #[cfg(feature = "dev-tools")]
+            recording_initial: None,
+        };
+        #[cfg(feature = "dev-tools")]
+        s.maybe_start_recording();
+        // record_replays 在 feature off 时只是个 dead bool, 静默.
+        let _ = record_replays;
+        s
     }
 
     /// 推进自动状态. 返回 Some(Transition) 表示要切屏(整场结束).
@@ -120,23 +142,22 @@ impl GameScreenState {
             return None;
         }
 
-        match self.game.phase {
+        match self.engine.phase() {
             Phase::Deal => {
                 self.round_index += 1;
                 let seed = self.game_seed ^ self.round_index;
-                self.game.start_round(seed);
+                self.engine.start_round(seed);
                 self.selected = 0;
                 self.player_calls = None;
                 self.calls_resolved = false;
                 self.last_step_at = Instant::now();
                 self.clear_deadline();
+                #[cfg(feature = "dev-tools")]
+                self.maybe_start_recording();
             }
             Phase::Draw => {
-                if self.game.do_draw().is_none() {
-                    self.game.phase = Phase::RoundEnd;
-                    self.game.last_result = Some(RoundResult::Ryuukyoku {
-                        kind: RyuukyokuKind::Howaipai,
-                    });
+                if self.engine.do_draw().is_none() {
+                    // engine 内部已自动转 RoundEnd + 填 last_result (山摸尽 → 流局).
                     self.message = String::from("流局.");
                     return None;
                 }
@@ -149,10 +170,17 @@ impl GameScreenState {
             }
             Phase::AwaitDiscard => {
                 if !self.is_player_turn() {
-                    let action = ai_choose_discard(&self.game);
+                    let action = ai_choose_discard(&self.engine.round);
                     self.apply_ai_action(action);
                     self.last_step_at = Instant::now();
                     self.clear_deadline();
+                } else if self.player().riichi && !self.engine.can_tsumo() {
+                    // 立直后强制摸切 (除非可自摸, 留给玩家按 W 决定).
+                    // 走 AI 节流让玩家看到摸到的牌再切出.
+                    self.update_self_message();
+                    if self.last_step_at.elapsed().as_millis() >= AI_STEP_DELAY_MS as u128 {
+                        self.try_player_tsumogiri();
+                    }
                 } else {
                     self.update_self_message();
                     self.set_deadline_if_unset();
@@ -160,16 +188,16 @@ impl GameScreenState {
             }
             Phase::AwaitCalls => {
                 if self.calls_resolved {
-                    self.game.advance_turn();
+                    self.engine.advance_turn();
                     self.calls_resolved = false;
                     self.last_step_at = Instant::now();
                     self.clear_deadline();
                     return None;
                 }
                 self.calls_resolved = true;
-                let from = self.game.last_discard.map(|(s, _)| s);
+                let from = self.engine.last_discard().map(|(s, _)| s);
                 let Some(from) = from else {
-                    self.game.advance_turn();
+                    self.engine.advance_turn();
                     return None;
                 };
 
@@ -178,8 +206,8 @@ impl GameScreenState {
                     if s == PLAYER_SEAT {
                         continue;
                     }
-                    if let Some(score) = self.game.try_ron(s) {
-                        self.game.declare_ron(s, score);
+                    if let Some(score) = self.engine.try_ron(s) {
+                        self.engine.declare_ron(s, score);
                         self.message = format!("{} 荣和!", seat_label(s));
                         return None;
                     }
@@ -187,7 +215,7 @@ impl GameScreenState {
 
                 // 2) 玩家是否有响应选项?
                 if from != PLAYER_SEAT {
-                    let opts = self.game.legal_calls(PLAYER_SEAT);
+                    let opts = self.engine.legal_calls(PLAYER_SEAT);
                     if opts.any() {
                         let mut hints: Vec<String> = Vec::new();
                         if opts.ron {
@@ -215,16 +243,18 @@ impl GameScreenState {
                 }
 
                 // 3) 无人响应, 推进.
-                self.game.advance_turn();
+                self.engine.advance_turn();
                 self.calls_resolved = false;
                 self.last_step_at = Instant::now();
                 self.clear_deadline();
             }
             Phase::RoundEnd => {
-                // 首次进入 RoundEnd: 设置 message.
+                // 首次进入 RoundEnd: 设置 message + flush 录像.
                 if self.round_end_at.is_none() {
                     self.round_end_at = Some(Instant::now());
-                    if let Some(result) = self.game.last_result.clone() {
+                    #[cfg(feature = "dev-tools")]
+                    self.flush_recording_if_any();
+                    if let Some(result) = self.engine.last_result.clone() {
                         self.message = match &result {
                             RoundResult::Ryuukyoku { .. } => "流局. 按 N 进下一局.".to_string(),
                             RoundResult::Win {
@@ -258,7 +288,7 @@ impl GameScreenState {
                 // 流局/和牌都等用户按 N 主动推进 (next_round).
             }
             Phase::GameEnd => {
-                let rankings = final_ranking(&self.game.players, &self.game.rules);
+                let rankings = final_ranking(self.engine.players(), self.engine.rules());
                 return Some(Transition::EnterGameOver { rankings });
             }
         }
@@ -266,6 +296,18 @@ impl GameScreenState {
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Option<Transition> {
+        // Dev-only savestate (F5/F9). 优先级最高: chi picker / modal / riichi lock
+        // 都不拦截, 任何时刻都能存读档.
+        #[cfg(feature = "dev-tools")]
+        if matches!(key.code, KeyCode::F(5)) {
+            self.dev_quick_save();
+            return None;
+        }
+        #[cfg(feature = "dev-tools")]
+        if matches!(key.code, KeyCode::F(9)) {
+            self.dev_quick_load();
+            return None;
+        }
         // ChiPicker 打开: 优先吃所有按键.
         if let Some(picker) = self.chi_picker.as_mut() {
             use crate::ui::chi_picker::ChiOutcome;
@@ -286,6 +328,11 @@ impl GameScreenState {
         if self.modal_open {
             return self.handle_modal_key(key);
         }
+        // 立直后游戏内操作锁: 除 W (自摸/荣和) / C (跳过响应) / Esc (回主菜单)
+        // 外其它键全部 noop. 自动摸切由 advance() 处理.
+        if self.is_riichi_locked() {
+            return self.handle_riichi_locked_key(key);
+        }
         match key.code {
             KeyCode::Char('m') | KeyCode::Char('M') => {
                 // 注意: AwaitCalls 时 m 是明杠键, 这里改用 modal 唤起.
@@ -300,12 +347,12 @@ impl GameScreenState {
                 }
             }
             KeyCode::Left => {
-                if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
+                if self.is_player_turn() && self.engine.phase() == Phase::AwaitDiscard {
                     self.selected = self.selected.saturating_sub(1);
                 }
             }
             KeyCode::Right => {
-                if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
+                if self.is_player_turn() && self.engine.phase() == Phase::AwaitDiscard {
                     let len = self.selectable_count();
                     if self.selected + 1 < len {
                         self.selected += 1;
@@ -346,21 +393,72 @@ impl GameScreenState {
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
-                if self.game.phase == Phase::RoundEnd {
-                    self.game.next_round();
+                if self.engine.phase() == Phase::RoundEnd {
+                    // 推 mat (kyoku/dealer/honba/riichi_sticks_pool 推进 + 检测整庄结束).
+                    self.engine.next_round();
+                    // 整庄结束 → 不起新一局, advance() 下次会转 EnterGameOver.
+                    if !self.engine.mat.ended {
+                        // 起新一局: 算下一 seed + reset 局内 UI 状态.
+                        self.round_index += 1;
+                        let seed = self.game_seed ^ self.round_index;
+                        self.engine.start_round(seed);
+                        self.selected = 0;
+                        self.player_calls = None;
+                        self.calls_resolved = false;
+                        #[cfg(feature = "dev-tools")]
+                        self.maybe_start_recording();
+                    }
                     self.round_end_at = None;
                     self.message.clear();
                     self.last_step_at = Instant::now();
+                    self.clear_deadline();
                 }
             }
             // 数字 1-9 选第 N 张牌 (索引 selectable_tiles, 不含摸到的).
             KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                if self.is_player_turn() && self.game.phase == Phase::AwaitDiscard {
+                if self.is_player_turn() && self.engine.phase() == Phase::AwaitDiscard {
                     let idx = (c.to_digit(10).unwrap() - 1) as usize;
                     let len = self.selectable_count();
                     if idx < len {
                         self.selected = idx;
                     }
+                }
+            }
+            KeyCode::Esc => {
+                return Some(Transition::RequestConfirm {
+                    modal: Box::new(crate::ui::confirm::ConfirmModal::new(
+                        "回主菜单",
+                        "确定离开当前对局回主菜单? 进度会丢失.",
+                    )),
+                    action: crate::ui::ConfirmAction::BackToMainMenu,
+                });
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// 立直后是否锁定游戏内操作键 (AwaitDiscard / AwaitCalls 阶段).
+    fn is_riichi_locked(&self) -> bool {
+        self.player().riichi
+            && matches!(
+                self.engine.phase(),
+                Phase::AwaitDiscard | Phase::AwaitCalls | Phase::Draw
+            )
+    }
+
+    /// 立直锁定模式下只允许 W / C / Esc.
+    fn handle_riichi_locked_key(&mut self, key: KeyEvent) -> Option<Transition> {
+        match key.code {
+            KeyCode::Char('w') | KeyCode::Char('W') => {
+                self.try_player_win();
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                if self.player_calls.is_some() {
+                    self.player_calls = None;
+                    self.message = "已跳过.".into();
+                    self.last_step_at = Instant::now();
+                    self.clear_deadline();
                 }
             }
             KeyCode::Esc => {
@@ -451,12 +549,12 @@ impl GameScreenState {
 
     /// 摸切: 切刚摸的那张.
     fn try_player_tsumogiri(&mut self) {
-        if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
+        if !self.is_player_turn() || self.engine.phase() != Phase::AwaitDiscard {
             return;
         }
         let p = self.player();
         if let Some(t) = p.last_drawn
-            && self.game.do_discard(t).is_ok()
+            && self.engine.do_discard(t).is_ok()
         {
             self.calls_resolved = false;
             self.player_calls = None;
@@ -466,13 +564,26 @@ impl GameScreenState {
     }
 
     fn update_self_message(&mut self) {
-        let opts = self.game.legal_self_options();
+        let opts = self.engine.legal_self_options();
+        // 立直中: 只剩 W 自摸或自动摸切.
+        if self.player().riichi {
+            let intro = if opts.tsumo {
+                "立直中, 可自摸! W 和  T/Enter 摸切"
+            } else {
+                "立直中: 自动摸切..."
+            };
+            self.message = intro.into();
+            return;
+        }
         let mut hints = vec!["←/→ 选".to_string(), "Enter 切".to_string()];
         if opts.tsumo {
             hints.push("W 自摸".into());
         }
         if !opts.riichi_discards.is_empty() {
-            hints.push(format!("R 立直({}张可)", opts.riichi_discards.len()));
+            hints.push(format!(
+                "R 立直 (高亮 {} 张可立, ←/→ 选后按 R)",
+                opts.riichi_discards.len()
+            ));
         }
         if !opts.ankan.is_empty() {
             hints.push("K 暗杠".into());
@@ -491,18 +602,18 @@ impl GameScreenState {
     fn apply_ai_action(&mut self, action: Action) {
         match action {
             Action::Discard(t) => {
-                let _ = self.game.do_discard(t);
+                let _ = self.engine.do_discard(t);
             }
             Action::Tsumo => {
-                if let Some(score) = self.game.try_tsumo() {
-                    let winner = self.game.turn;
-                    self.game.declare_tsumo(score);
+                if let Some(score) = self.engine.try_tsumo() {
+                    let winner = self.engine.turn();
+                    self.engine.declare_tsumo(score);
                     self.message = format!("{} 自摸!", seat_label(winner));
                 }
             }
             Action::Ron(seat) => {
-                if let Some(score) = self.game.try_ron(seat) {
-                    self.game.declare_ron(seat, score);
+                if let Some(score) = self.engine.try_ron(seat) {
+                    self.engine.declare_ron(seat, score);
                     self.message = format!("{} 荣和!", seat_label(seat));
                 }
             }
@@ -511,10 +622,10 @@ impl GameScreenState {
     }
 
     fn apply_timeout_default(&mut self) {
-        let action = default_action_on_timeout(&self.game);
+        let action = default_action_on_timeout(&self.engine.round);
         match action {
             Action::Discard(t) => {
-                if self.game.do_discard(t).is_ok() {
+                if self.engine.do_discard(t).is_ok() {
                     self.message = "(超时) 自动切刚摸的牌.".into();
                     self.calls_resolved = false;
                     self.player_calls = None;
@@ -536,7 +647,7 @@ impl GameScreenState {
         if self.decision_deadline.is_some() {
             return;
         }
-        if let Some(secs) = self.game.rules.thinking_time_secs {
+        if let Some(secs) = self.engine.rules().thinking_time_secs {
             self.decision_deadline = Some(Instant::now() + Duration::from_secs(secs as u64));
         }
     }
@@ -548,6 +659,82 @@ impl GameScreenState {
     /// 切换主题 (供全局 T 键调用).
     pub fn set_theme(&mut self, kind: crate::ui::theme::ThemeKind) {
         self.theme_kind = kind;
+    }
+
+    /// F5: dev quick save. 失败时把错误写到 message.
+    #[cfg(feature = "dev-tools")]
+    fn dev_quick_save(&mut self) {
+        match crate::dev::savestate::save(&self.engine, "quick") {
+            Ok(path) => {
+                self.message = format!("[DEV] 存档 → {}", path.display());
+            }
+            Err(e) => {
+                self.message = format!("[DEV] 存档失败: {}", e);
+            }
+        }
+    }
+
+    /// F9: dev quick load. 替换 self.game 并复位 UI 派生 state.
+    #[cfg(feature = "dev-tools")]
+    fn dev_quick_load(&mut self) {
+        match crate::dev::savestate::load("quick") {
+            Ok(g) => {
+                self.engine = g;
+                // UI 派生 state 全部复位, 因为切屏/局面变了.
+                self.selected = 0;
+                self.player_calls = None;
+                self.calls_resolved = false;
+                self.last_step_at = Instant::now();
+                self.decision_deadline = None;
+                self.modal_open = false;
+                self.modal_selected = 0;
+                self.round_end_at = None;
+                self.chi_picker = None;
+                self.message = "[DEV] 已读档.".into();
+            }
+            Err(e) => {
+                self.message = format!("[DEV] 读档失败: {}", e);
+            }
+        }
+    }
+
+    /// 局开始时 (start_round 后) 若开启录像则 snapshot 初始 engine + 启 actions buf.
+    #[cfg(feature = "dev-tools")]
+    fn maybe_start_recording(&mut self) {
+        if !self.record_replays {
+            return;
+        }
+        // 录像 hook 由 GameEngine.apply 自动 push, 这里只做 snapshot + 启 buffer.
+        self.recording_initial = Some(self.engine.clone());
+        self.engine.recorded_actions = Some(Vec::new());
+    }
+
+    /// RoundEnd 时把当前局 (initial snapshot + actions) 写到 recordings/
+    /// 目录, 以 unix 时间戳作 filename.
+    #[cfg(feature = "dev-tools")]
+    fn flush_recording_if_any(&mut self) {
+        let Some(initial) = self.recording_initial.take() else {
+            self.engine.recorded_actions = None;
+            return;
+        };
+        let actions = self.engine.recorded_actions.take().unwrap_or_default();
+        let rec = crate::dev::recorder::RoundRecording {
+            initial_state: initial,
+            actions,
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let filename = format!("round_{}", ts);
+        let _ = crate::dev::recorder::save(&rec, &filename);
+    }
+
+    /// F8 (App 层调用) 切换录像开关. 当前局已开始的录像不变 (flag 仅
+    /// 影响下一局).
+    #[cfg(feature = "dev-tools")]
+    pub fn set_record_replays(&mut self, v: bool) {
+        self.record_replays = v;
     }
 
     /// 剩余思考秒数(向上取整). None = 不限时或不在等候态.
@@ -562,11 +749,11 @@ impl GameScreenState {
     }
 
     fn is_player_turn(&self) -> bool {
-        self.game.turn == PLAYER_SEAT
+        self.engine.turn() == PLAYER_SEAT
     }
 
-    fn player(&self) -> &crate::engine::state::PlayerState {
-        &self.game.players[PLAYER_SEAT.index()]
+    fn player(&self) -> &crate::engine::player::PlayerState {
+        &self.engine.players()[PLAYER_SEAT.index()]
     }
 
     /// 可选牌列表 = 自家手牌中除去 last_drawn (摸到的牌). 排序保留 closed 顺序.
@@ -595,8 +782,8 @@ impl GameScreenState {
 
     /// 当前 selected 手牌的 kind (用于河/副露/手牌联动高亮).
     /// 仅自家 AwaitDiscard 阶段返回 Some, 其它阶段返回 None.
-    fn highlight_kind(&self) -> Option<crate::domain::tile::TileIndex> {
-        if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
+    fn highlight_kind(&self) -> Option<crate::engine::domain::tile::TileIndex> {
+        if !self.is_player_turn() || self.engine.phase() != Phase::AwaitDiscard {
             return None;
         }
         self.selectable_tiles().get(self.selected).map(|t| t.kind)
@@ -613,14 +800,19 @@ impl GameScreenState {
     }
 
     fn try_player_discard(&mut self) {
-        if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
+        if !self.is_player_turn() || self.engine.phase() != Phase::AwaitDiscard {
+            return;
+        }
+        // 立直后只能摸切: Enter/Space/D 退化为摸切刚摸到的牌.
+        if self.player().riichi {
+            self.try_player_tsumogiri();
             return;
         }
         let tiles = self.selectable_tiles();
         let Some(&t) = tiles.get(self.selected) else {
             return;
         };
-        if self.game.do_discard(t).is_ok() {
+        if self.engine.do_discard(t).is_ok() {
             self.calls_resolved = false;
             self.player_calls = None;
             self.last_step_at = Instant::now();
@@ -630,10 +822,10 @@ impl GameScreenState {
 
     fn try_player_win(&mut self) {
         if self.is_player_turn()
-            && self.game.phase == Phase::AwaitDiscard
-            && let Some(score) = self.game.try_tsumo()
+            && self.engine.phase() == Phase::AwaitDiscard
+            && let Some(score) = self.engine.try_tsumo()
         {
-            self.game.declare_tsumo(score);
+            self.engine.declare_tsumo(score);
             self.message = format!("{} 自摸!", seat_label(PLAYER_SEAT));
             self.player_calls = None;
             self.clear_deadline();
@@ -641,9 +833,9 @@ impl GameScreenState {
         }
         if let Some(opts) = &self.player_calls
             && opts.ron
-            && let Some(score) = self.game.try_ron(PLAYER_SEAT)
+            && let Some(score) = self.engine.try_ron(PLAYER_SEAT)
         {
-            self.game.declare_ron(PLAYER_SEAT, score);
+            self.engine.declare_ron(PLAYER_SEAT, score);
             self.message = format!("{} 荣和!", seat_label(PLAYER_SEAT));
             self.player_calls = None;
             self.clear_deadline();
@@ -651,10 +843,10 @@ impl GameScreenState {
     }
 
     fn try_player_riichi(&mut self) {
-        if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
+        if !self.is_player_turn() || self.engine.phase() != Phase::AwaitDiscard {
             return;
         }
-        let opts = self.game.legal_self_options();
+        let opts = self.engine.legal_self_options();
         if opts.riichi_discards.is_empty() {
             self.message = "不能立直.".into();
             return;
@@ -667,7 +859,7 @@ impl GameScreenState {
             self.message = format!("切 {} 后未听牌, 不可立直.", t.kind.short());
             return;
         }
-        match self.game.do_riichi(t) {
+        match self.engine.do_riichi(t) {
             Ok(()) => {
                 self.message = "立直成立!".into();
                 self.calls_resolved = false;
@@ -681,25 +873,27 @@ impl GameScreenState {
     }
 
     fn try_player_kan(&mut self) {
-        if !self.is_player_turn() || self.game.phase != Phase::AwaitDiscard {
+        if !self.is_player_turn() || self.engine.phase() != Phase::AwaitDiscard {
             return;
         }
-        let opts = self.game.legal_self_options();
+        let opts = self.engine.legal_self_options();
         if let Some(kind) = opts.ankan.first().copied() {
-            if let Err(e) = self.game.do_ankan(kind) {
+            if let Err(e) = self.engine.do_ankan(kind) {
                 self.message = format!("暗杠失败: {}", e);
             } else {
                 self.message = format!("暗杠 {}!", kind.short());
+                self.selected = 0;
                 self.last_step_at = Instant::now();
                 self.clear_deadline();
             }
             return;
         }
         if let Some(kind) = opts.shouminkan.first().copied() {
-            if let Err(e) = self.game.do_shouminkan(kind) {
+            if let Err(e) = self.engine.do_shouminkan(kind) {
                 self.message = format!("加杠失败: {}", e);
             } else {
                 self.message = format!("加杠 {}!", kind.short());
+                self.selected = 0;
                 self.last_step_at = Instant::now();
                 self.clear_deadline();
             }
@@ -716,10 +910,11 @@ impl GameScreenState {
             self.message = "不能碰.".into();
             return;
         };
-        if let Err(e) = self.game.do_pon(PLAYER_SEAT, two) {
+        if let Err(e) = self.engine.do_pon(PLAYER_SEAT, two) {
             self.message = format!("碰失败: {}", e);
         } else {
             self.message = "碰!".into();
+            self.selected = 0;
             self.player_calls = None;
             self.calls_resolved = false;
             self.last_step_at = Instant::now();
@@ -740,7 +935,7 @@ impl GameScreenState {
             return;
         }
         // ≥ 2 种吃法 → 弹 picker. target = 别人切的牌.
-        let Some((_, target)) = self.game.last_discard else {
+        let Some((_, target)) = self.engine.last_discard() else {
             self.message = "找不到弃牌目标.".into();
             return;
         };
@@ -758,10 +953,11 @@ impl GameScreenState {
             self.message = "无效吃法 idx.".into();
             return;
         };
-        if let Err(e) = self.game.do_chi(PLAYER_SEAT, two) {
+        if let Err(e) = self.engine.do_chi(PLAYER_SEAT, two) {
             self.message = format!("吃失败: {}", e);
         } else {
             self.message = "吃!".into();
+            self.selected = 0;
             self.player_calls = None;
             self.calls_resolved = false;
             self.last_step_at = Instant::now();
@@ -777,10 +973,11 @@ impl GameScreenState {
             self.message = "不能明杠.".into();
             return;
         };
-        if let Err(e) = self.game.do_minkan(PLAYER_SEAT, three) {
+        if let Err(e) = self.engine.do_minkan(PLAYER_SEAT, three) {
             self.message = format!("明杠失败: {}", e);
         } else {
             self.message = "明杠!".into();
+            self.selected = 0;
             self.player_calls = None;
             self.calls_resolved = false;
             self.last_step_at = Instant::now();
@@ -826,9 +1023,9 @@ impl GameScreenState {
 
     /// row 0-1: 顶部 status bar.
     fn paint_top_status(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
-        let g = &self.game;
+        let g = &self.engine;
         // 局 / 本场 / 立直棒
-        let round_label = format!("{} {} 局", g.round_wind.label(), g.kyoku);
+        let round_label = format!("{} {} 局", g.round_wind().label(), g.kyoku());
         paint_str(
             buf,
             ox + 2,
@@ -843,15 +1040,15 @@ impl GameScreenState {
             buf,
             ox + 11,
             oy,
-            &format!("{}本", g.honba),
+            &format!("{}本", g.honba()),
             Style::default().fg(theme.dim).bg(theme.bg),
         );
-        if g.riichi_sticks > 0 {
+        if g.riichi_sticks() > 0 {
             paint_str(
                 buf,
                 ox + 15,
                 oy,
-                &format!("{}供", g.riichi_sticks),
+                &format!("{}供", g.riichi_sticks()),
                 Style::default().fg(theme.danger).bg(theme.bg),
             );
         }
@@ -863,8 +1060,8 @@ impl GameScreenState {
             Style::default().fg(theme.line).bg(theme.bg),
         );
         // 巡 / 山
-        let junme = g.players[0].river.len() + 1;
-        let wall_left = g.wall.as_ref().map(|w| w.remaining()).unwrap_or(0);
+        let junme = g.players()[0].river.len() + 1;
+        let wall_left = g.wall().as_ref().map(|w| w.remaining()).unwrap_or(0);
         paint_str(
             buf,
             ox + 21,
@@ -887,7 +1084,7 @@ impl GameScreenState {
             "宝 ",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
-        if let Some(wall) = g.wall.as_ref()
+        if let Some(wall) = g.wall().as_ref()
             && let Some(t) = wall.dora_indicators().first()
         {
             paint_tile_wide(buf, ox + 41, oy, Some(t), theme, TileState::Normal);
@@ -901,10 +1098,30 @@ impl GameScreenState {
         );
         // 4 家分数 (相对自家位置: 东=自家, 南=下家, 西=对家, 北=上家)
         let scores = [
-            (Seat::East, "東", g.players[0].score, g.players[0].riichi),
-            (Seat::South, "南", g.players[1].score, g.players[1].riichi),
-            (Seat::West, "西", g.players[2].score, g.players[2].riichi),
-            (Seat::North, "北", g.players[3].score, g.players[3].riichi),
+            (
+                Seat::East,
+                "東",
+                g.players()[0].score,
+                g.players()[0].riichi,
+            ),
+            (
+                Seat::South,
+                "南",
+                g.players()[1].score,
+                g.players()[1].riichi,
+            ),
+            (
+                Seat::West,
+                "西",
+                g.players()[2].score,
+                g.players()[2].riichi,
+            ),
+            (
+                Seat::North,
+                "北",
+                g.players()[3].score,
+                g.players()[3].riichi,
+            ),
         ];
         let mut col = ox + 48;
         for (i, (_seat, label, score, riichi)) in scores.iter().enumerate() {
@@ -922,6 +1139,20 @@ impl GameScreenState {
             paint_str(buf, col, oy, &format!("{} {}{}", label, score, star), style);
             col += 11;
         }
+        // dev-tools 录像指示 (col 116-118): 当前局正在录时显示 REC.
+        #[cfg(feature = "dev-tools")]
+        if self.recording_initial.is_some() {
+            paint_str(
+                buf,
+                ox + 116,
+                oy,
+                "REC",
+                Style::default()
+                    .fg(theme.danger)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
         // 时钟 / 标题
         paint_str(
             buf,
@@ -930,12 +1161,21 @@ impl GameScreenState {
             "tui-majo",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
+        let now =
+            time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+        paint_str(
+            buf,
+            ox + 130,
+            oy,
+            &format!("{:02}:{:02}:{:02}", now.hour(), now.minute(), now.second()),
+            Style::default().fg(theme.dim).bg(theme.bg),
+        );
         paint_hr(buf, ox, oy + 1, 144, theme);
     }
 
     /// row 3-9: 对家 (West).
     fn paint_opponent_top(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
-        let p = &self.game.players[Seat::West.index()];
+        let p = &self.engine.players()[Seat::West.index()];
         // 标题行 row 3
         paint_str(
             buf,
@@ -944,7 +1184,7 @@ impl GameScreenState {
             "─── 对家",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
-        let wind = self.game.seat_wind_of(Seat::West).short();
+        let wind = self.engine.seat_wind_of(Seat::West).short();
         paint_str(
             buf,
             ox + 75,
@@ -1012,7 +1252,7 @@ impl GameScreenState {
 
     /// row 6-19 左侧: 上家 (North).
     fn paint_opponent_left(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
-        let p = &self.game.players[Seat::North.index()];
+        let p = &self.engine.players()[Seat::North.index()];
         paint_str(
             buf,
             ox + 2,
@@ -1020,7 +1260,7 @@ impl GameScreenState {
             "上家",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
-        let wind = self.game.seat_wind_of(Seat::North).short();
+        let wind = self.engine.seat_wind_of(Seat::North).short();
         let label = if p.riichi {
             format!("{} {}★", wind, p.score)
         } else {
@@ -1076,7 +1316,7 @@ impl GameScreenState {
 
     /// row 6-19 右侧: 下家 (South).
     fn paint_opponent_right(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
-        let p = &self.game.players[Seat::South.index()];
+        let p = &self.engine.players()[Seat::South.index()];
         paint_str(
             buf,
             ox + 132,
@@ -1084,7 +1324,7 @@ impl GameScreenState {
             "下家",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
-        let wind = self.game.seat_wind_of(Seat::South).short();
+        let wind = self.engine.seat_wind_of(Seat::South).short();
         let label = if p.riichi {
             format!("{} {}★", wind, p.score)
         } else {
@@ -1138,7 +1378,7 @@ impl GameScreenState {
 
     /// row 17-18: 中央 dora + 山数提示.
     fn paint_center_info(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
-        let g = &self.game;
+        let g = &self.engine;
         paint_str(
             buf,
             ox + 66,
@@ -1146,12 +1386,12 @@ impl GameScreenState {
             "宝",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
-        if let Some(wall) = g.wall.as_ref()
+        if let Some(wall) = g.wall().as_ref()
             && let Some(t) = wall.dora_indicators().first()
         {
             paint_tile_wide(buf, ox + 70, oy + 17, Some(t), theme, TileState::Normal);
         }
-        let wall_left = g.wall.as_ref().map(|w| w.remaining()).unwrap_or(0);
+        let wall_left = g.wall().as_ref().map(|w| w.remaining()).unwrap_or(0);
         paint_str(
             buf,
             ox + 68,
@@ -1163,7 +1403,7 @@ impl GameScreenState {
 
     /// row 23-26: 自家牌河.
     fn paint_my_river(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
-        let p = &self.game.players[PLAYER_SEAT.index()];
+        let p = &self.engine.players()[PLAYER_SEAT.index()];
         let riichi_at = riichi_index_in_river(p);
         paint_discard_grid_wide_hl(
             buf,
@@ -1179,7 +1419,7 @@ impl GameScreenState {
     /// row 28-29: 自家分割线 + 状态行.
     fn paint_my_status(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
         paint_hr_accent(buf, ox + 2, oy + 28, 140, theme);
-        let p = &self.game.players[PLAYER_SEAT.index()];
+        let p = &self.engine.players()[PLAYER_SEAT.index()];
         paint_str(
             buf,
             ox + 4,
@@ -1191,8 +1431,8 @@ impl GameScreenState {
                 .add_modifier(Modifier::BOLD),
         );
         // 玩家固定坐东侧 (PLAYER_SEAT = East), 但自风随庄家轮转: 东1=東, 东2=北, …
-        let player_wind = self.game.seat_wind_of(PLAYER_SEAT);
-        let dealer_str = if PLAYER_SEAT == self.game.dealer {
+        let player_wind = self.engine.seat_wind_of(PLAYER_SEAT);
+        let dealer_str = if PLAYER_SEAT == self.engine.dealer() {
             format!("{} ◆庄", player_wind.short())
         } else {
             player_wind.short().to_string()
@@ -1214,12 +1454,28 @@ impl GameScreenState {
                 .bg(theme.bg)
                 .add_modifier(Modifier::BOLD),
         );
-        // 听牌检测
-        let waits = if p.hand.closed.len() == 13 {
-            crate::domain::decompose::tenpai_tiles(
-                &crate::domain::tile::count_by_kind(&p.hand.closed),
+        // 听牌检测.
+        // 13 张型 (刚切完): closed + melds*3 = 13. 直接算 tenpai.
+        // 14 张型 (摸完未切): closed + melds*3 = 14. 排除 last_drawn 那张后是 13 张型,
+        //                                            按那个算 (相当于"摸切立即听")
+        // 副露 0/1/2/3/4 → closed 13/10/7/4/1, 加 last_drawn 摸完是 14/11/8/5/2.
+        // 杠虽 4 张但占 1 面子, 公式仍是 *3.
+        let total = p.hand.closed.len() + p.hand.melds.len() * 3;
+        let waits = if total == 13 {
+            crate::engine::domain::decompose::tenpai_tiles(
+                &crate::engine::domain::tile::count_by_kind(&p.hand.closed),
                 &p.hand.melds,
             )
+        } else if total == 14 {
+            // 摸完未切: 把 last_drawn 排除后剩 13 张算 tenpai.
+            if let Some(drawn) = p.last_drawn {
+                let mut counts = crate::engine::domain::tile::count_by_kind(&p.hand.closed);
+                counts[drawn.kind.0 as usize] = counts[drawn.kind.0 as usize].saturating_sub(1);
+                crate::engine::domain::decompose::tenpai_tiles(&counts, &p.hand.melds)
+            } else {
+                // 极端: 14 张但无 last_drawn (鸣牌后状态不应到此, 但兜底).
+                Vec::new()
+            }
         } else {
             Vec::new()
         };
@@ -1263,7 +1519,7 @@ impl GameScreenState {
             );
         }
         // 危険提示: 任意他家立直时
-        let any_riichi = (1..=3).any(|i| self.game.players[i].riichi);
+        let any_riichi = (1..=3).any(|i| self.engine.players()[i].riichi);
         if any_riichi {
             paint_str(
                 buf,
@@ -1289,7 +1545,7 @@ impl GameScreenState {
     fn paint_my_message_and_melds(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
         // ==== 左侧 message (col 4..78) ====
         if !self.message.is_empty() {
-            let style = match self.game.phase {
+            let style = match self.engine.phase() {
                 Phase::RoundEnd => Style::default()
                     .fg(theme.accent)
                     .bg(theme.bg)
@@ -1352,13 +1608,13 @@ impl GameScreenState {
     /// display = selectable_tiles (sorted, 不含摸到的) + 末尾追加 last_drawn (如有).
     /// selected 直接对应 selectable_tiles 索引, 永不指向摸到的牌.
     fn paint_my_hand(&self, buf: &mut Buffer, ox: u16, oy: u16, theme: &Theme) {
-        let p = &self.game.players[PLAYER_SEAT.index()];
+        let p = &self.engine.players()[PLAYER_SEAT.index()];
         let mut display: Vec<Tile> = self.selectable_tiles();
         let drawn_idx = p.last_drawn.map(|t| {
             display.push(t);
             display.len() - 1
         });
-        let selected_player = self.is_player_turn() && self.game.phase == Phase::AwaitDiscard;
+        let selected_player = self.is_player_turn() && self.engine.phase() == Phase::AwaitDiscard;
         let selectable_len = drawn_idx.unwrap_or(display.len());
         let selected = if selected_player && self.selected < selectable_len {
             Some(self.selected)
@@ -1375,20 +1631,27 @@ impl GameScreenState {
             drawn_idx,
             self.highlight_kind(),
         );
-        // 编号 row 35 (与 paint_boxed_row 同样的间隙规则: drawn 前留 3 cells)
+        // 编号 row 35 (与 paint_boxed_row 同样的间隙规则: drawn 前留 3 cells).
+        // 切后能进入听牌的牌 (legal_self_options.riichi_discards) 用 danger
+        // 高亮, 玩家用 ←/→ 选中再 R 立直.
+        let opts = self.engine.legal_self_options();
+        let riichi_kinds: std::collections::HashSet<u8> =
+            opts.riichi_discards.iter().map(|t| t.kind.0).collect();
         let drawn_gap = 3u16;
         let mut cx = ox + 4 + 1;
-        for i in 0..display.len() {
+        for (i, t) in display.iter().enumerate() {
             if Some(i) == drawn_idx && i > 0 {
                 cx += drawn_gap;
             }
-            paint_str(
-                buf,
-                cx,
-                oy + 35,
-                &format!("{:>2}", i + 1),
-                Style::default().fg(theme.dim).bg(theme.bg),
-            );
+            let style = if riichi_kinds.contains(&t.kind.0) {
+                Style::default()
+                    .fg(theme.danger)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.dim).bg(theme.bg)
+            };
+            paint_str(buf, cx, oy + 35, &format!("{:>2}", i + 1), style);
             cx += 5;
         }
     }
@@ -1406,7 +1669,7 @@ impl GameScreenState {
         );
         let mut col = ox + 7;
         for ev in self
-            .game
+            .engine
             .events
             .iter()
             .rev()
@@ -1520,6 +1783,21 @@ impl GameScreenState {
             "响应",
             Style::default().fg(theme.dim).bg(theme.bg),
         );
+        #[cfg(feature = "dev-tools")]
+        let pairs: &[(&str, &str)] = &[
+            ("P", "碰"),
+            ("A", "吃"),
+            ("M", "明杠"),
+            ("K", "暗杠"),
+            ("C", "跳过"),
+            ("N", "下一局"),
+            ("F5", "存档"),
+            ("F8", "录像"),
+            ("F9", "读档"),
+            ("Esc", "回"),
+            ("Q", "退"),
+        ];
+        #[cfg(not(feature = "dev-tools"))]
         let pairs: &[(&str, &str)] = &[
             ("P", "碰"),
             ("A", "吃"),
@@ -1591,8 +1869,8 @@ impl GameScreenState {
 
         let actions = self.collect_modal_actions();
         // 信息行
-        let g = &self.game;
-        let junme = g.players[0].river.len() + 1;
+        let g = &self.engine;
+        let junme = g.players()[0].river.len() + 1;
         paint_str(
             buf,
             mx + 2,
@@ -1600,7 +1878,7 @@ impl GameScreenState {
             &format!("巡 {}", junme),
             Style::default().fg(theme.dim).bg(theme.panel),
         );
-        if let Some(t) = g.players[PLAYER_SEAT.index()].last_drawn {
+        if let Some(t) = g.players()[PLAYER_SEAT.index()].last_drawn {
             paint_str(
                 buf,
                 mx + 8,
@@ -1687,15 +1965,10 @@ impl GameScreenState {
     }
 }
 
-/// 找到玩家立直时弃出的牌在 river 里的索引. 简化: 当 player.riichi 时找最早的弃牌索引.
-fn riichi_index_in_river(p: &crate::engine::state::PlayerState) -> Option<usize> {
-    if p.riichi && !p.river.is_empty() {
-        // MVP: 立直牌 = 立直时切的那张, 但当前 PlayerState 没存. 用 None 暂不标记.
-        // 后续 task 可加 riichi_river_idx 字段.
-        None
-    } else {
-        None
-    }
+/// 找到玩家立直时弃出的牌在 river 里的索引. PlayerState.riichi_river_idx
+/// 由 do_riichi 写入, 此处直接转发.
+fn riichi_index_in_river(p: &crate::engine::player::PlayerState) -> Option<usize> {
+    p.riichi_river_idx
 }
 
 /// 把 TileIndex 渲染成 tight 文本 (3 cells: "1萬" / "東 ").
@@ -1781,8 +2054,8 @@ impl GameScreenState {
     pub fn collect_modal_actions(&self) -> Vec<ModalAction> {
         let mut out = Vec::new();
         // AwaitDiscard 自家
-        if self.game.phase == Phase::AwaitDiscard && self.is_player_turn() {
-            let opts = self.game.legal_self_options();
+        if self.engine.phase() == Phase::AwaitDiscard && self.is_player_turn() {
+            let opts = self.engine.legal_self_options();
             out.push(ModalAction {
                 key: 'R',
                 label: "立直",
@@ -1813,17 +2086,24 @@ impl GameScreenState {
                 },
                 enabled: !opts.ankan.is_empty(),
             });
+            let in_riichi = self.engine.players()[PLAYER_SEAT.index()].riichi;
             out.push(ModalAction {
                 key: 'D',
                 label: "切牌",
-                detail: "选择手牌中一张打出".into(),
-                enabled: true,
+                detail: if in_riichi {
+                    "立直后只能摸切".into()
+                } else {
+                    "选择手牌中一张打出".into()
+                },
+                enabled: !in_riichi,
             });
             out.push(ModalAction {
                 key: 'T',
                 label: "摸切",
                 detail: "切出刚摸到的牌(不变手牌)".into(),
-                enabled: self.game.players[PLAYER_SEAT.index()].last_drawn.is_some(),
+                enabled: self.engine.players()[PLAYER_SEAT.index()]
+                    .last_drawn
+                    .is_some(),
             });
         }
         // AwaitCalls (玩家有响应)
@@ -2004,6 +2284,7 @@ mod tests {
             GameRules::default(),
             0xC0FFEE,
             crate::ui::theme::ThemeKind::Dark,
+            false,
         );
         let backend = TestBackend::new(144, 40);
         let mut term = Terminal::new(backend).unwrap();
@@ -2013,21 +2294,24 @@ mod tests {
             app.last_step_at = Instant::now() - Duration::from_secs(1);
             drain_pending(&mut app);
 
-            if app.is_player_turn() && app.game.phase == Phase::AwaitDiscard {
-                let drawn = app.game.players[PLAYER_SEAT.index()].last_drawn;
+            if app.is_player_turn() && app.engine.phase() == Phase::AwaitDiscard {
+                let drawn = app.engine.players()[PLAYER_SEAT.index()].last_drawn;
                 if let Some(t) = drawn {
-                    let _ = app.game.do_discard(t);
+                    let _ = app.engine.do_discard(t);
                     app.calls_resolved = false;
                 }
             } else {
                 let _ = app.advance();
             }
-            if app.game.phase == Phase::RoundEnd || app.game.phase == Phase::GameEnd {
+            if app.engine.phase() == Phase::RoundEnd || app.engine.phase() == Phase::GameEnd {
                 break;
             }
         }
         term.draw(|f| app.render(f, f.area())).unwrap();
-        assert!(matches!(app.game.phase, Phase::RoundEnd | Phase::GameEnd));
+        assert!(matches!(
+            app.engine.phase(),
+            Phase::RoundEnd | Phase::GameEnd
+        ));
     }
 
     #[test]
@@ -2036,6 +2320,7 @@ mod tests {
             GameRules::default(),
             0xC0FFEE,
             crate::ui::theme::ThemeKind::Dark,
+            false,
         );
         let backend = TestBackend::new(144, 40);
         let mut term = Terminal::new(backend).unwrap();
@@ -2046,20 +2331,24 @@ mod tests {
             app.last_step_at = Instant::now() - Duration::from_secs(1);
             drain_pending(&mut app);
 
-            match app.game.phase {
+            match app.engine.phase() {
                 Phase::AwaitDiscard if app.is_player_turn() => {
-                    let drawn = app.game.players[PLAYER_SEAT.index()].last_drawn;
+                    let drawn = app.engine.players()[PLAYER_SEAT.index()].last_drawn;
                     if let Some(t) = drawn {
-                        let _ = app.game.do_discard(t);
+                        let _ = app.engine.do_discard(t);
                         app.calls_resolved = false;
                     }
                 }
                 Phase::RoundEnd => {
-                    app.game.next_round();
+                    app.engine.next_round();
                     rounds += 1;
-                    if rounds >= 3 {
+                    if rounds >= 3 || app.engine.mat.ended {
                         break;
                     }
+                    // 起新一局 (跟 N 键 handler 行为一致).
+                    app.round_index += 1;
+                    let seed = app.game_seed ^ app.round_index;
+                    app.engine.start_round(seed);
                 }
                 Phase::GameEnd => break,
                 _ => {
@@ -2067,7 +2356,7 @@ mod tests {
                 }
             }
         }
-        assert!(rounds >= 3 || app.game.phase == Phase::GameEnd);
+        assert!(rounds >= 3 || app.engine.phase() == Phase::GameEnd);
     }
 
     #[test]
@@ -2088,12 +2377,13 @@ mod tests {
             GameRules::default(),
             0xC0FFEE,
             crate::ui::theme::ThemeKind::Dark,
+            false,
         );
         // 模拟玩家摸牌阶段
         let _ = app.advance(); // Deal -> Draw
         let _ = app.advance(); // Draw 自家
         // 此时 phase 应是 AwaitDiscard, 是自家 (East)
-        if app.is_player_turn() && app.game.phase == Phase::AwaitDiscard {
+        if app.is_player_turn() && app.engine.phase() == Phase::AwaitDiscard {
             let actions = app.collect_modal_actions();
             // 至少含 R/W/K/D/T 五项
             assert!(actions.iter().any(|a| a.key == 'R'));
