@@ -136,6 +136,12 @@ pub enum RoomCmd {
         player_id: u32,
         peer_id_bytes: Vec<u8>,
     },
+    /// 注入 LobbyDynState 反向通道. spawn_p2p_listener 创建 watch channel
+    /// 后把 sender 传给 RoomActor, 之后每次 broadcast_room_update 同步推送
+    /// 真实玩家数 + lifecycle, host_swarm_task::publish_lobby 拉最新值.
+    SetLobbyWatch {
+        tx: tokio::sync::watch::Sender<crate::net::p2p::host::LobbyDynState>,
+    },
 }
 
 // ============================================================================
@@ -245,6 +251,10 @@ struct RoomActor {
     /// M5.D.2: 暂存的 host local_peer_id. SetLocalPeerId 时存这, 一旦 host
     /// slot 加入就关联到 player_peers; 反之 host 已 Join 时直接覆盖.
     pending_host_peer_id: Option<Vec<u8>>,
+    /// LobbyDynState 反向通道. spawn_p2p_listener 注入后, broadcast_room_update
+    /// 每次 send_replace 当前真实人数 + lifecycle. None = 单机/没起 P2P listener.
+    pub(super) lobby_watch:
+        Option<tokio::sync::watch::Sender<crate::net::p2p::host::LobbyDynState>>,
 }
 
 impl RoomActor {
@@ -277,6 +287,7 @@ impl RoomActor {
             mode: crate::net::p2p::RoomMode::Standard,
             player_peers: HashMap::new(),
             pending_host_peer_id: None,
+            lobby_watch: None,
         }
     }
 
@@ -332,6 +343,12 @@ impl RoomActor {
                 peer_id_bytes,
             } => {
                 self.player_peers.insert(player_id, peer_id_bytes);
+            }
+            RoomCmd::SetLobbyWatch { tx } => {
+                self.lobby_watch = Some(tx);
+                // 立刻 push 一次当前快照, 确保 host_swarm_task 启动早于第一次
+                // broadcast_room_update 时也能拿到正确值.
+                self.publish_lobby_dyn_state();
             }
         }
     }

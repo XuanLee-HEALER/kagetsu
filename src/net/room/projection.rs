@@ -5,7 +5,9 @@
 use super::*;
 use crate::engine::domain::meld::Seat;
 use crate::engine::round_state::RoundResult;
-use crate::net::protocol::{GameStateView, PlayerView, RoomView, RoundResultView, ServerMsg};
+use crate::net::protocol::{
+    GameStateView, PlayerView, RoomLifecycle, RoomView, RoundResultView, ServerMsg,
+};
 
 impl RoomActor {
     pub(super) fn room_view(&self) -> RoomView {
@@ -109,6 +111,25 @@ impl RoomActor {
     pub(super) fn broadcast_room_update(&self) {
         let view = self.room_view();
         self.broadcast_to_all(ServerMsg::RoomUpdate(Box::new(view)));
+        self.publish_lobby_dyn_state();
+    }
+
+    /// 把当前 (真人玩家数, lifecycle) 推到 lobby_watch (供 host_swarm_task
+    /// publish_lobby 用). lobby_watch=None (未起 P2P listener) 时空操作.
+    pub(super) fn publish_lobby_dyn_state(&self) {
+        let Some(tx) = self.lobby_watch.as_ref() else {
+            return;
+        };
+        let players = self.slots.iter().filter(|s| !s.is_ai).count() as u8;
+        let lifecycle = match self.state {
+            RoomLifecycle::Lobby => "lobby",
+            RoomLifecycle::InGame => "in_game",
+            RoomLifecycle::GameEnd => "game_end",
+        };
+        let _ = tx.send_replace(crate::net::p2p::host::LobbyDynState {
+            players,
+            lifecycle: lifecycle.into(),
+        });
     }
     pub(super) fn broadcast_to_all(&self, msg: ServerMsg) {
         for slot in &self.slots {

@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::engine::domain::tile::Tile;
 use crate::engine::phase::Phase;
@@ -1588,4 +1587,48 @@ async fn associate_peer_inserts_into_player_peers() {
         peer_id_bytes: bytes.clone(),
     });
     assert_eq!(actor.player_peers.get(&2), Some(&bytes));
+}
+
+// ========================================================================
+// SetLobbyWatch / publish_lobby_dyn_state — players + lifecycle 真值
+// ========================================================================
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_lobby_watch_pushes_initial_snapshot() {
+    let (mut actor, _rxs) = make_actor_in_lobby(2);
+    let (tx, rx) = tokio::sync::watch::channel(crate::net::p2p::host::LobbyDynState::default());
+    actor.handle_cmd(RoomCmd::SetLobbyWatch { tx });
+    let snap = rx.borrow().clone();
+    assert_eq!(snap.players, 2, "应反映 2 个真人");
+    assert_eq!(snap.lifecycle, "lobby");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lobby_watch_updates_when_player_joins() {
+    let (mut actor, _rxs) = make_actor_in_lobby(1);
+    let (tx, rx) = tokio::sync::watch::channel(crate::net::p2p::host::LobbyDynState::default());
+    actor.handle_cmd(RoomCmd::SetLobbyWatch { tx });
+    assert_eq!(rx.borrow().players, 1);
+    let (sender, _client_rx) = mpsc::unbounded_channel::<ServerMsg>();
+    let _ = actor.handle_join("p2".into(), None, sender);
+    assert_eq!(rx.borrow().players, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lobby_watch_lifecycle_changes_on_finalize_game() {
+    let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+    let (tx, rx) = tokio::sync::watch::channel(crate::net::p2p::host::LobbyDynState::default());
+    actor.handle_cmd(RoomCmd::SetLobbyWatch { tx });
+    // make_actor_in_game 直接置 InGame, SetLobbyWatch 立即 push 当前快照.
+    assert_eq!(rx.borrow().lifecycle, "in_game");
+    actor.finalize_game();
+    assert_eq!(rx.borrow().lifecycle, "game_end");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lobby_watch_excludes_ai_slots_from_players_count() {
+    let (mut actor, _rxs) = make_actor_in_game(&[Seat::East]);
+    let (tx, rx) = tokio::sync::watch::channel(crate::net::p2p::host::LobbyDynState::default());
+    actor.handle_cmd(RoomCmd::SetLobbyWatch { tx });
+    assert_eq!(rx.borrow().players, 1, "AI slot 不计入大厅展示人数");
 }
