@@ -1,0 +1,305 @@
+/* ════════════════════════════════════════════════════════════════════
+ *  SakyaHuman Design System — colors & type
+ *  ────────────────────────────────────────────────────────────────────
+ *  Color foundation: Sakya Monastery thangka mineral pigments,
+ *  calibrated against Munsell spectrophotometer data.
+ *  See README.md for full pigment lineage and Buddhist iconography.
+ *
+ *  Theme: Dorje only — dark, after Vajrapani's blue-black.
+ *  No light-mode counterpart. The system is built for contemplative
+ *  reading on a single dark surface.
+ *
+ *  Variable layers:
+ *    1. Pigment palette     (--sakya-p-*)        — raw mineral colors
+ *    2. Semantic tokens     (--bg / --fg / ...)  — what you use day-to-day
+ *    3. Typography tokens   (--font-* / --text-*) — Apple-HIG-style scale
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* ── Webfonts ──────────────────────────────────────────────────────── */
+/*  IBM Plex family — unified across Latin / Simplified Chinese / Mono /
+ *  Serif, designed by IBM + Bold Monday. SIL OFL license.
+ *   • IBM Plex Serif        — display & contemplative serif moments
+ *   • IBM Plex Sans         — primary UI (humanist sans)
+ *   • IBM Plex Sans SC      — Simplified Chinese, same family DNA
+ *   • IBM Plex Mono         — code, terminals, monospaced data
+ *   • Noto Serif Tibetan    — Tibetan glyphs (no Tibetan in Plex) */
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Sans+SC:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Serif+Tibetan:wght@400;500;700&display=swap");
+
+/* ════════════════════════════════════════════════════════════════════
+ *  CULTURAL PALETTE — raw thangka pigments
+ *  These are the source of every semantic color below.
+ * ════════════════════════════════════════════════════════════════════ */
+:root {
+  --sakya-p-gser:     #D2B450;  /* 24K gold powder       · Gser */
+  --sakya-p-ngonpo:   #5B8AB8;  /* Azurite               · Ngonpo */
+  --sakya-p-ljangkhu: #527559;  /* Malachite             · Ljangkhu */
+  --sakya-p-spangma:  #527559;  /* Copper green          · Spangma */
+  --sakya-p-karpo:    #EFE2BE;  /* Lead white            · Karpo */
+  --sakya-p-serpo:    #A09058;  /* Orpiment (dimmed)     · Serpo */
+  --sakya-p-mtshal:   #BB4441;  /* Cinnabar (HgS)        · Mtshal */
+  --sakya-p-marpo:    #BB4441;  /* Red                   · Marpo */
+  --sakya-p-likhri:   #E85600;  /* Minium (Pb₃O₄)        · Likhri */
+  --sakya-p-mutsmen:  #2F3B5B;  /* Lapis lazuli          · Mutsmen */
+  --sakya-p-tsingkha: #2B3560;  /* Indigo                · Tsingkha */
+  --sakya-p-ngangpa:  #9F7045;  /* Earth ochre           · Ngang-pa */
+  --sakya-p-nyima:    #E0C888;  /* Sunlight              · Nyima */
+  --sakya-p-metok:    #C88090;  /* Lotus pink (lac dye)  · Metok */
+  --sakya-p-dri-med:  #C4BCAE;  /* Stainless cream       · Dri-med */
+  --sakya-p-dul-ba:   #9E978C;  /* Calm dust             · Dul-ba */
+
+  /* Three sacred stripes (Sakya Monastery walls) */
+  --sakya-stripe-red:   #BE3A34;  /* Manjushri · wisdom */
+  --sakya-stripe-white: #E8E0D4;  /* Avalokiteshvara · compassion */
+  --sakya-stripe-blue:  #2E4878;  /* Vajrapani · power */
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  SEMANTIC TOKENS — Dorje
+ *  Vajrapani's blue-black void with restrained gold.
+ * ════════════════════════════════════════════════════════════════════ */
+:root {
+  color-scheme: dark;
+
+  /* Background depth — six levels from Shunyata (void) to highlight */
+  --bg-deepest:  #0C0C14;  /* Shunyata — page edges, status bar */
+  --bg-deep:     #13131F;  /* Drak — sidebars, panels */
+  --bg-base:     #1B1B2A;  /* Sa — primary canvas */
+  --bg-surface0: #262638;  /* cards, inputs, tiles */
+  --bg-surface1: #36364A;  /* floating panels, hover-elevation */
+  --bg-surface2: #46465C;  /* high-contrast row, selection */
+
+  /* Foreground — compassion's white in three measures */
+  --fg-primary:   #E8E0D4;  /* Karpo · body text */
+  --fg-secondary: #C4BCAE;  /* Dri-med · subtitles */
+  --fg-tertiary:  #9E978C;  /* Dul-ba · captions, line numbers */
+  --fg-disabled:  #686882;
+  --fg-on-accent: #0C0C14;  /* text on gold */
+
+  /* Borders — never louder than the content they enclose */
+  --border-subtle:  rgba(232, 224, 212, 0.06);
+  --border-default: rgba(232, 224, 212, 0.10);
+  --border-strong:  rgba(232, 224, 212, 0.18);
+  --border-focus:   rgba(210, 180, 80, 0.55);
+
+  /* Accent — five buddhas + gold */
+  --accent:           var(--sakya-p-gser);      /* gold · most sacred */
+  --accent-hover:     #E0C888;                  /* Nyima · sun-warm */
+  --accent-press:     #B69833;
+  --accent-secondary: var(--sakya-p-ngonpo);    /* azurite · Akshobhya */
+  --accent-tertiary:  var(--sakya-p-spangma);   /* malachite · Amoghasiddhi */
+  --accent-soft:      rgba(210, 180, 80, 0.12);
+  --accent-ring:      rgba(210, 180, 80, 0.20);
+
+  /* Status — pigments mapped to function */
+  --status-success: var(--sakya-p-ljangkhu);
+  --status-warning: var(--sakya-p-ngangpa);
+  --status-error:   var(--sakya-p-mtshal);
+  --status-info:    var(--sakya-p-ngonpo);
+
+  --status-success-bg: rgba(82, 117, 89, 0.18);
+  --status-warning-bg: rgba(159, 112, 69, 0.18);
+  --status-error-bg:   rgba(187, 68, 65, 0.18);
+  --status-info-bg:    rgba(91, 138, 184, 0.18);
+
+  /* Interaction */
+  --int-hover:    rgba(232, 224, 212, 0.04);
+  --int-active:   rgba(232, 224, 212, 0.08);
+  --int-focus:    rgba(210, 180, 80, 0.20);
+  --int-selected: rgba(224, 200, 136, 0.20);  /* Nyima sunlight */
+
+  /* Special */
+  --link:         var(--sakya-p-ngonpo);
+  --link-hover:   var(--sakya-p-gser);
+  --selection-bg: rgba(224, 200, 136, 0.20);
+  --selection-fg: var(--fg-primary);
+  --cursor:       var(--sakya-p-gser);
+
+  /* Diff / VCS */
+  --diff-add: rgba(82, 117, 89, 0.20);
+  --diff-del: rgba(187, 68, 65, 0.20);
+  --diff-mod: rgba(210, 180, 80, 0.20);
+
+  /* Shadows — quiet, never showy */
+  --shadow-0: none;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.30);
+  --shadow-2: 0 4px 14px rgba(0, 0, 0, 0.35);
+  --shadow-3: 0 10px 30px rgba(0, 0, 0, 0.45);
+  --shadow-4: 0 24px 60px rgba(0, 0, 0, 0.55);
+  --shadow-gold: 0 0 0 1px rgba(210, 180, 80, 0.25), 0 6px 24px rgba(210, 180, 80, 0.12);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  TYPOGRAPHY — Apple-HIG scale, slightly hushed
+ *  Three families, deliberately limited.
+ * ════════════════════════════════════════════════════════════════════ */
+:root {
+  /* Families */
+  --font-sans:    "IBM Plex Sans", "IBM Plex Sans SC",
+                  -apple-system, BlinkMacSystemFont, "PingFang SC",
+                  "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif;
+  --font-serif:   "IBM Plex Serif", "Source Serif Pro", "Songti SC",
+                  "Noto Serif CJK SC", Georgia, serif;
+  --font-mono:    "IBM Plex Mono", "SF Mono", "Menlo", "Consolas",
+                  "Liberation Mono", monospace;
+  --font-tibetan: "Noto Serif Tibetan", "Microsoft Himalaya",
+                  "Kailasa", "Jomolhari", serif;
+
+  /* Weight ramp */
+  --weight-light:    300;
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+
+  /* Type scale — modular, ~1.20 minor third */
+  --text-xs:    11px;
+  --text-sm:    13px;
+  --text-base:  15px;   /* Apple HIG body */
+  --text-md:    17px;   /* Apple HIG callout */
+  --text-lg:    20px;
+  --text-xl:    24px;
+  --text-2xl:   28px;
+  --text-3xl:   34px;   /* Apple HIG title 1 */
+  --text-4xl:   44px;
+  --text-5xl:   60px;
+  --text-6xl:   80px;
+  --text-display: 108px;
+
+  /* Line height — long lines breathe */
+  --leading-tight:   1.15;
+  --leading-snug:    1.30;
+  --leading-normal:  1.50;
+  --leading-relaxed: 1.65;
+  --leading-loose:   1.85;
+
+  /* Tracking — Apple-style negative on display, positive on caps */
+  --tracking-tightest: -0.04em;
+  --tracking-tight:    -0.02em;
+  --tracking-normal:    0em;
+  --tracking-wide:      0.04em;
+  --tracking-wider:     0.10em;
+  --tracking-widest:    0.20em;
+}
+
+/* ── Semantic type tokens — element-level shorthands ────────────────── */
+:root {
+  --t-display:  var(--weight-light)    var(--text-display)/var(--leading-tight)  var(--font-serif);
+  --t-h1:       var(--weight-regular)  var(--text-5xl)/var(--leading-tight)      var(--font-serif);
+  --t-h2:       var(--weight-medium)   var(--text-4xl)/var(--leading-tight)      var(--font-sans);
+  --t-h3:       var(--weight-semibold) var(--text-3xl)/var(--leading-snug)       var(--font-sans);
+  --t-h4:       var(--weight-semibold) var(--text-2xl)/var(--leading-snug)       var(--font-sans);
+  --t-h5:       var(--weight-semibold) var(--text-xl)/var(--leading-snug)        var(--font-sans);
+  --t-h6:       var(--weight-semibold) var(--text-md)/var(--leading-snug)        var(--font-sans);
+  --t-lede:     var(--weight-regular)  var(--text-lg)/var(--leading-relaxed)     var(--font-serif);
+  --t-body:     var(--weight-regular)  var(--text-base)/var(--leading-relaxed)   var(--font-sans);
+  --t-body-lg:  var(--weight-regular)  var(--text-md)/var(--leading-relaxed)     var(--font-sans);
+  --t-caption:  var(--weight-regular)  var(--text-sm)/var(--leading-normal)      var(--font-sans);
+  --t-micro:    var(--weight-medium)   var(--text-xs)/var(--leading-normal)      var(--font-sans);
+  --t-code:     var(--weight-regular)  var(--text-sm)/var(--leading-normal)      var(--font-mono);
+  --t-quote:    var(--weight-light)    var(--text-2xl)/var(--leading-snug)       var(--font-serif);
+
+  /* Caps label — Apple's all-caps section heading */
+  --t-eyebrow:  var(--weight-semibold) var(--text-xs)/var(--leading-normal)      var(--font-sans);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  SPACING — 4px base. Generous on the high end (sufficient whitespace).
+ * ════════════════════════════════════════════════════════════════════ */
+:root {
+  --space-0:   0;
+  --space-1:   4px;
+  --space-2:   8px;
+  --space-3:   12px;
+  --space-4:   16px;
+  --space-5:   20px;
+  --space-6:   24px;
+  --space-7:   32px;
+  --space-8:   40px;
+  --space-9:   48px;
+  --space-10:  64px;
+  --space-11:  80px;
+  --space-12:  96px;
+  --space-13:  128px;
+  --space-14:  160px;
+  --space-15:  200px;
+
+  /* Radii — modest, never playful */
+  --radius-none:  0;
+  --radius-xs:    2px;
+  --radius-sm:    4px;
+  --radius-md:    8px;
+  --radius-lg:    12px;
+  --radius-xl:    16px;
+  --radius-2xl:   24px;
+  --radius-pill:  9999px;
+
+  /* Hit targets */
+  --hit-min:      44px;   /* Apple HIG minimum tap target */
+  --hit-comfort:  48px;
+
+  /* Motion — slow, deliberate. No bouncing. */
+  --ease-out:    cubic-bezier(0.16, 1, 0.30, 1);
+  --ease-in:     cubic-bezier(0.50, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --duration-1: 120ms;
+  --duration-2: 200ms;
+  --duration-3: 320ms;
+  --duration-4: 520ms;
+  --duration-5: 840ms;   /* prayer-flag fade */
+}
+
+/* ════════════════════════════════════════════════════════════════════
+ *  ELEMENT DEFAULTS — paste-in starter rules.
+ *  Anything not declared here can be styled freely.
+ * ════════════════════════════════════════════════════════════════════ */
+body {
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--fg-primary);
+  font: var(--t-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+h1 { font: var(--t-h1); letter-spacing: var(--tracking-tight);   margin: 0; }
+h2 { font: var(--t-h2); letter-spacing: var(--tracking-tight);   margin: 0; }
+h3 { font: var(--t-h3); letter-spacing: var(--tracking-normal);  margin: 0; }
+h4 { font: var(--t-h4); margin: 0; }
+h5 { font: var(--t-h5); margin: 0; }
+h6 { font: var(--t-h6); margin: 0; }
+
+p     { font: var(--t-body); margin: 0; text-wrap: pretty; }
+small { font: var(--t-caption); color: var(--fg-tertiary); }
+code, kbd, pre, samp { font: var(--t-code); }
+blockquote { font: var(--t-quote); color: var(--fg-secondary); margin: 0; }
+
+a {
+  color: var(--link);
+  text-decoration: none;
+  transition: color var(--duration-2) var(--ease-out);
+}
+a:hover { color: var(--link-hover); }
+
+::selection { background: var(--selection-bg); color: var(--selection-fg); }
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--border-default);
+  margin: var(--space-7) 0;
+}
+
+/* Focus ring — never blue-default, always gold */
+:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Eyebrow / caps label */
+.eyebrow {
+  font: var(--t-eyebrow);
+  letter-spacing: var(--tracking-widest);
+  text-transform: uppercase;
+  color: var(--fg-tertiary);
+}
