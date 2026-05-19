@@ -31,7 +31,7 @@ use crate::net::p2p::mp_bridge::{MpBridgeHandle, new_inbound_channel, spawn_mp_b
 use crate::net::p2p::mp_swarm::SwarmTransport;
 use crate::net::session::NetSession;
 use crate::ui::Transition;
-use crate::ui::theme::ThemeKind;
+use crate::ui::theme::{Theme, ThemeKind};
 
 /// MpStart 参数 — 跟 [`crate::net::protocol::ServerMsg::MpStart`] 字段一致.
 #[derive(Debug, Clone)]
@@ -850,7 +850,7 @@ impl ZeroTrustGameState {
     }
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let theme = self.theme_kind.theme();
+        let theme = Theme::from_kind(self.theme_kind);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([

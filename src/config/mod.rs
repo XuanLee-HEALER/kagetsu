@@ -21,7 +21,33 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ui::theme::ThemeKind;
+/// 配色主题选项 (`Dark` / `Light`). 持久化到 `prefs.toml`.
+///
+/// 这是裸 enum, 不依赖 ratatui Color, 所以放 `config` 而不是 `ui::theme`
+/// (历史上曾放 ui::theme, 形成 `config` → `ui` 反向耦合, 现已解耦).
+/// 取对应 `Theme` 调色板用 `crate::ui::theme::Theme::from_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ThemeKind {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl ThemeKind {
+    pub fn next(self) -> Self {
+        match self {
+            ThemeKind::Dark => ThemeKind::Light,
+            ThemeKind::Light => ThemeKind::Dark,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeKind::Dark => "暗",
+            ThemeKind::Light => "亮",
+        }
+    }
+}
 
 /// 防御: prefs.toml 不该超过 1 MB. 超出视为损坏 (避免恶意大文件).
 const MAX_PREFS_SIZE: u64 = 1_048_576;

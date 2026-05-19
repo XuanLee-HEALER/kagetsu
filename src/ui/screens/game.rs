@@ -988,7 +988,7 @@ impl GameScreenState {
     // ============== 渲染 (HiFi-05 设计稿坐标) ==============
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let theme = self.theme_kind.theme();
+        let theme = Theme::from_kind(self.theme_kind);
         let buf = f.buffer_mut();
         // 整屏背景填充.
         paint_fill(
@@ -1843,7 +1843,7 @@ impl GameScreenState {
             &format!("[{}]", label),
             Style::default()
                 .fg(fg)
-                .bg(self.theme_kind.theme().panel)
+                .bg(Theme::from_kind(self.theme_kind).panel)
                 .add_modifier(Modifier::BOLD),
         );
         // border_color 暂未使用 (简化 [X] 风格), 留参数以备后续装饰

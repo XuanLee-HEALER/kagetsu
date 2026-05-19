@@ -461,7 +461,7 @@ impl OnlineGameState {
     // ============== 渲染 ==============
 
     pub fn render(&self, f: &mut Frame, area: Rect) {
-        let theme = self.theme_kind.theme();
+        let theme = Theme::from_kind(self.theme_kind);
         let buf = f.buffer_mut();
         paint_fill(
             buf,
@@ -2149,7 +2149,7 @@ mod tests {
     #[test]
     fn format_event_renders_each_variant() {
         // 仅检查不 panic + 输出非空.
-        let theme = ThemeKind::default().theme();
+        let theme = Theme::from_kind(ThemeKind::default());
         let events = vec![
             GameEvent::Discard {
                 who: Seat::East,

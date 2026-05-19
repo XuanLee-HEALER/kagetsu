@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn render_does_not_panic() {
-        let theme = crate::ui::theme::ThemeKind::Dark.theme();
+        let theme = crate::ui::theme::Theme::from_kind(crate::ui::theme::ThemeKind::Dark);
         let area = Rect::new(0, 0, 200, 50);
         let mut buf = Buffer::empty(area);
         let p = picker_2();

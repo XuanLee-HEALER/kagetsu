@@ -355,7 +355,7 @@ impl OnlineRoomState {
 
         // EditConfigModal 叠加在最上层.
         if let Some(modal) = &self.editing_config {
-            let theme = self.theme_kind.theme();
+            let theme = crate::ui::theme::Theme::from_kind(self.theme_kind);
             modal.render(f.buffer_mut(), area, &theme);
         }
     }

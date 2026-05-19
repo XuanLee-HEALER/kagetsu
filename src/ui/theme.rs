@@ -4,37 +4,10 @@
 //! 字牌按汉字含义上色 (中红/发绿/白蓝/风牌黑).
 
 use ratatui::style::Color;
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ThemeKind {
-    #[default]
-    Dark,
-    Light,
-}
-
-impl ThemeKind {
-    pub fn next(self) -> Self {
-        match self {
-            ThemeKind::Dark => ThemeKind::Light,
-            ThemeKind::Light => ThemeKind::Dark,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ThemeKind::Dark => "暗",
-            ThemeKind::Light => "亮",
-        }
-    }
-
-    pub fn theme(self) -> Theme {
-        match self {
-            ThemeKind::Dark => DARK,
-            ThemeKind::Light => LIGHT,
-        }
-    }
-}
+// `ThemeKind` 上移到 `crate::config`(解 ui→config→ui 的反向耦合循环), 在此 re-export
+// 让旧引用路径 `crate::ui::theme::ThemeKind` 仍可用, 减少其它模块改动.
+pub use crate::config::ThemeKind;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
@@ -74,6 +47,17 @@ pub struct Theme {
     pub tile_hatsu: Color, // 發
     pub tile_haku: Color,  // 白
     pub tile_wind: Color,  // 东南西北
+}
+
+impl Theme {
+    /// 根据 `ThemeKind` 取对应主题. 之前是 `ThemeKind::theme()` 的反向耦合实现,
+    /// 解耦后留在 ui 侧.
+    pub fn from_kind(kind: ThemeKind) -> Theme {
+        match kind {
+            ThemeKind::Dark => DARK,
+            ThemeKind::Light => LIGHT,
+        }
+    }
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color {

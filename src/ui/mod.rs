@@ -639,13 +639,13 @@ impl App {
         self.render_global_footer(f, chunks[1]);
         // 全局叠加 ConfirmModal (在所有屏内容之上).
         if let Some((modal, _)) = &self.pending_confirm {
-            let theme = self.local_prefs.theme.theme();
+            let theme = crate::ui::theme::Theme::from_kind(self.local_prefs.theme);
             modal.render(f.buffer_mut(), area, &theme);
         }
     }
 
     fn render_size_warning(&self, f: &mut ratatui::Frame, area: Rect, min_w: u16, min_h: u16) {
-        let theme = self.local_prefs.theme.theme();
+        let theme = crate::ui::theme::Theme::from_kind(self.local_prefs.theme);
         // 整屏背景色.
         let buf = f.buffer_mut();
         for y in area.y..(area.y + area.height) {
