@@ -63,13 +63,21 @@ tui-majo/                       (workspace root, 仓库名暂不动)
 └── LICENSE
 ```
 
-## 2. 反向耦合点 (Phase 0 解决)
+## 2. 反向耦合点 (Phase 0 / 0.5 解决)
 
-只有 **1 个**:
+实际有 **2 个**(初稿漏了 `TileSpec`,执行中由 refactor-engineer 抓出):
+
+**Phase 0 — `config → ui::theme::ThemeKind`**
 - `src/config/mod.rs:24` `use crate::ui::theme::ThemeKind;`
 - `LocalPrefs.theme: ThemeKind` 字段持久化到 prefs.toml
+- 解法: `ThemeKind` 上移到 `crate::config`,`ThemeKind::theme()` method 改为 `Theme::from_kind(kind)` 留在 ui 侧
+- commit: `1171d9e refactor(config): 解 ThemeKind 反向耦合, 上移裸 enum 到 config`
 
-`net/` 模块经过 grep 验证 **零** 反向耦合(原以为有 `TileSpec`,实际只是注释里出现 "ratatui" 字样)。
+**Phase 0.5 — `net → ui::screens::game::TileSpec`**
+- `src/net/protocol.rs:24` `use crate::ui::screens::game::TileSpec;`
+- 还被 `net::room::game` / `net::room::tests` / `tests/common/mod.rs` 引用
+- 解法: `TileSpec` + `parse_tile_spec` 整块迁到 `net::protocol`(它们的语义本就是 wire 协议层指代一张牌的 kind)
+- commit: `7af6e85 refactor(net): TileSpec / parse_tile_spec 从 ui::screens::game 迁到 net::protocol`
 
 ## 3. 阶段化执行步骤
 
