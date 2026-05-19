@@ -2,23 +2,30 @@
   import { route } from './lib/router.js';
   import Home from './lib/screens/Home.svelte';
   import Frame from './lib/screens/Frame.svelte';
+
   import MenuScreen from './lib/screens/MenuScreen.svelte';
+  import ConfigScreen from './lib/screens/ConfigScreen.svelte';
+  import LobbyScreen from './lib/screens/LobbyScreen.svelte';
+  import RoomScreen from './lib/screens/RoomScreen.svelte';
+  import GameScreen from './lib/screens/GameScreen.svelte';
+  import ZeroTrustGameScreen from './lib/screens/ZeroTrustGameScreen.svelte';
+  import HandResultScreen from './lib/screens/HandResultScreen.svelte';
+  import MatchEndScreen from './lib/screens/MatchEndScreen.svelte';
 
-  // Other screens get imported as they are translated. Routes that resolve
-  // to undefined render a placeholder telling the user the screen is WIP.
-
+  // ROUTES — keyed by hash without leading '#'.
+  // `component` is the svelte component to render inside the Frame.
+  // `props` are passed verbatim (used for GameScreen's 3 modes).
   const ROUTES = {
-    'menu': { component: MenuScreen, label: '05 ・ Main menu', mode: undefined },
-    // wired below as screens land:
-    'g-normal': { component: null, label: '01 ・ Normal' },
-    'g-command': { component: null, label: '02 ・ Command 命令输入' },
-    'g-modal': { component: null, label: '03 ・ Action modal 唤起' },
-    'zt-game': { component: null, label: '04 ・ ZeroTrust 对局' },
-    'config': { component: null, label: '06 ・ Pre-game config' },
-    'lobby': { component: null, label: '07 ・ LAN lobby' },
-    'room': { component: null, label: '08 ・ Room waiting' },
-    'hand-result': { component: null, label: '09 ・ Hand result' },
-    'match-end': { component: null, label: '10 ・ Match end' },
+    'g-normal': { component: GameScreen, label: '01 ・ Normal', props: { mode: 'NORMAL' } },
+    'g-command': { component: GameScreen, label: '02 ・ Command 命令输入', props: { mode: 'COMMAND', commandText: 'discard p4' } },
+    'g-modal': { component: GameScreen, label: '03 ・ Action modal 唤起', props: { mode: 'NORMAL', showActionModal: true } },
+    'zt-game': { component: ZeroTrustGameScreen, label: '04 ・ ZeroTrust 对局', props: {} },
+    'menu': { component: MenuScreen, label: '05 ・ Main menu', props: {} },
+    'config': { component: ConfigScreen, label: '06 ・ Pre-game config', props: {} },
+    'lobby': { component: LobbyScreen, label: '07 ・ LAN lobby', props: {} },
+    'room': { component: RoomScreen, label: '08 ・ Room waiting', props: {} },
+    'hand-result': { component: HandResultScreen, label: '09 ・ Hand result', props: {} },
+    'match-end': { component: MatchEndScreen, label: '10 ・ Match end', props: {} },
   };
 
   $: current = ROUTES[$route];
@@ -26,16 +33,8 @@
 
 {#if !$route || !current}
   <Home />
-{:else if !current.component}
-  <Frame label={current.label}>
-    <div style="height: 100%; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; color: var(--fg-tertiary); font-family: var(--font-mono); background: var(--bg-base);">
-      <div style="font-size: 28px; font-family: var(--font-serif); color: var(--fg-secondary);">WIP</div>
-      <div>{current.label}</div>
-      <a href={'#'} style="color: var(--accent); text-decoration: none; margin-top: 12px;">← back to index</a>
-    </div>
-  </Frame>
 {:else}
   <Frame label={current.label}>
-    <svelte:component this={current.component} mode={current.mode} />
+    <svelte:component this={current.component} {...current.props} />
   </Frame>
 {/if}
