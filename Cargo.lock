@@ -4507,6 +4507,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-majo"
+version = "2.1.0"
+dependencies = [
+ "anyhow",
+ "majo-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "web-time"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

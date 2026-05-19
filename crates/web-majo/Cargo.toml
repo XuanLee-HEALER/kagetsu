@@ -1,0 +1,15 @@
+[package]
+name = "web-majo"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Self-hosted web frontend for majo (skeleton, axum WS gateway to come)."
+
+[dependencies]
+majo-core = { path = "../majo-core" }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

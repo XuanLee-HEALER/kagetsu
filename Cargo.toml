@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/majo-core", "crates/tui-majo"]
+members = ["crates/majo-core", "crates/tui-majo", "crates/web-majo"]
 
 [workspace.package]
 edition = "2024"
