@@ -2420,6 +2420,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "majo-core"
+version = "2.1.0"
+dependencies = [
+ "anyhow",
+ "ark-bls12-381",
+ "ark-ec",
+ "ark-ff",
+ "ark-serialize",
+ "ark-std",
+ "dirs",
+ "futures-util",
+ "libp2p",
+ "pretty_assertions",
+ "proptest",
+ "quick-xml",
+ "rand 0.9.4",
+ "rand_chacha 0.9.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "match-lookup"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4190,28 +4220,14 @@ name = "tui-majo"
 version = "2.1.0"
 dependencies = [
  "anyhow",
- "ark-bls12-381",
- "ark-ec",
- "ark-ff",
- "ark-serialize",
- "ark-std",
  "crossterm 0.28.1",
- "dirs",
  "futures-util",
  "libp2p",
- "pretty_assertions",
- "proptest",
- "quick-xml",
+ "majo-core",
  "rand 0.9.4",
- "rand_chacha 0.9.0",
  "ratatui",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
  "time",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber",
  "unicode-width",

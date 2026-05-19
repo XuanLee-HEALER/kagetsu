@@ -1,42 +1,32 @@
-[package]
-name = "tui-majo"
-version = "2.1.0"
+[workspace]
+resolver = "2"
+members = ["crates/majo-core", "crates/tui-majo"]
+
+[workspace.package]
 edition = "2024"
-description = "Riichi Mahjong (日本麻将) in your terminal, written in Rust + ratatui"
+version = "2.1.0"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/XuanLee-HEALER/tui-majo"
 homepage = "https://github.com/XuanLee-HEALER/tui-majo"
-readme = "README.md"
-keywords = ["mahjong", "riichi", "tui", "ratatui", "japanese"]
-categories = ["games", "command-line-utilities"]
-default-run = "tui-majo"
-exclude = [
-    ".design-package/",
-    "docs/scratch.md",
-    "docs/img/",
-    "*.png",
-]
 
-[features]
-default = []
-# Dev tools: F5/F9 quick savestate + replay recorder. 不带就纯净 release.
-dev-tools = []
-
-[dependencies]
-ratatui = "0.30"
-crossterm = "0.28"
+[workspace.dependencies]
+# common
 anyhow = "1"
 thiserror = "2"
-rand = "0.9"
-rand_chacha = "0.9"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-unicode-width = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# rng / time / fs
+rand = "0.9"
+rand_chacha = "0.9"
 dirs = "5"
 toml = "0.8"
-# 多人对战 (P2P) 相关.
+time = { version = "0.3", features = ["local-offset"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# async runtime + net
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 futures-util = "0.3"
 libp2p = { version = "0.56", features = [
@@ -58,39 +48,24 @@ libp2p = { version = "0.56", features = [
     "ping",
     "gossipsub",
 ] }
-uuid = { version = "1", features = ["v4", "serde"] }
-# Mental Poker (M4 零信任模式) — 自实现, embed 在 src/mental_poker/.
-# arkworks 0.5 提供 ECC + Fr/Fq scalar/base field 算术. 选 BLS12-381 G1 作普通
-# ECC 群 (不用 pairing), 256-bit Fr 标量域, 安全性 + 生态最广.
+
+# crypto (Mental Poker)
 ark-ec = "0.5"
 ark-ff = "0.5"
 ark-std = "0.5"
 ark-serialize = { version = "0.5", features = ["derive"] }
 ark-bls12-381 = "0.5"
-# Mental Poker Sigma 协议的 Fiat-Shamir transcript (challenge = hash). sha2 已被
-# libp2p 间接引入, 直接拿来用免增加版本碎片.
 sha2 = "0.10"
-# 本地时间 (顶部状态栏 hh:mm:ss). time 已被 libp2p 间接编译, 仅多开
-# `local-offset` feature 用于读取系统时区.
-time = { version = "0.3", features = ["local-offset"] }
 
-[dev-dependencies]
+# tui
+ratatui = "0.30"
+crossterm = "0.28"
+unicode-width = "0.2"
+
+# dev
 pretty_assertions = "1"
 proptest = "1"
-# 仅 tests/replay tenhou mjlog parser 用
 quick-xml = "0.36"
-
-[[bin]]
-name = "tui-majo"
-path = "src/main.rs"
-
-[[bin]]
-name = "tui-majo-game"
-path = "src/bin/game.rs"
-
-[[bin]]
-name = "tui-majo-relay"
-path = "src/bin/relay.rs"
 
 [profile.release]
 lto = "thin"

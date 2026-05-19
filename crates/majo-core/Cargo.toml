@@ -1,0 +1,41 @@
+[package]
+name = "majo-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Riichi mahjong core: engine, AI, mental poker, network protocol."
+
+[features]
+default = []
+# Dev tools: F5/F9 quick savestate + replay recorder. 不带就纯净 release.
+dev-tools = []
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+dirs.workspace = true
+toml.workspace = true
+time.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+libp2p.workspace = true
+ark-ec.workspace = true
+ark-ff.workspace = true
+ark-std.workspace = true
+ark-serialize.workspace = true
+ark-bls12-381.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+proptest.workspace = true
+quick-xml.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,54 @@
+[package]
+name = "tui-majo"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Riichi Mahjong (日本麻将) in your terminal, written in Rust + ratatui"
+readme = "../../README.md"
+keywords = ["mahjong", "riichi", "tui", "ratatui", "japanese"]
+categories = ["games", "command-line-utilities"]
+default-run = "tui-majo"
+exclude = [
+    ".design-package/",
+    "docs/scratch.md",
+    "docs/img/",
+    "*.png",
+]
+
+[features]
+default = []
+# Dev tools 透传到 majo-core. 不带就纯净 release.
+dev-tools = ["majo-core/dev-tools"]
+
+[dependencies]
+majo-core = { path = "../majo-core" }
+anyhow.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+unicode-width.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# bin/game.rs 起 tokio runtime; ui::screens 部分 async helper 也直接 spawn.
+tokio.workspace = true
+# bin/relay.rs 用 libp2p 起独立 relay 节点, 不经 majo-core 转手.
+libp2p.workspace = true
+futures-util.workspace = true
+# ui::screens::game::footer 顶栏时间用 time::OffsetDateTime::now_local
+time.workspace = true
+# ui::screens::config seed 随机化 + ui::mod room_id 生成.
+rand.workspace = true
+uuid.workspace = true
+
+[[bin]]
+name = "tui-majo"
+path = "src/main.rs"
+
+[[bin]]
+name = "tui-majo-game"
+path = "src/bin/game.rs"
+
+[[bin]]
+name = "tui-majo-relay"
+path = "src/bin/relay.rs"
