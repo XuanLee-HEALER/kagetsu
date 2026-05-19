@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>tui-majo · Web</title>
+<link rel="stylesheet" href="colors_and_type.css" />
+<style>
+  body {
+    margin: 0;
+    background: var(--bg-deepest);
+    color: var(--fg-primary);
+    font: var(--t-body);
+  }
+  .intro {
+    padding: 40px 56px 24px;
+    max-width: 1000px;
+  }
+  .intro .eyebrow {
+    font: var(--t-eyebrow);
+    letter-spacing: var(--tracking-widest);
+    text-transform: uppercase;
+    color: var(--fg-tertiary);
+  }
+  .intro h1 {
+    font: var(--t-h2);
+    font-family: var(--font-serif);
+    font-weight: 300;
+    letter-spacing: var(--tracking-tight);
+    margin-top: 12px;
+  }
+  .intro p {
+    font: var(--t-lede);
+    color: var(--fg-secondary);
+    margin-top: 12px;
+    font-style: italic;
+  }
+  .intro .meta {
+    margin-top: 20px;
+    display: flex; gap: 14px; flex-wrap: wrap;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-tertiary);
+  }
+  .intro .meta span {
+    padding: 3px 10px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+  }
+  @keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: 0 } }
+</style>
+</head>
+<body>
+
+<div class="intro">
+  <div class="eyebrow">tui-majo · Web · v2.1.0</div>
+  <h1>主对局 · 配置 · 大厅 · 结算</h1>
+  <p>The full web interface for tui-majo — Standard P2P, ZeroTrust mental poker, and the surfaces that surround a single hand of riichi.</p>
+  <div class="meta">
+    <span>SakyaHuman Design System</span>
+    <span>Dorje · single dark theme</span>
+    <span>IBM Plex Sans · Serif · Mono</span>
+    <span>Svelte-translatable components</span>
+  </div>
+</div>
+
+<div id="root"></div>
+
+<script>
+// Swallow benign ResizeObserver loop warnings (Chromium fires these when
+// design-canvas re-layouts during its own resize observers — harmless).
+window.addEventListener("error", (e) => {
+  if (e.message && e.message.includes("ResizeObserver loop")) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+  }
+});
+</script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="core.jsx"></script>
+<script type="text/babel" src="game-screen.jsx"></script>
+<script type="text/babel" src="action-modal.jsx"></script>
+<script type="text/babel" src="pregame.jsx"></script>
+<script type="text/babel" src="multiplayer.jsx"></script>
+<script type="text/babel" src="results.jsx"></script>
+<script type="text/babel" src="zerotrust.jsx"></script>
+
+<script type="text/babel">
+function App() {
+  return (
+    <DesignCanvas initialZoom={0.55}>
+      <DCSection id="game" title="主对局 · Single player + Standard P2P">
+        <DCArtboard id="g-normal" label="01 ・ Normal" width={1440} height={900}>
+          <GameScreen mode="NORMAL" />
+        </DCArtboard>
+        <DCArtboard id="g-command" label="02 ・ Command 命令输入" width={1440} height={900}>
+          <GameScreen mode="COMMAND" commandText="discard p4" />
+        </DCArtboard>
+        <DCArtboard id="g-modal" label="03 ・ Action modal 唤起" width={1440} height={900}>
+          <GameScreen mode="NORMAL" showActionModal={true} />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="zt" title="ZeroTrust · 零信任 mental poker">
+        <DCArtboard id="zt-game" label="04 ・ ZeroTrust 对局" width={1440} height={900}>
+          <ZeroTrustGameScreen />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="pregame" title="入口 · 主菜单 + 配置">
+        <DCArtboard id="menu" label="05 ・ Main menu" width={1440} height={900}>
+          <MenuScreen />
+        </DCArtboard>
+        <DCArtboard id="config" label="06 ・ Pre-game config" width={1440} height={900}>
+          <ConfigScreen />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="multi" title="多人 · 大厅 + 房间">
+        <DCArtboard id="lobby" label="07 ・ LAN lobby" width={1440} height={900}>
+          <LobbyScreen />
+        </DCArtboard>
+        <DCArtboard id="room" label="08 ・ Room waiting" width={1440} height={900}>
+          <RoomScreen />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="results" title="结算 · 和了 + 终局">
+        <DCArtboard id="hand-result" label="09 ・ Hand result" width={1440} height={900}>
+          <HandResultScreen />
+        </DCArtboard>
+        <DCArtboard id="match-end" label="10 ・ Match end" width={1440} height={900}>
+          <MatchEndScreen />
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+</body>
+</html>
