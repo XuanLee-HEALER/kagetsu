@@ -31,7 +31,7 @@ use tui_majo::engine::phase::Phase;
 use tui_majo::engine::rules::GameRules;
 use tui_majo::net::protocol::{ClientMsg, GameStateView, NetAction, RoomView, ServerMsg};
 use tui_majo::net::room::{RoomCmd, RoomHandle, spawn_room_advanced};
-use tui_majo::ui::screens::game::TileSpec;
+use tui_majo::net::protocol::TileSpec;
 
 /// 默认测试 seed; 改这里影响所有未指定 seed 的用例.
 pub const DEFAULT_SEED: u64 = 0x1234_5678_DEAD_BEEF;

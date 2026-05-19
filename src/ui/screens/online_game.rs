@@ -40,7 +40,7 @@ use crate::ui::paint::{
     paint_discard_grid_wide_hl, paint_fill, paint_hr, paint_hr_accent, paint_meld_row_tight_hl,
     paint_str, paint_tile_tight, paint_tile_wide,
 };
-use crate::ui::screens::game::TileSpec;
+use crate::net::protocol::TileSpec;
 use crate::ui::theme::{Theme, ThemeKind};
 
 /// 自家相对其它三家的方位.

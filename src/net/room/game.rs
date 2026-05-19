@@ -346,7 +346,7 @@ impl RoomActor {
         // hints 始终至少含一条 Discard placeholder (UI 自己枚举具体手牌张).
         let mut hints: Vec<NetAction> = Vec::new();
         // Discard placeholder (kind 任意, UI 不读, 仅作"切牌动作合法"标志).
-        hints.push(NetAction::Discard(crate::ui::screens::game::TileSpec {
+        hints.push(NetAction::Discard(crate::net::protocol::TileSpec {
             kind: crate::engine::domain::tile::TileIndex(0),
         }));
         if let Some(engine) = self.game.as_ref() {
@@ -355,7 +355,7 @@ impl RoomActor {
                 hints.push(NetAction::Tsumo);
             }
             for tile in &opts.riichi_discards {
-                hints.push(NetAction::Riichi(crate::ui::screens::game::TileSpec {
+                hints.push(NetAction::Riichi(crate::net::protocol::TileSpec {
                     kind: tile.kind,
                 }));
             }

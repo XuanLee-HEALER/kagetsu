@@ -21,7 +21,108 @@ use crate::engine::phase::Phase;
 use crate::engine::round_state::RoundWind;
 use crate::engine::rules::GameRules;
 use crate::engine::score::Ranking;
-use crate::ui::screens::game::TileSpec;
+
+// ============================================================================
+// TileSpec — 网络协议层的牌种说明符
+// ============================================================================
+
+/// 牌种说明符: 接受 "5p" / "p5" / "五筒" / "東" 等. 由 `NetAction::Discard/Riichi`
+/// 协议使用.
+///
+/// 历史上定义在 `ui::screens::game`, 但本身没有 ratatui 依赖, 是纯协议域类型.
+/// 解 net → ui 反向耦合时上移至此, 便于 majo-core / tui-majo 分 crate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TileSpec {
+    pub kind: TileIndex,
+}
+
+impl TileSpec {
+    pub fn matches(&self, k: TileIndex) -> bool {
+        self.kind == k
+    }
+}
+
+/// 接受的牌输入:
+/// - ASCII: "5p" / "p5" / "5m" / "9s" / "1z"-"7z" (z = 字牌, 1=東 .. 7=中)
+/// - 中文数字 + 花色: "五筒" / "三索" / "九萬"
+/// - 字牌: "东南西北白发中" / "東南西北白發中"
+pub fn parse_tile_spec(s: &str) -> Option<TileSpec> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // 单字符字牌
+    let kind = match s {
+        "東" | "东" | "1z" | "z1" => Some(TileIndex::EAST),
+        "南" | "2z" | "z2" => Some(TileIndex::SOUTH),
+        "西" | "3z" | "z3" => Some(TileIndex::WEST),
+        "北" | "4z" | "z4" => Some(TileIndex::NORTH),
+        "白" | "5z" | "z5" => Some(TileIndex::HAKU),
+        "發" | "发" | "6z" | "z6" => Some(TileIndex::HATSU),
+        "中" | "7z" | "z7" => Some(TileIndex::CHUN),
+        _ => None,
+    };
+    if let Some(k) = kind {
+        return Some(TileSpec { kind: k });
+    }
+    // ASCII 数字 + 花色 (5p / p5)
+    let ascii_lo = s.to_lowercase();
+    let (n, suit) = parse_num_suit_ascii(&ascii_lo)?;
+    if !(1..=9).contains(&n) {
+        return None;
+    }
+    let base = match suit {
+        'm' => 0u8,
+        'p' => 9,
+        's' => 18,
+        _ => return None,
+    };
+    Some(TileSpec {
+        kind: TileIndex(base + (n - 1) as u8),
+    })
+}
+
+fn parse_num_suit_ascii(s: &str) -> Option<(u32, char)> {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() != 2 {
+        // 试中文数字 + 花色 (e.g. "五筒")
+        return parse_cn_num_suit(s);
+    }
+    let (a, b) = (chars[0], chars[1]);
+    if a.is_ascii_digit() {
+        Some((a.to_digit(10)?, b))
+    } else if b.is_ascii_digit() {
+        Some((b.to_digit(10)?, a))
+    } else {
+        parse_cn_num_suit(s)
+    }
+}
+
+fn parse_cn_num_suit(s: &str) -> Option<(u32, char)> {
+    const CN_NUM: &[(&str, u32)] = &[
+        ("一", 1),
+        ("二", 2),
+        ("三", 3),
+        ("四", 4),
+        ("五", 5),
+        ("六", 6),
+        ("七", 7),
+        ("八", 8),
+        ("九", 9),
+    ];
+    for (cn, n) in CN_NUM {
+        if let Some(rest) = s.strip_prefix(cn) {
+            let suit = match rest {
+                "萬" | "万" => 'm',
+                "筒" | "饼" => 'p',
+                "索" | "条" => 's',
+                _ => return None,
+            };
+            return Some((*n, suit));
+        }
+    }
+    None
+}
 
 // ============================================================================
 // Client → Server
@@ -415,5 +516,17 @@ mod tests {
             let back: RoomLifecycle = serde_json::from_str(&s).unwrap();
             assert_eq!(v, back);
         }
+    }
+
+    #[test]
+    fn parse_tile_spec_variants() {
+        assert_eq!(parse_tile_spec("5p").unwrap().kind, TileIndex(13));
+        assert_eq!(parse_tile_spec("p5").unwrap().kind, TileIndex(13));
+        assert_eq!(parse_tile_spec("9m").unwrap().kind, TileIndex(8));
+        assert_eq!(parse_tile_spec("1s").unwrap().kind, TileIndex(18));
+        assert_eq!(parse_tile_spec("中").unwrap().kind, TileIndex::CHUN);
+        assert_eq!(parse_tile_spec("发").unwrap().kind, TileIndex::HATSU);
+        assert!(parse_tile_spec("0p").is_none());
+        assert!(parse_tile_spec("xx").is_none());
     }
 }

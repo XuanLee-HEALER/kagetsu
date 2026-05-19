@@ -233,7 +233,7 @@ async fn ai_drives_when_seat_is_ai() {
         .send(RoomCmd::PlayerMsg {
             player_id: host_id,
             msg: ClientMsg::Action(crate::net::protocol::NetAction::Discard(
-                crate::ui::screens::game::TileSpec {
+                crate::net::protocol::TileSpec {
                     kind: first_tile.kind,
                 },
             )),
@@ -818,7 +818,7 @@ fn handle_action_state_not_in_game_is_noop() {
     // 用 fake 切牌 spec; 因为 state != InGame, 应直接返回不调用 engine.
     actor.handle_action(
         1,
-        NetAction::Discard(crate::ui::screens::game::TileSpec { kind: TileIndex(0) }),
+        NetAction::Discard(crate::net::protocol::TileSpec { kind: TileIndex(0) }),
     );
     assert_eq!(actor.game.as_ref().unwrap().phase(), phase_before);
 }
@@ -829,7 +829,7 @@ fn handle_action_unknown_player_is_noop() {
     let phase_before = actor.game.as_ref().unwrap().phase();
     actor.handle_action(
         999,
-        NetAction::Discard(crate::ui::screens::game::TileSpec { kind: TileIndex(0) }),
+        NetAction::Discard(crate::net::protocol::TileSpec { kind: TileIndex(0) }),
     );
     assert_eq!(actor.game.as_ref().unwrap().phase(), phase_before);
 }
