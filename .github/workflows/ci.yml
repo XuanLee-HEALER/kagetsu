@@ -36,7 +36,10 @@ jobs:
         run: cargo clippy -p kagetsu-core --all-targets --features dev-tools -- -D warnings
 
       - name: Test (lib)
-        run: cargo test -p kagetsu-core --lib --features dev-tools
+        # --test-threads=1: mp actor e2e 是重加密测试, 并行下会被 CPU 争抢
+        # 饿死 (cargo 并行 × 每测试 worker_threads=4 runtime)。串行让每个
+        # 测试独占 runner CPU, 才能在 run_bridge 的步数预算内跑完。
+        run: cargo test -p kagetsu-core --lib --features dev-tools -- --test-threads=1
 
   coverage:
     name: coverage (kagetsu-core)
@@ -58,7 +61,8 @@ jobs:
           tool: cargo-llvm-cov
 
       - name: Generate coverage (lcov)
-        run: cargo llvm-cov -p kagetsu-core --lib --features dev-tools --ignore-run-fail --lcov --output-path lcov.info
+        # 同 test job: --test-threads=1 避免 mp e2e 测试被 CPU 争抢饿死。
+        run: cargo llvm-cov -p kagetsu-core --lib --features dev-tools --ignore-run-fail --lcov --output-path lcov.info -- --test-threads=1
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
