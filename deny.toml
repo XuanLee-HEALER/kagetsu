@@ -1,0 +1,42 @@
+# cargo-deny 配置 —— 依赖许可证 / 安全公告 / 来源审计
+#
+# 用法:
+#   cargo install cargo-deny
+#   cargo deny check
+#
+# 本项目自身为 GPL-3.0-or-later。下面的 allow 列表来自 2026-05 的依赖审计:
+# 全工作区 509 个依赖的许可证均为宽松型,与 GPL-3 兼容。新增依赖若引入
+# 列表外的许可证,`cargo deny check` 会失败,需人工确认兼容性后再加进来。
+
+[advisories]
+version = 2
+# RUSTSEC 安全公告:有漏洞 / 被 yank 的依赖直接 deny(默认行为)。
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "BSL-1.0",
+    "WTFPL",
+]
+
+[bans]
+# 同一依赖出现多版本只告警,不阻断(传递依赖难免)。
+multiple-versions = "warn"
+
+[sources]
+# 只信任 crates.io;未知 registry / git 源一律拒绝。
+unknown-registry = "deny"
+unknown-git = "deny"
