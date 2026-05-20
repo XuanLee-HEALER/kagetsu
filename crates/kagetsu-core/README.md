@@ -1,5 +1,8 @@
 # kagetsu-core
 
+[![CI](https://github.com/XuanLee-HEALER/kagetsu/actions/workflows/ci.yml/badge.svg)](https://github.com/XuanLee-HEALER/kagetsu/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/XuanLee-HEALER/kagetsu/branch/main/graph/badge.svg)](https://codecov.io/gh/XuanLee-HEALER/kagetsu)
+
 > [kagetsu](../../README.md) 项目的麻将引擎核心。
 
 日本麻将的规则引擎、AI、mental poker 协议与网络层 —— 不依赖任何 UI，纯算法 + 网络。kagetsu 的两个 UI（[`kagetsu`](../kagetsu) 终端版、[`kagetsu-web`](../kagetsu-web) 网页版）都建在它之上，也可作为独立库单独引入。
