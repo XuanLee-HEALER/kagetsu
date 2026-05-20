@@ -1,0 +1,9 @@
+# 把构建 context 收窄, 别把 target/ node_modules/ .git/ 塞进 docker daemon。
+target/
+**/node_modules/
+.git/
+dist/
+*.log
+.claude/
+.design-package/
+THIRD-PARTY-LICENSES.html

@@ -1,0 +1,11 @@
+# kagetsu-web 自部署 —— 在仓库根执行 `docker compose up`。
+services:
+  kagetsu-web:
+    build:
+      context: .
+      dockerfile: crates/kagetsu-web/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      RUST_LOG: "info,tower_http=info"
+    restart: unless-stopped
