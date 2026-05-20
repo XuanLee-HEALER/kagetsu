@@ -1,7 +1,10 @@
 # kagetsu-web
 
+> [kagetsu](../../README.md) 项目的网页版节点。
+
 自部署 web 节点 —— browser 通过 WebSocket 连本地 backend,跨节点对局
-复用 `kagetsu_core::net` (libp2p) 加入同一个 P2P 网络。
+复用 `kagetsu_core::net` (libp2p) 加入同一个 P2P 网络。规则、役种、
+多人模式说明见[主项目 README](../../README.md)。
 
 ## 当前状态 (workspace-refactor 分支)
 
