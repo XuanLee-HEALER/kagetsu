@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = kagetsu_tui::ui::App::new(handle).run(&mut terminal);
+    let result = kagetsu::ui::App::new(handle).run(&mut terminal);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -46,13 +46,13 @@ fn main() -> Result<()> {
 /// 初始化 tracing.
 ///
 /// 默认写文件 (临时目录 / kagetsu.log), 不打到 stderr 避免污染 ratatui TUI.
-/// 默认过滤 `warn,kagetsu_tui=info,libp2p=warn` — libp2p 各 crate 的 INFO 太冗余, 仅保留 warn+.
-/// 用户可通过 `RUST_LOG` 环境变量覆盖, 例: `RUST_LOG=debug` 或 `RUST_LOG=kagetsu_tui=trace,libp2p=info`.
+/// 默认过滤 `warn,kagetsu=info,libp2p=warn` — libp2p 各 crate 的 INFO 太冗余, 仅保留 warn+.
+/// 用户可通过 `RUST_LOG` 环境变量覆盖, 例: `RUST_LOG=debug` 或 `RUST_LOG=kagetsu=trace,libp2p=info`.
 /// 文件打不开时静默降级 (绝不 fallback 到 stderr).
 fn init_tracing() {
     let log_path = std::env::temp_dir().join("kagetsu.log");
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,kagetsu_tui=info,libp2p=warn"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,kagetsu=info,libp2p=warn"));
 
     if let Ok(file) = std::fs::OpenOptions::new()
         .create(true)

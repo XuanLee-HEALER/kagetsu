@@ -1,12 +1,12 @@
 [package]
-name = "kagetsu-tui"
+name = "kagetsu"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Riichi Mahjong (日本麻将) in your terminal, written in Rust + ratatui"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["mahjong", "riichi", "tui", "ratatui", "japanese"]
 categories = ["games", "command-line-utilities"]
 default-run = "kagetsu"

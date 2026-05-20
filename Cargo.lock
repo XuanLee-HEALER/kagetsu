@@ -1880,6 +1880,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "kagetsu"
+version = "2.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm 0.28.1",
+ "futures-util",
+ "kagetsu-core",
+ "libp2p",
+ "rand 0.9.4",
+ "ratatui",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width",
+ "uuid",
+]
+
+[[package]]
 name = "kagetsu-core"
 version = "2.1.0"
 dependencies = [
@@ -1906,25 +1925,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "kagetsu-tui"
-version = "2.1.0"
-dependencies = [
- "anyhow",
- "crossterm 0.28.1",
- "futures-util",
- "kagetsu-core",
- "libp2p",
- "rand 0.9.4",
- "ratatui",
- "time",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "unicode-width",
  "uuid",
 ]
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kagetsu-core", "crates/kagetsu-tui", "crates/kagetsu-web"]
+members = ["crates/kagetsu-core", "crates/kagetsu", "crates/kagetsu-web"]
 
 [workspace.package]
 edition = "2024"

@@ -13,10 +13,10 @@
 # Windows 上用 PowerShell 7 跑 recipe (其它平台仍用默认 sh).
 set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 
-# 默认 RUST_LOG: libp2p 内部 INFO 太冗余 (会撞 TUI), 仅留 warn+; 自家 kagetsu_tui 留 info.
+# 默认 RUST_LOG: libp2p 内部 INFO 太冗余 (会撞 TUI), 仅留 warn+; 自家 kagetsu 留 info.
 # 日志默认写到 %TEMP%/kagetsu.log (见 src/bin/game.rs::init_tracing).
 # 临时覆盖: `RUST_LOG=debug just play` (其它) / `$env:RUST_LOG="debug"; just play` (Windows).
-export RUST_LOG := env_var_or_default("RUST_LOG", "warn,kagetsu_tui=info,libp2p=warn")
+export RUST_LOG := env_var_or_default("RUST_LOG", "warn,kagetsu=info,libp2p=warn")
 
 # ============================================================
 # 默认: 列出 recipes
