@@ -8,9 +8,9 @@
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use libp2p::{Multiaddr, identify, multiaddr::Protocol, swarm::SwarmEvent};
 use kagetsu_core::net::p2p::behaviour::P2pBehaviourEvent;
 use kagetsu_core::net::p2p::swarm::{build_swarm, new_keypair};
+use libp2p::{Multiaddr, identify, multiaddr::Protocol, swarm::SwarmEvent};
 
 const CLAW_QUIC: &str =
     "/ip4/47.84.49.170/udp/4001/quic-v1/p2p/12D3KooWDCnWrarKrN7aeVarDn2NpJwz7XdPWDXvgnHEvmARubYP";

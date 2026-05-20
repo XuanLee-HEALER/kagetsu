@@ -2355,14 +2355,12 @@ mod tests {
                         id: 303,
                     }, // 4 张 1m → 暗杠
                 ];
-                let mut id = 310u16;
-                for k in 1..=10u8 {
+                for (id, k) in (310u16..).zip(1..=10u8) {
                     hand.push(Tile {
                         kind: TileIndex(k),
                         red: false,
                         id,
                     });
-                    id += 1;
                 }
                 s.common.players[Seat::East.index()].hand.closed = hand;
                 s.origin = AwaitDiscardOrigin::AfterDraw {
@@ -2837,14 +2835,12 @@ mod tests {
                         id: 1103,
                     },
                 ];
-                let mut id = 1110u16;
-                for k in 0..10u8 {
+                for (id, k) in (1110u16..).zip(0..10u8) {
                     hand.push(Tile {
                         kind: TileIndex(k),
                         red: false,
                         id,
                     });
-                    id += 1;
                 }
                 s.common.players[Seat::East.index()].hand.closed = hand;
                 s.origin = AwaitDiscardOrigin::AfterDraw {

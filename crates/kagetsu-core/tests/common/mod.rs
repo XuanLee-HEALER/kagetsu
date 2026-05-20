@@ -29,9 +29,9 @@ use kagetsu_core::engine::domain::tile::{Tile, TileIndex};
 use kagetsu_core::engine::event::GameEvent;
 use kagetsu_core::engine::phase::Phase;
 use kagetsu_core::engine::rules::GameRules;
+use kagetsu_core::net::protocol::TileSpec;
 use kagetsu_core::net::protocol::{ClientMsg, GameStateView, NetAction, RoomView, ServerMsg};
 use kagetsu_core::net::room::{RoomCmd, RoomHandle, spawn_room_advanced};
-use kagetsu_core::net::protocol::TileSpec;
 
 /// 默认测试 seed; 改这里影响所有未指定 seed 的用例.
 pub const DEFAULT_SEED: u64 = 0x1234_5678_DEAD_BEEF;
