@@ -178,7 +178,7 @@ gh repo rename kage --repo XuanLee-HEALER/tui-majo
 GitHub 自动:
 
 - 把 `XuanLee-HEALER/tui-majo` → `XuanLee-HEALER/kage`
-- 设置 **301 永久重定向**,老 URL (`github.com/XuanLee-HEALER/tui-majo`, releases、issues、PRs 链接)继续可用
+- 设置 **301 永久重定向**,老 URL (`github.com/XuanLee-HEALER/kagetsu`, releases、issues、PRs 链接)继续可用
 - `git clone` 老地址会拿到 redirect,不需要现有用户立刻改 remote
 
 ### 2.2 更新本地 git remote(可选但推荐)
@@ -194,7 +194,7 @@ git remote -v   # 验证
 
 ```bash
 sed -i '' \
-  -e 's|https://github.com/XuanLee-HEALER/tui-majo|https://github.com/XuanLee-HEALER/kage|g' \
+  -e 's|https://github.com/XuanLee-HEALER/kagetsu|https://github.com/XuanLee-HEALER/kage|g' \
   Cargo.toml
 ```
 
@@ -457,7 +457,7 @@ grep -n "^description" crates/*/Cargo.toml
 ```markdown
 ## ⚠️ Breaking: 项目改名 tui-majo → kage
 
-- 仓库 URL: github.com/XuanLee-HEALER/tui-majo → github.com/XuanLee-HEALER/kage (301 redirect 自动跳转)
+- 仓库 URL: github.com/XuanLee-HEALER/kagetsu → github.com/XuanLee-HEALER/kage (301 redirect 自动跳转)
 - crates.io: `tui-majo` (deprecated) → `kage-tui` + `kage-core`
 - 安装命令: `cargo install tui-majo` → `cargo install kage-tui`
 - 启动命令: `tui-majo` → `kage`

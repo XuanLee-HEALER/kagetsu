@@ -75,11 +75,11 @@ GitHub Actions 上能看到 `Release` workflow 在跑。三平台 build 大概
 
 ```bash
 # 拿 arm64 macOS archive (Apple Silicon)
-curl -L -o /tmp/tm-arm.tar.gz https://github.com/XuanLee-HEALER/tui-majo/releases/download/v2.1.0/tui-majo-2.1.0-aarch64-apple-darwin.tar.gz
+curl -L -o /tmp/tm-arm.tar.gz https://github.com/XuanLee-HEALER/kagetsu/releases/download/v2.1.0/tui-majo-2.1.0-aarch64-apple-darwin.tar.gz
 shasum -a 256 /tmp/tm-arm.tar.gz
 
 # x86_64 macOS archive (Intel)
-curl -L -o /tmp/tm-x64.tar.gz https://github.com/XuanLee-HEALER/tui-majo/releases/download/v2.1.0/tui-majo-2.1.0-x86_64-apple-darwin.tar.gz
+curl -L -o /tmp/tm-x64.tar.gz https://github.com/XuanLee-HEALER/kagetsu/releases/download/v2.1.0/tui-majo-2.1.0-x86_64-apple-darwin.tar.gz
 shasum -a 256 /tmp/tm-x64.tar.gz
 ```
 
@@ -88,15 +88,15 @@ shasum -a 256 /tmp/tm-x64.tar.gz
 ```ruby
 class TuiMajo < Formula
   desc "Riichi Mahjong (日本麻将) in your terminal"
-  homepage "https://github.com/XuanLee-HEALER/tui-majo"
+  homepage "https://github.com/XuanLee-HEALER/kagetsu"
   version "2.1.0"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/XuanLee-HEALER/tui-majo/releases/download/v2.1.0/tui-majo-2.1.0-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/XuanLee-HEALER/kagetsu/releases/download/v2.1.0/tui-majo-2.1.0-aarch64-apple-darwin.tar.gz"
       sha256 "<arm64 sha>"
     else
-      url "https://github.com/XuanLee-HEALER/tui-majo/releases/download/v2.1.0/tui-majo-2.1.0-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/XuanLee-HEALER/kagetsu/releases/download/v2.1.0/tui-majo-2.1.0-x86_64-apple-darwin.tar.gz"
       sha256 "<x64 sha>"
     end
   end

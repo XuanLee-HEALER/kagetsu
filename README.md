@@ -70,7 +70,7 @@ cargo install tui-majo
 或者从源码：
 
 ```sh
-git clone https://github.com/XuanLee-HEALER/tui-majo.git
+git clone https://github.com/XuanLee-HEALER/kagetsu.git
 cd tui-majo
 cargo install --path .
 ```
@@ -198,7 +198,7 @@ src/
 
 ## 参与开发
 
-欢迎提 [issue](https://github.com/XuanLee-HEALER/tui-majo/issues) 和 PR 一起来折腾。bug 反馈、规则细节修正、新役种、新功能、AI 改进、UI 调整都欢迎。
+欢迎提 [issue](https://github.com/XuanLee-HEALER/kagetsu/issues) 和 PR 一起来折腾。bug 反馈、规则细节修正、新役种、新功能、AI 改进、UI 调整都欢迎。
 
 ## 许可证
 

@@ -113,8 +113,8 @@ members = ["crates/majo-core", "crates/tui-majo", "crates/web-majo"]
 edition = "2024"
 version = "2.1.0"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/XuanLee-HEALER/tui-majo"
-homepage = "https://github.com/XuanLee-HEALER/tui-majo"
+repository = "https://github.com/XuanLee-HEALER/kagetsu"
+homepage = "https://github.com/XuanLee-HEALER/kagetsu"
 
 [workspace.dependencies]
 # common
