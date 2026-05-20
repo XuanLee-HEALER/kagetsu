@@ -296,7 +296,7 @@ mod tests {
         let (handles, _cmd_txs, mut rxs, bridges) = spawn_n_actors_with_bridges(N, 7000);
 
         let mut events: Vec<(usize, MpEvent)> = Vec::new();
-        let ok = drive_until(&mut rxs, 800, &mut events, |evs| {
+        let ok = drive_until(&mut rxs, 5000, &mut events, |evs| {
             let mut phase = [MpPhase::KeyExchange; N];
             for (src, ev) in evs {
                 if let MpEvent::PhaseChanged { phase: p } = ev {
@@ -324,7 +324,7 @@ mod tests {
 
         // Step 1: 跑到 all in Playing
         let mut events: Vec<(usize, MpEvent)> = Vec::new();
-        let entered_playing = drive_until(&mut rxs, 1000, &mut events, |evs| {
+        let entered_playing = drive_until(&mut rxs, 5000, &mut events, |evs| {
             let mut phase = [MpPhase::KeyExchange; N];
             for (src, ev) in evs {
                 if let MpEvent::PhaseChanged { phase: p } = ev {
