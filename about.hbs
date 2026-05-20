@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>kagetsu — Third-Party Licenses</title>
+    <style>
+      body { font-family: system-ui, -apple-system, sans-serif; margin: 2rem auto; max-width: 60rem; padding: 0 1rem; color: #1a1a1a; }
+      h1 { border-bottom: 1px solid #ccc; padding-bottom: .3rem; }
+      h3 { margin-top: 2rem; }
+      .license-text { white-space: pre-wrap; background: #f6f6f6; padding: 1rem; border-radius: 4px; font-size: .8rem; overflow-x: auto; }
+      .used-by { font-size: .9rem; color: #555; }
+      ul { line-height: 1.7; }
+      a { color: #2b6cb0; }
+    </style>
+  </head>
+  <body>
+    <h1>Third-Party Licenses</h1>
+    <p>
+      kagetsu 以 GPL-3.0-or-later 分发。下列第三方依赖以各自的许可证提供,
+      其许可证文本一并附于此,以履行 MIT / BSD / Apache 等许可证的署名与
+      许可证文本保留义务。本文件由 <code>cargo-about</code> 自动生成。
+    </p>
+
+    <h2>许可证概览</h2>
+    <ul>
+      {{#each overview}}
+      <li><a href="#{{id}}">{{name}}</a> — {{count}} 个 crate</li>
+      {{/each}}
+    </ul>
+
+    <h2>许可证全文</h2>
+    {{#each licenses}}
+    <h3 id="{{id}}">{{name}}</h3>
+    <p class="used-by">Used by:
+      {{#each used_by}}<a href="{{crate.repository}}">{{crate.name}} {{crate.version}}</a>{{#unless @last}}, {{/unless}}{{/each}}
+    </p>
+    <pre class="license-text">{{text}}</pre>
+    {{/each}}
+  </body>
+</html>

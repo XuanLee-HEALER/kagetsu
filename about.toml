@@ -1,0 +1,41 @@
+# cargo-about 配置 —— 生成随二进制分发的第三方依赖许可证汇总。
+#
+# 用法:
+#   cargo install cargo-about
+#   cargo about generate -o THIRD-PARTY-LICENSES.html about.hbs
+#
+# 项目自身 GPL-3.0-or-later。宽松依赖(MIT / BSD / Apache 等)要求在分发物中
+# 保留其许可证文本 —— 这份汇总即用于履行该义务,由 release.yml 打进 tar/zip。
+# 准入检查(新依赖许可证兼不兼容)是另一回事,见 deny.toml。
+
+# 覆盖全部发布目标,保证许可证集合完整(含各平台专属依赖,如 windows-sys)。
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+# dev-dependencies(proptest / pretty_assertions 等)不进最终二进制,排除。
+ignore-dev-dependencies = true
+
+# 允许出现的许可证。来自 2026-05 依赖审计;缺任何一个,
+# `cargo about generate` 会报错。OR 表达式 cargo-about 会按此列表顺序挑第一个
+# 满足的(故 MIT 排在 Apache-2.0 前,双授权依赖优先取 MIT)。
+accepted = [
+    "GPL-3.0-or-later",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "BSL-1.0",
+    "WTFPL",
+]

@@ -55,19 +55,29 @@ jobs:
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }} --bins
 
+      # 生成第三方依赖许可证汇总, 随发布物分发 —— GPL-3 下宽松依赖
+      # (MIT/BSD/Apache 等) 的署名与许可证文本保留义务。配置见 about.toml。
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
+      - name: Generate third-party licenses
+        run: cargo about generate -o THIRD-PARTY-LICENSES.html about.hbs
+
       - name: Package (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          name="tui-majo-${version}-${{ matrix.target }}"
+          name="kagetsu-${version}-${{ matrix.target }}"
           stage="dist/${name}"
           mkdir -p "${stage}"
-          cp "target/${{ matrix.target }}/release/tui-majo" "${stage}/"
-          cp "target/${{ matrix.target }}/release/tui-majo-game" "${stage}/"
-          cp "target/${{ matrix.target }}/release/tui-majo-relay" "${stage}/"
-          cp README.md LICENSE "${stage}/"
+          cp "target/${{ matrix.target }}/release/kagetsu" "${stage}/"
+          cp "target/${{ matrix.target }}/release/kagetsu-game" "${stage}/"
+          cp "target/${{ matrix.target }}/release/kagetsu-relay" "${stage}/"
+          cp README.md LICENSE THIRD-PARTY-LICENSES.html "${stage}/"
           tar czf "dist/${name}.tar.gz" -C dist "${name}"
           (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
           ls -lh dist/
@@ -78,13 +88,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $version = $env:GITHUB_REF_NAME -replace '^v',''
-          $name = "tui-majo-$version-${{ matrix.target }}"
+          $name = "kagetsu-$version-${{ matrix.target }}"
           $stage = "dist/$name"
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/tui-majo.exe" "$stage/"
-          Copy-Item "target/${{ matrix.target }}/release/tui-majo-game.exe" "$stage/"
-          Copy-Item "target/${{ matrix.target }}/release/tui-majo-relay.exe" "$stage/"
-          Copy-Item README.md, LICENSE -Destination $stage
+          Copy-Item "target/${{ matrix.target }}/release/kagetsu.exe" "$stage/"
+          Copy-Item "target/${{ matrix.target }}/release/kagetsu-game.exe" "$stage/"
+          Copy-Item "target/${{ matrix.target }}/release/kagetsu-relay.exe" "$stage/"
+          Copy-Item README.md, LICENSE, THIRD-PARTY-LICENSES.html -Destination $stage
           Compress-Archive -Path $stage -DestinationPath "dist/$name.zip"
           $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File "dist/$name.zip.sha256" -Encoding ASCII
@@ -134,7 +144,7 @@ jobs:
       - name: Submit to winget-pkgs
         uses: vedantmgoyal2009/winget-releaser@v2
         with:
-          identifier: XuanLeeHEALER.tui-majo
+          identifier: XuanLeeHEALER.kagetsu
           version: ${{ github.ref_name }}
           installers-regex: 'x86_64-pc-windows-msvc\.zip$'
           token: ${{ secrets.WINGET_TOKEN }}

@@ -2,3 +2,6 @@
 /.design-package
 /.claude/
 /docs/scratch.md
+
+# cargo-about 生成物 (release.yml 在 CI 里重新生成, 不提交)
+/THIRD-PARTY-LICENSES.html
