@@ -1880,6 +1880,69 @@ dependencies = [
 ]
 
 [[package]]
+name = "kagetsu-core"
+version = "2.1.0"
+dependencies = [
+ "anyhow",
+ "ark-bls12-381",
+ "ark-ec",
+ "ark-ff",
+ "ark-serialize",
+ "ark-std",
+ "dirs",
+ "futures-util",
+ "libp2p",
+ "pretty_assertions",
+ "proptest",
+ "quick-xml",
+ "rand 0.9.4",
+ "rand_chacha 0.9.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "kagetsu-tui"
+version = "2.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm 0.28.1",
+ "futures-util",
+ "kagetsu-core",
+ "libp2p",
+ "rand 0.9.4",
+ "ratatui",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width",
+ "uuid",
+]
+
+[[package]]
+name = "kagetsu-web"
+version = "2.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "kagetsu-core",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "kasuari"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2482,36 +2545,6 @@ checksum = "c0aeb26bf5e836cc1c341c8106051b573f1766dfa05aa87f0b98be5e51b02303"
 dependencies = [
  "nix 0.29.0",
  "winapi",
-]
-
-[[package]]
-name = "majo-core"
-version = "2.1.0"
-dependencies = [
- "anyhow",
- "ark-bls12-381",
- "ark-ec",
- "ark-ff",
- "ark-serialize",
- "ark-std",
- "dirs",
- "futures-util",
- "libp2p",
- "pretty_assertions",
- "proptest",
- "quick-xml",
- "rand 0.9.4",
- "rand_chacha 0.9.0",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -4381,25 +4414,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
-name = "tui-majo"
-version = "2.1.0"
-dependencies = [
- "anyhow",
- "crossterm 0.28.1",
- "futures-util",
- "libp2p",
- "majo-core",
- "rand 0.9.4",
- "ratatui",
- "time",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "unicode-width",
- "uuid",
-]
-
-[[package]]
 name = "typenum"
 version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4675,20 +4689,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
-]
-
-[[package]]
-name = "web-majo"
-version = "2.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "majo-core",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

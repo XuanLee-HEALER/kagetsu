@@ -1,0 +1,18 @@
+[package]
+name = "kagetsu-web"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Self-hosted web node for kagetsu — axum server + svelte UI."
+
+[dependencies]
+kagetsu-core = { path = "../kagetsu-core" }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true

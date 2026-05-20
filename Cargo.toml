@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/majo-core", "crates/tui-majo", "crates/web-majo"]
+members = ["crates/kagetsu-core", "crates/kagetsu-tui", "crates/kagetsu-web"]
 
 [workspace.package]
 edition = "2024"
@@ -62,7 +62,7 @@ ratatui = "0.30"
 crossterm = "0.28"
 unicode-width = "0.2"
 
-# web (web-majo)
+# web (kagetsu-web)
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
